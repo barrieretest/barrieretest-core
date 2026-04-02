@@ -11,7 +11,7 @@
  * The entire process is non-blocking — failures are logged and swallowed.
  */
 
-import type { Page } from "puppeteer";
+import type { BrowserPage } from "./browser.js";
 
 /** Max time the entire dismissal attempt may take before we bail out. */
 const DISMISS_TIMEOUT_MS = 5_000;
@@ -120,40 +120,36 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Find a visible element matching one of the known CMP selectors and click it
- * via Puppeteer (proper mouse-event dispatch).
+ * from within the page context.
  */
-async function tryKnownCMPSelectors(page: Page): Promise<boolean> {
-  // Single evaluate call: find the first visible matching selector.
-  const matchedSelector: string | null = await page.evaluate((selectors: string[]) => {
+async function tryKnownCMPSelectors(page: BrowserPage): Promise<boolean> {
+  // Single evaluate call: find and click the first visible matching selector.
+  const clicked: boolean = await page.evaluate((selectors: string[]) => {
     for (const selector of selectors) {
       try {
-        const el = document.querySelector(selector);
+        const el = document.querySelector(selector) as HTMLElement | null;
         if (el) {
           const rect = el.getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0) {
-            return selector;
+            el.click();
+            return true;
           }
         }
       } catch {
         // Invalid selector — skip.
       }
     }
-    return null;
+    return false;
   }, KNOWN_CMP_SELECTORS);
 
-  if (matchedSelector) {
-    await page.click(matchedSelector);
-    return true;
-  }
-
-  return false;
+  return clicked;
 }
 
 /**
  * Scan all interactive elements for common accept-cookie text patterns and
  * click the first visible match from within the page context.
  */
-async function tryTextBasedDismissal(page: Page): Promise<boolean> {
+async function tryTextBasedDismissal(page: BrowserPage): Promise<boolean> {
   const clickedText: string | null = await page.evaluate((acceptTexts: string[]) => {
     const candidates = Array.from(
       document.querySelectorAll(
@@ -208,7 +204,7 @@ async function tryTextBasedDismissal(page: Page): Promise<boolean> {
  *          After a successful dismissal the function waits
  *          {@link POST_DISMISS_WAIT_MS} for the UI to settle.
  */
-export async function dismissCookieBanner(page: Page): Promise<boolean> {
+export async function dismissCookieBanner(page: BrowserPage): Promise<boolean> {
   const attempt = async (): Promise<boolean> => {
     // Strategy 1 — known CMP selectors
     if (await tryKnownCMPSelectors(page)) return true;

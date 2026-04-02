@@ -33,13 +33,6 @@ export interface SearchOptions {
   maxFiles?: number;
 }
 
-/**
- * Extended page type with full evaluate signature
- */
-type PageWithEvaluate = BrowserPage & {
-  evaluate: <T, Args extends unknown[]>(fn: (...args: Args) => T, ...args: Args) => Promise<T>;
-};
-
 const DEFAULT_EXTENSIONS = [".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte"];
 const DEFAULT_EXCLUDE_DIRS = ["node_modules", ".git", "dist", "build", ".next", "coverage"];
 const DEFAULT_MAX_FILES = 1000;
@@ -51,9 +44,7 @@ export async function extractSearchableIdentifiers(
   page: BrowserPage,
   selector: string
 ): Promise<string[]> {
-  const evalPage = page as PageWithEvaluate;
-
-  const identifiers = await evalPage.evaluate((selector: string): string[] => {
+  const identifiers = await page.evaluate((selector: string): string[] => {
     const element = document.querySelector(selector);
     if (!element) return [];
 

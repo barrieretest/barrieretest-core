@@ -10,6 +10,13 @@ import type { ScoreInterpretation, SeverityLevel, TransformedIssue } from "./sco
 export type IssueSeverity = "critical" | "serious" | "moderate" | "minor";
 
 /**
+ * Accessibility engine to use for audits.
+ * - "axe": axe-core (default) — runs directly in the page, works with any browser
+ * - "pa11y": pa11y with HTML CodeSniffer — requires puppeteer
+ */
+export type AuditEngine = "axe" | "pa11y";
+
+/**
  * Severity hierarchy for filtering (higher index = more severe)
  */
 export const SEVERITY_HIERARCHY: IssueSeverity[] = ["minor", "moderate", "serious", "critical"];
@@ -53,10 +60,19 @@ export type AuditTarget = string | BrowserPage;
  */
 export interface AuditOptions {
   /**
-   * Pa11y runners to use.
+   * Accessibility engine to use.
+   * - "axe": axe-core (default) — works with any browser page
+   * - "pa11y": pa11y with HTML CodeSniffer — requires puppeteer
+   * @default "axe"
+   */
+  engine?: AuditEngine;
+
+  /**
+   * Pa11y runners to use. Only relevant when `engine` is `'pa11y'`.
    * - "htmlcs": HTML CodeSniffer (default)
-   * - "axe": axe-core
+   * - "axe": axe-core (pa11y's built-in runner)
    * @default ["htmlcs"]
+   * @deprecated Use `engine: 'axe'` instead of `runners: ['axe']`.
    */
   runners?: ("htmlcs" | "axe")[];
 

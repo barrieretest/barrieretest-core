@@ -1,7 +1,13 @@
 import { enhanceWithAI } from "./ai/index.js";
 import { processAuditWithBaseline } from "./baseline/integration.js";
-import { type BrowserPage, isPlaywrightPage, isPuppeteerPage, isUrl } from "./browser.js";
-import { runPa11y } from "./engines/pa11y.js";
+import {
+  type BrowserPage,
+  isBrowserPage,
+  isPlaywrightPage,
+  isPuppeteerPage,
+  isUrl,
+} from "./browser.js";
+import { runAxeCore } from "./engines/axe.js";
 import { type LocalizationOptions, localizeIssues } from "./localization/index.js";
 import {
   calculateScore,
@@ -46,14 +52,19 @@ function filterIssues(
  * ```typescript
  * import { audit } from '@barrieretest/core';
  *
+ * // Uses axe-core by default
  * const result = await audit('https://example.com');
- * const filtered = await audit('https://example.com', { minSeverity: 'serious' });
+ *
+ * // Use pa11y engine (requires puppeteer + pa11y)
+ * const pa11yResult = await audit('https://example.com', { engine: 'pa11y' });
+ *
+ * // Pass a Playwright or Puppeteer page directly
  * const fromPage = await audit(page);
  * ```
  */
 export async function audit(target: AuditTarget, options: AuditOptions = {}): Promise<AuditResult> {
   const {
-    runners = ["htmlcs"],
+    engine = "axe",
     viewport = { width: 1280, height: 720 },
     headless = true,
     timeout,
@@ -73,33 +84,81 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
 
   if (isUrl(target)) {
     url = target;
-  } else if (isPuppeteerPage(target)) {
+  } else if (isPuppeteerPage(target) || isPlaywrightPage(target) || isBrowserPage(target)) {
     page = target;
     url = target.url();
-  } else if (isPlaywrightPage(target)) {
-    throw new Error("Playwright pages are not supported directly. Pass a URL or Puppeteer page.");
   } else {
-    throw new Error("Invalid target: expected a URL string or Puppeteer page");
+    throw new Error("Invalid target: expected a URL string or browser page");
   }
 
-  const pa11yResult = await runPa11y(url, {
-    runners,
-    viewport,
-    headless,
-    timeout,
-    onProgress,
-    page,
-  });
+  // ---- Run the selected engine ----
 
-  const filteredIssues = pa11yResult.issues.filter((issue) => !shouldFilterPa11yIssue(issue));
-  let transformedIssues: Issue[] = filteredIssues.map(transformPa11yIssue);
+  let engineResult: {
+    issues: Issue[];
+    documentTitle: string;
+    pageUrl: string;
+    screenshot?: Uint8Array;
+  };
 
-  transformedIssues = filterIssues(transformedIssues, { minSeverity, ignore });
+  if (engine === "axe") {
+    engineResult = await runAxeCore(url, {
+      viewport,
+      headless,
+      timeout,
+      onProgress,
+      page,
+    });
+  } else {
+    // pa11y engine — dynamic import so pa11y/puppeteer are optional
+    const runners = options.runners ?? ["htmlcs"];
 
-  const baselineResult = await processAuditWithBaseline(transformedIssues, pa11yResult.pageUrl, {
-    baseline,
-    updateBaseline,
-  });
+    if (page && !isPuppeteerPage(page)) {
+      throw new Error(
+        "Pa11y engine only supports Puppeteer pages. Use engine: 'axe' for Playwright."
+      );
+    }
+
+    let runPa11yFn: typeof import("./engines/pa11y.js").runPa11y;
+    try {
+      const mod = await import("./engines/pa11y.js");
+      runPa11yFn = mod.runPa11y;
+    } catch {
+      throw new Error(
+        "Pa11y engine requires 'pa11y' and 'puppeteer' packages. Install them or use engine: 'axe'."
+      );
+    }
+
+    const pa11yResult = await runPa11yFn(url, {
+      runners,
+      viewport,
+      headless,
+      timeout,
+      onProgress,
+      page,
+    });
+
+    const filteredIssues = pa11yResult.issues.filter((issue) => !shouldFilterPa11yIssue(issue));
+
+    engineResult = {
+      issues: filteredIssues.map(transformPa11yIssue),
+      documentTitle: pa11yResult.documentTitle,
+      pageUrl: pa11yResult.pageUrl,
+      screenshot: pa11yResult.screenshot,
+    };
+  }
+
+  // ---- Post-engine processing (engine-agnostic) ----
+
+  let transformedIssues: Issue[] = filterIssues(engineResult.issues, { minSeverity, ignore });
+
+  const baselineResult = await processAuditWithBaseline(
+    transformedIssues,
+    engineResult.pageUrl,
+    {
+      baseline,
+      updateBaseline,
+    }
+  );
 
   const shouldLocalize = detail === "fix-ready" && page && localizationOptions?.enabled !== false;
 
@@ -156,13 +215,13 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
   }
 
   return {
-    url: pa11yResult.pageUrl,
-    documentTitle: pa11yResult.documentTitle,
+    url: engineResult.pageUrl,
+    documentTitle: engineResult.documentTitle,
     score,
     severityLevel,
     scoreInterpretation,
     issues: transformedIssues,
-    screenshot: captureScreenshot ? pa11yResult.screenshot : undefined,
+    screenshot: captureScreenshot ? engineResult.screenshot : undefined,
     timestamp: new Date().toISOString(),
     baseline: baselineResult.baseline,
   };

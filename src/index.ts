@@ -12,8 +12,10 @@ export { type BaselineDiffResult, diffAgainstBaseline } from "./baseline/diff.js
 export type { BaselineInfo } from "./baseline/integration.js";
 export type { BaselineFile, BaselineIssue } from "./baseline/types.js";
 export { readBaseline, updateBaseline, writeBaseline } from "./baseline/write.js";
-export { isPlaywrightPage, isPuppeteerPage, isUrl } from "./browser.js";
+export { isBrowserPage, isPlaywrightPage, isPuppeteerPage, isUrl } from "./browser.js";
 export { dismissCookieBanner } from "./cookie-banner.js";
+export type { AxeRunnerOptions, AxeRunResult, AxeViolation } from "./engines/axe.js";
+export { runAxeCore, transformAxeViolation } from "./engines/axe.js";
 export type {
   Pa11yIssue,
   Pa11yOptions,
@@ -47,6 +49,7 @@ export {
   SEVERITY_THRESHOLDS,
 } from "./scoring.js";
 export type {
+  AuditEngine,
   AuditOptions,
   AuditResult,
   AuditTarget,

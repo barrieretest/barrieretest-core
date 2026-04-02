@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { saveLastRun } from "../baseline/cache";
-import { writeBaseline } from "../baseline/write";
-import type { Issue } from "../types";
-import { CLI_COMMANDS, parseArgs, runCli } from "./index";
+import { saveLastRun } from "../baseline/cache.js";
+import { writeBaseline } from "../baseline/write.js";
+import type { Issue } from "../types.js";
+import { CLI_COMMANDS, parseArgs, runCli } from "./index.js";
 
 const TEST_DIR = "/tmp/barrieretest-cli-test";
 const TEST_BASELINE = join(TEST_DIR, "baseline.json");
@@ -123,6 +123,18 @@ describe("parseArgs", () => {
     expect(args.command).toBe("audit");
     expect(args.json).toBe(true);
   });
+  it("parses engine with -e flag", () => {
+    const args = parseArgs(["audit", "https://example.com", "-e", "pa11y"]);
+
+    expect(args.engine).toBe("pa11y");
+  });
+
+  it("parses engine with --engine flag", () => {
+    const args = parseArgs(["https://example.com", "--engine", "axe"]);
+
+    expect(args.engine).toBe("axe");
+  });
+
 
   it("parses detail level with -d flag", () => {
     const args = parseArgs(["audit", "https://example.com", "-d", "minimal"]);

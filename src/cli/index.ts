@@ -2,7 +2,7 @@ import { audit } from "../audit.js";
 import { CACHE_DIR, getLastRun } from "../baseline/cache.js";
 import { readBaseline, updateBaseline, writeBaseline } from "../baseline/write.js";
 import { formatActionable, formatFixReady, formatMinimal } from "../report.js";
-import type { AuditOptions, DetailLevel, Issue, IssueSeverity } from "../types.js";
+import type { AuditEngine, AuditOptions, DetailLevel, Issue, IssueSeverity } from "../types.js";
 
 export const CLI_COMMANDS = ["audit", "baseline", "baseline:accept", "baseline:update"] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number] | "help";
@@ -16,6 +16,7 @@ export interface ParsedArgs {
   file?: string;
   dir?: string;
   baseUrl?: string;
+  engine?: AuditEngine;
   detail?: DetailLevel;
   minSeverity?: IssueSeverity;
   ignore?: string[];
@@ -101,7 +102,10 @@ function parseAuditFlags(args: string[], startIndex: number, result: ParsedArgs)
     const arg = args[i];
     const nextArg = args[i + 1];
 
-    if (arg === "-d" || arg === "--detail") {
+    if (arg === "-e" || arg === "--engine") {
+      result.engine = nextArg as AuditEngine;
+      i++;
+    } else if (arg === "-d" || arg === "--detail") {
       result.detail = nextArg as DetailLevel;
       i++;
     } else if (arg === "-s" || arg === "--min-severity") {
@@ -225,6 +229,7 @@ Usage:
   barrieretest baseline:update <dir>    Re-audit and update all baselines
 
 Audit options:
+  -e, --engine <engine>      axe | pa11y (default: axe)
   -d, --detail <level>       minimal | actionable | fix-ready (default: actionable)
   -s, --min-severity <level> critical | serious | moderate | minor
   --ignore <rules>           Comma-separated rule IDs to ignore
@@ -246,6 +251,7 @@ async function runAudit(args: ParsedArgs): Promise<CliResult> {
 
   const detail = args.detail ?? "actionable";
   const options: AuditOptions = {
+    engine: args.engine,
     headless: args.headless ?? true,
     detail,
     minSeverity: args.minSeverity,

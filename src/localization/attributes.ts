@@ -7,13 +7,6 @@
 
 import type { BrowserPage } from "../browser.js";
 
-/**
- * Extended page type with full evaluate signature
- */
-type PageWithEvaluate = BrowserPage & {
-  evaluate: <T, Args extends unknown[]>(fn: (...args: Args) => T, ...args: Args) => Promise<T>;
-};
-
 export interface AttributeMatch {
   /** The attribute name that matched */
   attribute: string;
@@ -61,14 +54,17 @@ export async function findComponentAttribute(
 ): Promise<AttributeMatch | null> {
   const attributes = [...DEFAULT_ATTRIBUTES, ...(options.customAttributes || [])];
   const maxDepth = options.maxAncestorDepth ?? DEFAULT_MAX_DEPTH;
-  const evalPage = page as PageWithEvaluate;
 
-  const result = await evalPage.evaluate(
-    (
-      selector: string,
-      attributes: string[],
-      maxDepth: number
-    ): {
+  const result = await page.evaluate(
+    ({
+      selector,
+      attributes,
+      maxDepth,
+    }: {
+      selector: string;
+      attributes: string[];
+      maxDepth: number;
+    }): {
       found: boolean;
       attribute?: string;
       value?: string;
@@ -103,9 +99,7 @@ export async function findComponentAttribute(
 
       return { found: false };
     },
-    selector,
-    attributes,
-    maxDepth
+    { selector, attributes, maxDepth }
   );
 
   if (!result.found || !result.attribute || !result.value) {

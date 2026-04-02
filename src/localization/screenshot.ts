@@ -7,14 +7,6 @@
 
 import type { BrowserPage } from "../browser.js";
 
-/**
- * Extended page type with full evaluate signature
- * The BrowserPage type is minimal; actual Puppeteer pages support more
- */
-type PageWithEvaluate = BrowserPage & {
-  evaluate: <T, Args extends unknown[]>(fn: (...args: Args) => T, ...args: Args) => Promise<T>;
-};
-
 export interface ElementScreenshotResult {
   /** Screenshot data as Uint8Array */
   screenshot: Uint8Array;
@@ -37,7 +29,7 @@ const DEFAULT_PADDING = 20;
 /**
  * Captures a screenshot of a specific element on the page
  *
- * @param page - Browser page object (Puppeteer)
+ * @param page - Browser page object
  * @param selector - CSS selector for the target element
  * @param options - Screenshot options
  * @returns Screenshot result or null if element doesn't exist
@@ -48,10 +40,8 @@ export async function captureElementScreenshot(
   options: ScreenshotOptions = {}
 ): Promise<ElementScreenshotResult | null> {
   const padding = options.padding ?? DEFAULT_PADDING;
-  const evalPage = page as PageWithEvaluate;
 
-  // Get element info and scroll into view if needed
-  const elementInfo = await evalPage.evaluate(
+  const elementInfo = await page.evaluate(
     (
       selector: string
     ): {
@@ -68,10 +58,8 @@ export async function captureElementScreenshot(
         };
       }
 
-      // Scroll element into view
       element.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
 
-      // Get bounding box after scroll
       const rect = element.getBoundingClientRect();
 
       return {
@@ -94,7 +82,6 @@ export async function captureElementScreenshot(
 
   const { box, viewport } = elementInfo;
 
-  // Calculate clip region with padding, clamped to page bounds
   const clip = {
     x: Math.max(0, box.x - padding),
     y: Math.max(0, box.y - padding),
@@ -102,20 +89,10 @@ export async function captureElementScreenshot(
     height: Math.min(box.height + padding * 2, viewport.height - Math.max(0, box.y - padding)),
   };
 
-  // Ensure minimum dimensions
   clip.width = Math.max(clip.width, 1);
   clip.height = Math.max(clip.height, 1);
 
-  // Use Puppeteer's native screenshot with clip
-  // We need to access the underlying page for clip support
-  const puppeteerPage = page as unknown as {
-    screenshot: (options: {
-      type: "png";
-      clip: { x: number; y: number; width: number; height: number };
-    }) => Promise<Uint8Array>;
-  };
-
-  const screenshot = await puppeteerPage.screenshot({
+  const screenshot = await page.screenshot({
     type: "png",
     clip,
   });
