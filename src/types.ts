@@ -92,7 +92,7 @@ export interface AuditOptions {
   onProgress?: (data: { percent: number; message: string }) => void | Promise<void>;
 
   /**
-   * Detail level for the output.
+   * Detail level for formatted output.
    * - "minimal": rule, severity, count only
    * - "actionable": + selector, WCAG criterion, description (default)
    * - "fix-ready": + suggested fix, code snippet, documentation links
@@ -127,7 +127,7 @@ export interface AuditOptions {
 
   /**
    * Localization options for finding source code locations.
-   * Only runs when detail is 'fix-ready'.
+   * Only runs when detail is 'fix-ready' and an existing Puppeteer page is provided.
    */
   localization?: {
     /** Whether to enable localization (default: true when detail is 'fix-ready') */
@@ -184,7 +184,5 @@ export interface AuditResult {
   baseline?: BaselineInfo;
 }
 
-// Re-export browser types
 export type { BrowserPage } from "./browser.js";
-// Re-export types from scoring
 export type { ScoreInterpretation, SeverityLevel, TransformedIssue };

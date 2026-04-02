@@ -12,21 +12,14 @@ import {
 } from "./scoring.js";
 import type { AuditOptions, AuditResult, AuditTarget, Issue, IssueSeverity } from "./types.js";
 
-/** Severity hierarchy for comparison (higher index = more severe) */
 const severityOrder: IssueSeverity[] = ["minor", "moderate", "serious", "critical"];
 
-/**
- * Check if an issue's severity meets the minimum threshold
- */
 function meetsSeverityThreshold(issueSeverity: IssueSeverity, minSeverity: IssueSeverity): boolean {
   const issueIndex = severityOrder.indexOf(issueSeverity);
   const minIndex = severityOrder.indexOf(minSeverity);
   return issueIndex >= minIndex;
 }
 
-/**
- * Filter issues based on severity and ignore rules
- */
 function filterIssues(
   issues: Issue[],
   options: { minSeverity?: IssueSeverity; ignore?: string[] }
@@ -34,12 +27,10 @@ function filterIssues(
   const { minSeverity, ignore = [] } = options;
 
   return issues.filter((issue) => {
-    // Filter by ignore list
     if (ignore.includes(issue.id)) {
       return false;
     }
 
-    // Filter by minimum severity
     if (minSeverity && !meetsSeverityThreshold(issue.impact, minSeverity)) {
       return false;
     }
@@ -49,30 +40,15 @@ function filterIssues(
 }
 
 /**
- * Run an accessibility audit on a URL or browser page
+ * Runs a single-page accessibility audit.
  *
  * @example
  * ```typescript
  * import { audit } from '@barrieretest/core';
  *
- * // Audit a URL (launches browser automatically)
  * const result = await audit('https://example.com');
- * console.log(`Score: ${result.score}/100`);
- *
- * // Audit an existing Puppeteer page
- * const page = await browser.newPage();
- * await page.goto('https://example.com');
- * const result = await audit(page);
- *
- * // Filter by severity
- * const result = await audit('https://example.com', {
- *   minSeverity: 'serious' // Only critical and serious issues
- * });
- *
- * // Ignore specific rules
- * const result = await audit('https://example.com', {
- *   ignore: ['WCAG2AA.Principle1.Guideline1_4.1_4_3']
- * });
+ * const filtered = await audit('https://example.com', { minSeverity: 'serious' });
+ * const fromPage = await audit(page);
  * ```
  */
 export async function audit(target: AuditTarget, options: AuditOptions = {}): Promise<AuditResult> {
@@ -92,7 +68,6 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     ai: aiOptions,
   } = options;
 
-  // Determine if we have a page object or URL
   let url: string;
   let page: BrowserPage | undefined;
 
@@ -102,14 +77,11 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     page = target;
     url = target.url();
   } else if (isPlaywrightPage(target)) {
-    // Playwright pages are not directly supported by Pa11y
-    // We'll need to convert or use a different approach
-    throw new Error("Playwright pages are not yet supported. Please use a Puppeteer page or URL.");
+    throw new Error("Playwright pages are not supported directly. Pass a URL or Puppeteer page.");
   } else {
-    throw new Error("Invalid target: expected URL string, Puppeteer page, or Playwright page");
+    throw new Error("Invalid target: expected a URL string or Puppeteer page");
   }
 
-  // Run Pa11y audit
   const pa11yResult = await runPa11y(url, {
     runners,
     viewport,
@@ -119,28 +91,23 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     page,
   });
 
-  // Filter false positives and transform issues
   const filteredIssues = pa11yResult.issues.filter((issue) => !shouldFilterPa11yIssue(issue));
   let transformedIssues: Issue[] = filteredIssues.map(transformPa11yIssue);
 
-  // Apply user-specified filters
   transformedIssues = filterIssues(transformedIssues, { minSeverity, ignore });
 
-  // Process baseline integration
   const baselineResult = await processAuditWithBaseline(transformedIssues, pa11yResult.pageUrl, {
     baseline,
     updateBaseline,
   });
 
-  // Run localization when detail is 'fix-ready' and we have a page
-  // Localization requires a page object to query the DOM
   const shouldLocalize = detail === "fix-ready" && page && localizationOptions?.enabled !== false;
 
   if (shouldLocalize && page) {
     try {
       await onProgress?.({ percent: 70, message: "Localizing issues" });
     } catch {
-      /* callback error shouldn't crash audit */
+      /* ignore progress callback errors */
     }
 
     const localizationOpts: LocalizationOptions = {
@@ -150,22 +117,18 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
       enabledStrategies: localizationOptions?.enabledStrategies,
     };
 
-    const localizedIssues = await localizeIssues(page, transformedIssues, localizationOpts);
-
-    // Update issues with localization data
-    transformedIssues = localizedIssues;
+    transformedIssues = await localizeIssues(page, transformedIssues, localizationOpts);
   }
 
-  // Run AI enhancement if configured
   if (aiOptions) {
     try {
       await onProgress?.({ percent: 85, message: "Running AI analysis" });
     } catch {
-      /* callback error shouldn't crash audit */
+      /* ignore progress callback errors */
     }
 
     try {
-      const enhancedIssues = await enhanceWithAI(transformedIssues, {
+      transformedIssues = await enhanceWithAI(transformedIssues, {
         provider: aiOptions.provider,
         config: {
           apiKey: aiOptions.apiKey,
@@ -175,26 +138,21 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
         concurrency: aiOptions.concurrency,
         continueOnError: true,
       });
-
-      transformedIssues = enhancedIssues;
     } catch (error) {
-      // AI is best-effort, don't fail the audit
       console.warn(
         `AI enhancement failed: ${error instanceof Error ? error.message : "Unknown error"}`
       );
     }
   }
 
-  // Calculate score (based on filtered issues)
   const score = calculateScore(transformedIssues);
   const severityLevel = getSeverityLevel(score);
   const scoreInterpretation = getScoreInterpretation(score);
 
-  // Report completion
   try {
     await onProgress?.({ percent: 100, message: "Audit complete" });
   } catch {
-    /* callback error shouldn't crash audit */
+    /* ignore progress callback errors */
   }
 
   return {

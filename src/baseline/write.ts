@@ -5,9 +5,6 @@ import { generateIssueHash } from "./hash.js";
 import type { BaselineFile, BaselineIssue } from "./types.js";
 import { BASELINE_VERSION, isValidBaselineFile } from "./types.js";
 
-/**
- * Converts an Issue to a BaselineIssue for storage
- */
 function toBaselineIssue(issue: Issue): BaselineIssue {
   return {
     rule: issue.id,
@@ -16,9 +13,6 @@ function toBaselineIssue(issue: Issue): BaselineIssue {
   };
 }
 
-/**
- * Writes a new baseline file with the given issues
- */
 export async function writeBaseline(path: string, url: string, issues: Issue[]): Promise<void> {
   const dir = dirname(path);
   if (!existsSync(dir)) {
@@ -37,11 +31,6 @@ export async function writeBaseline(path: string, url: string, issues: Issue[]):
   writeFileSync(path, JSON.stringify(baseline, null, 2));
 }
 
-/**
- * Reads a baseline file from disk
- * Returns null if file doesn't exist
- * Throws if file is invalid
- */
 export async function readBaseline(path: string): Promise<BaselineFile | null> {
   if (!existsSync(path)) {
     return null;
@@ -50,16 +39,19 @@ export async function readBaseline(path: string): Promise<BaselineFile | null> {
   const content = JSON.parse(readFileSync(path, "utf-8"));
 
   if (!isValidBaselineFile(content)) {
-    throw new Error("Invalid baseline file");
+    if (content.score !== undefined && content.issues && content.documentTitle) {
+      throw new Error(
+        `"${path}" is an audit result, not a baseline file. ` +
+        `Create a baseline with: barrieretest baseline <url> -o <file>`
+      );
+    }
+
+    throw new Error(`Invalid baseline file: "${path}"`);
   }
 
   return content;
 }
 
-/**
- * Updates an existing baseline by merging in new issues
- * Throws if baseline file doesn't exist
- */
 export async function updateBaseline(path: string, newIssues: Issue[]): Promise<void> {
   const existing = await readBaseline(path);
 
@@ -67,10 +59,7 @@ export async function updateBaseline(path: string, newIssues: Issue[]): Promise<
     throw new Error("Baseline file not found");
   }
 
-  // Create a set of existing hashes for quick lookup
   const existingHashes = new Set(existing.issues.map((i) => i.hash));
-
-  // Add only new issues (by hash)
   const newBaselineIssues = newIssues
     .map(toBaselineIssue)
     .filter((i) => !existingHashes.has(i.hash));

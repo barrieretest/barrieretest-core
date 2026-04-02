@@ -148,4 +148,13 @@ describe("processAuditWithBaseline", () => {
 
     expect(existsSync(`${cacheDir}/last-run.json`)).toBe(true);
   });
+
+  it("caches last run without a baseline", async () => {
+    const issues = [createIssue()];
+    const cacheDir = `${TEST_DIR}/cache-no-baseline`;
+
+    await processAuditWithBaseline(issues, "https://example.com", {}, cacheDir);
+
+    expect(existsSync(`${cacheDir}/last-run.json`)).toBe(true);
+  });
 });

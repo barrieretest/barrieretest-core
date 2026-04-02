@@ -58,9 +58,7 @@ export async function processAuditWithBaseline(
   const shouldUpdate = updateBaseline || shouldUpdateFromEnv();
 
   // Always cache the last run for baseline:accept
-  if (baselinePath) {
-    await saveLastRun(url, issues, cacheDir);
-  }
+  await saveLastRun(url, issues, cacheDir);
 
   // No baseline path provided - return issues as-is
   if (!baselinePath) {

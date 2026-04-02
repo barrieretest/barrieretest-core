@@ -203,7 +203,6 @@ function sleep(ms: number): Promise<void> {
 export { createAnthropicProvider } from "./providers/anthropic.js";
 export { createNebiusProvider } from "./providers/nebius.js";
 export { createOpenAIProvider } from "./providers/openai.js";
-// Re-export types
 export type {
   AIAnalysis,
   AIAnalysisInput,

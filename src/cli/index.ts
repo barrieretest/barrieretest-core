@@ -1,8 +1,8 @@
 import { audit } from "../audit.js";
 import { CACHE_DIR, getLastRun } from "../baseline/cache.js";
 import { readBaseline, updateBaseline, writeBaseline } from "../baseline/write.js";
-import { formatActionable } from "../report.js";
-import type { AuditOptions, DetailLevel, IssueSeverity } from "../types.js";
+import { formatActionable, formatFixReady, formatMinimal } from "../report.js";
+import type { AuditOptions, DetailLevel, Issue, IssueSeverity } from "../types.js";
 
 export const CLI_COMMANDS = ["audit", "baseline", "baseline:accept", "baseline:update"] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number] | "help";
@@ -40,7 +40,6 @@ export function parseArgs(args: string[]): ParsedArgs {
 
   const first = args[0];
 
-  // Implicit audit: first arg is a URL
   if (first.startsWith("http://") || first.startsWith("https://")) {
     const result: ParsedArgs = { command: "audit", url: first, headless: true };
     parseAuditFlags(args, 1, result);
@@ -126,6 +125,75 @@ function parseAuditFlags(args: string[], startIndex: number, result: ParsedArgs)
   }
 }
 
+function progressLine(message: string, percent: number): string {
+  return `  ${message} (${percent}%)`;
+}
+
+function writeProgress(message: string, percent: number): void {
+  const line = progressLine(message, percent);
+
+  if (process.stderr.isTTY) {
+    process.stderr.write(`\r${line}\x1B[K`);
+    if (percent === 100) {
+      process.stderr.write("\n");
+    }
+    return;
+  }
+
+  process.stderr.write(`${line}\n`);
+}
+
+function issueIcon(impact: IssueSeverity): string {
+  if (impact === "critical") return "✗";
+  if (impact === "serious") return "!";
+  return "-";
+}
+
+function truncate(text: string, maxLength: number = 120): string {
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength - 1)}…`;
+}
+
+function addIssueLines(lines: string[], issues: Issue[], detail: DetailLevel): void {
+  switch (detail) {
+    case "minimal": {
+      for (const issue of formatMinimal(issues)) {
+        lines.push(
+          `  ${issueIcon(issue.impact)} ${issue.impact}: ${issue.id}${issue.count > 1 ? ` (×${issue.count})` : ""}`
+        );
+      }
+      return;
+    }
+
+    case "fix-ready": {
+      for (const issue of formatFixReady(issues)) {
+        lines.push(
+          `  ${issueIcon(issue.impact)} ${issue.impact}: ${issue.id}${issue.count > 1 ? ` (×${issue.count})` : ""}`
+        );
+        if (issue.selector) lines.push(`    Element: ${issue.selector}`);
+        if (issue.description) lines.push(`    ${issue.description}`);
+        if (issue.codeSnippet) lines.push(`    Code: ${truncate(issue.codeSnippet)}`);
+        lines.push(`    Fix: ${issue.suggestedFix}`);
+        if (issue.documentationUrl) lines.push(`    Docs: ${issue.documentationUrl}`);
+      }
+      return;
+    }
+
+    case "actionable":
+    default: {
+      for (const issue of formatActionable(issues)) {
+        lines.push(
+          `  ${issueIcon(issue.impact)} ${issue.impact}: ${issue.id}${issue.count > 1 ? ` (×${issue.count})` : ""}`
+        );
+        if (issue.selector) lines.push(`    Element: ${issue.selector}`);
+        if (issue.description) lines.push(`    ${issue.description}`);
+      }
+    }
+  }
+}
+
 /**
  * Run CLI command
  */
@@ -147,13 +215,13 @@ export async function runCli(args: ParsedArgs, cacheDir: string = CACHE_DIR): Pr
     default:
       return {
         success: true,
-        message: `barrieretest - Accessibility testing CLI
+        message: `barrieretest - Single-page accessibility testing CLI
 
 Usage:
-  barrieretest <url>                    Run accessibility audit
-  barrieretest audit <url> [options]    Run accessibility audit
-  barrieretest baseline <url> [options] Create or update baseline
-  barrieretest baseline:accept <file>   Accept last run into baseline
+  barrieretest <url>                    Run a single-page accessibility audit
+  barrieretest audit <url> [options]    Run a single-page accessibility audit
+  barrieretest baseline <url> [options] Create or update a single-page baseline
+  barrieretest baseline:accept <file>   Accept the last audit run into a baseline
   barrieretest baseline:update <dir>    Re-audit and update all baselines
 
 Audit options:
@@ -176,18 +244,18 @@ Baseline options:
 async function runAudit(args: ParsedArgs): Promise<CliResult> {
   if (!args.url) return { success: false, error: "URL required", exitCode: 1 };
 
+  const detail = args.detail ?? "actionable";
   const options: AuditOptions = {
     headless: args.headless ?? true,
-    detail: args.detail ?? "actionable",
+    detail,
     minSeverity: args.minSeverity,
     ignore: args.ignore,
     baseline: args.baseline,
   };
 
-  // Print progress to stderr so stdout stays clean for results
   if (!args.json) {
     options.onProgress = async ({ percent, message }) => {
-      process.stderr.write(`\r  ${message} (${percent}%)`);
+      writeProgress(message, percent);
     };
   }
 
@@ -204,7 +272,6 @@ async function runAudit(args: ParsedArgs): Promise<CliResult> {
     if (args.json) return { success: true, message: json };
   }
 
-  // Pretty-print results to stdout
   const lines: string[] = [];
   lines.push("");
   lines.push(`  barrieretest ${result.url}`);
@@ -214,21 +281,11 @@ async function runAudit(args: ParsedArgs): Promise<CliResult> {
   if (result.issues.length === 0) {
     lines.push("  No accessibility issues found.");
   } else {
-    const formatted = formatActionable(result.issues);
-
-    for (const issue of formatted) {
-      const icon = issue.impact === "critical" ? "✗" : issue.impact === "serious" ? "!" : "-";
-      lines.push(
-        `  ${icon} ${issue.impact}: ${issue.id}${issue.count > 1 ? ` (×${issue.count})` : ""}`
-      );
-      if (issue.selector) lines.push(`    Element: ${issue.selector}`);
-      if (issue.description) lines.push(`    ${issue.description}`);
-    }
+    addIssueLines(lines, result.issues, detail);
     lines.push("");
     lines.push(`  ${result.issues.length} issue${result.issues.length === 1 ? "" : "s"} found`);
   }
 
-  // Baseline info
   if (result.baseline) {
     const b = result.baseline;
     lines.push(
@@ -291,7 +348,7 @@ async function runBaselineUpdate(args: ParsedArgs): Promise<CliResult> {
       ? baseline.url.replace(/^https?:\/\/[^/]+/, args.baseUrl)
       : baseline.url;
 
-    const result = await audit(url, { headless: true });
+    const result = await audit(url, { headless: args.headless ?? true });
     await writeBaseline(path, url, result.issues);
     updated++;
   }
@@ -315,22 +372,19 @@ async function runBaselineAccept(file: string, cacheDir: string): Promise<CliRes
     };
   }
 
-  // Check if baseline exists
   const existing = await readBaseline(file);
 
   if (existing) {
-    // Merge into existing baseline
     await updateBaseline(file, lastRun.issues);
     return {
       success: true,
       message: `Added ${lastRun.issues.length} issues to ${file}`,
     };
-  } else {
-    // Create new baseline
-    await writeBaseline(file, lastRun.url, lastRun.issues);
-    return {
-      success: true,
-      message: `Created baseline with ${lastRun.issues.length} issues at ${file}`,
-    };
   }
+
+  await writeBaseline(file, lastRun.url, lastRun.issues);
+  return {
+    success: true,
+    message: `Created baseline with ${lastRun.issues.length} issues at ${file}`,
+  };
 }
