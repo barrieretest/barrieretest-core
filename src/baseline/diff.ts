@@ -1,6 +1,6 @@
-import type { Issue } from "../types";
-import { generateIssueHash } from "./hash";
-import type { BaselineFile, BaselineIssue } from "./types";
+import type { Issue } from "../types.js";
+import { generateIssueHash } from "./hash.js";
+import type { BaselineFile, BaselineIssue } from "./types.js";
 
 /**
  * Result of comparing current issues against a baseline

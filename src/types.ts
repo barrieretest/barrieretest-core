@@ -1,8 +1,8 @@
-import type { AIAnalysis, AIProviderConfig, AIProviderName } from "./ai";
-import type { BaselineInfo } from "./baseline/integration";
-import type { BrowserPage } from "./browser";
-import type { LocalizationResult } from "./localization";
-import type { ScoreInterpretation, SeverityLevel, TransformedIssue } from "./scoring";
+import type { AIAnalysis, AIProviderConfig, AIProviderName } from "./ai/index.js";
+import type { BaselineInfo } from "./baseline/integration.js";
+import type { BrowserPage } from "./browser.js";
+import type { LocalizationResult } from "./localization/index.js";
+import type { ScoreInterpretation, SeverityLevel, TransformedIssue } from "./scoring.js";
 
 /**
  * Severity levels for accessibility issues
@@ -185,6 +185,6 @@ export interface AuditResult {
 }
 
 // Re-export browser types
-export type { BrowserPage } from "./browser";
+export type { BrowserPage } from "./browser.js";
 // Re-export types from scoring
 export type { ScoreInterpretation, SeverityLevel, TransformedIssue };

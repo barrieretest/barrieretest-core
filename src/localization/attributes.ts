@@ -5,7 +5,7 @@
  * that hint at component identity or source location.
  */
 
-import type { BrowserPage } from "../browser";
+import type { BrowserPage } from "../browser.js";
 
 /**
  * Extended page type with full evaluate signature

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Issue } from "../types";
+import type { Issue } from "../types.js";
 
 /**
  * Default cache directory under .barrieretest/cache

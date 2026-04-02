@@ -1,16 +1,16 @@
-import { enhanceWithAI } from "./ai";
-import { processAuditWithBaseline } from "./baseline/integration";
-import { type BrowserPage, isPlaywrightPage, isPuppeteerPage, isUrl } from "./browser";
-import { runPa11y } from "./engines/pa11y";
-import { type LocalizationOptions, localizeIssues } from "./localization";
+import { enhanceWithAI } from "./ai/index.js";
+import { processAuditWithBaseline } from "./baseline/integration.js";
+import { type BrowserPage, isPlaywrightPage, isPuppeteerPage, isUrl } from "./browser.js";
+import { runPa11y } from "./engines/pa11y.js";
+import { type LocalizationOptions, localizeIssues } from "./localization/index.js";
 import {
   calculateScore,
   getScoreInterpretation,
   getSeverityLevel,
   shouldFilterPa11yIssue,
   transformPa11yIssue,
-} from "./scoring";
-import type { AuditOptions, AuditResult, AuditTarget, Issue, IssueSeverity } from "./types";
+} from "./scoring.js";
+import type { AuditOptions, AuditResult, AuditTarget, Issue, IssueSeverity } from "./types.js";
 
 /** Severity hierarchy for comparison (higher index = more severe) */
 const severityOrder: IssueSeverity[] = ["minor", "moderate", "serious", "critical"];

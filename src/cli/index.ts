@@ -1,8 +1,8 @@
-import { audit } from "../audit";
-import { CACHE_DIR, getLastRun } from "../baseline/cache";
-import { readBaseline, updateBaseline, writeBaseline } from "../baseline/write";
-import { formatActionable } from "../report";
-import type { AuditOptions, DetailLevel, IssueSeverity } from "../types";
+import { audit } from "../audit.js";
+import { CACHE_DIR, getLastRun } from "../baseline/cache.js";
+import { readBaseline, updateBaseline, writeBaseline } from "../baseline/write.js";
+import { formatActionable } from "../report.js";
+import type { AuditOptions, DetailLevel, IssueSeverity } from "../types.js";
 
 export const CLI_COMMANDS = ["audit", "baseline", "baseline:accept", "baseline:update"] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number] | "help";

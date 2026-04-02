@@ -6,9 +6,9 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { generateIssueHash } from "../baseline/hash";
-import type { Issue } from "../types";
-import type { LocalizedIssue } from "./index";
+import { generateIssueHash } from "../baseline/hash.js";
+import type { Issue } from "../types.js";
+import type { LocalizedIssue } from "./index.js";
 
 export interface ScreenshotOutputOptions {
   /** Directory to save screenshots */

@@ -1,4 +1,4 @@
-import type { Pa11yIssue } from "./engines/pa11y";
+import type { Pa11yIssue } from "./engines/pa11y.js";
 
 /**
  * Severity thresholds for score interpretation (0-100 scale)

@@ -1,8 +1,8 @@
-import type { Issue } from "../types";
-import { CACHE_DIR, saveLastRun } from "./cache";
-import { type BaselineDiffResult, diffAgainstBaseline } from "./diff";
-import type { BaselineFile, BaselineIssue } from "./types";
-import { readBaseline, updateBaseline as updateBaselineFile, writeBaseline } from "./write";
+import type { Issue } from "../types.js";
+import { CACHE_DIR, saveLastRun } from "./cache.js";
+import { type BaselineDiffResult, diffAgainstBaseline } from "./diff.js";
+import type { BaselineFile, BaselineIssue } from "./types.js";
+import { readBaseline, updateBaseline as updateBaselineFile, writeBaseline } from "./write.js";
 
 /**
  * Baseline information included in audit results

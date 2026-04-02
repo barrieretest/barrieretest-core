@@ -2,7 +2,7 @@
  * Types for AI-enhanced accessibility analysis
  */
 
-import type { Issue } from "../types";
+import type { Issue } from "../types.js";
 
 /**
  * Result of AI analysis for an accessibility issue

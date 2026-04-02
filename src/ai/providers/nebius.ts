@@ -5,8 +5,8 @@
  * See: https://nebius.ai/
  */
 
-import type { AIAnalysis, AIAnalysisInput, AIProvider, AIProviderConfig } from "../types";
-import { buildAnalysisPrompt, parseAnalysisResponse } from "../types";
+import type { AIAnalysis, AIAnalysisInput, AIProvider, AIProviderConfig } from "../types.js";
+import { buildAnalysisPrompt, parseAnalysisResponse } from "../types.js";
 
 const DEFAULT_MODEL = "Qwen/Qwen2-VL-72B-Instruct";
 const DEFAULT_MAX_TOKENS = 1024;

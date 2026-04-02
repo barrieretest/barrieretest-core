@@ -1,4 +1,4 @@
-import type { DetailLevel, Issue, IssueSeverity } from "./types";
+import type { DetailLevel, Issue, IssueSeverity } from "./types.js";
 
 /**
  * Minimal issue representation (rule, severity, count)

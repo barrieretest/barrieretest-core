@@ -5,18 +5,18 @@
  * and suggest fixes.
  */
 
-import type { LocalizationResult, LocalizedIssue } from "../localization";
-import type { Issue } from "../types";
-import { createAnthropicProvider } from "./providers/anthropic";
-import { createNebiusProvider } from "./providers/nebius";
-import { createOpenAIProvider } from "./providers/openai";
+import type { LocalizationResult, LocalizedIssue } from "../localization/index.js";
+import type { Issue } from "../types.js";
+import { createAnthropicProvider } from "./providers/anthropic.js";
+import { createNebiusProvider } from "./providers/nebius.js";
+import { createOpenAIProvider } from "./providers/openai.js";
 import type {
   AIAnalysis,
   AIAnalysisInput,
   AIProvider,
   AIProviderConfig,
   AIProviderName,
-} from "./types";
+} from "./types.js";
 
 /**
  * Issue with AI enhancement
@@ -200,9 +200,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export { createAnthropicProvider } from "./providers/anthropic";
-export { createNebiusProvider } from "./providers/nebius";
-export { createOpenAIProvider } from "./providers/openai";
+export { createAnthropicProvider } from "./providers/anthropic.js";
+export { createNebiusProvider } from "./providers/nebius.js";
+export { createOpenAIProvider } from "./providers/openai.js";
 // Re-export types
 export type {
   AIAnalysis,
@@ -210,5 +210,5 @@ export type {
   AIProvider,
   AIProviderConfig,
   AIProviderName,
-} from "./types";
-export { buildAnalysisPrompt, parseAnalysisResponse } from "./types";
+} from "./types.js";
+export { buildAnalysisPrompt, parseAnalysisResponse } from "./types.js";

@@ -1,7 +1,7 @@
 import pa11y from "pa11y";
 import puppeteer, { type Browser, type Page } from "puppeteer";
-import { type BrowserPage, isPuppeteerPage } from "../browser";
-import { dismissCookieBanner } from "../cookie-banner";
+import { type BrowserPage, isPuppeteerPage } from "../browser.js";
+import { dismissCookieBanner } from "../cookie-banner.js";
 
 // Re-export pa11y types for convenience
 export type Pa11yResults = Awaited<ReturnType<typeof pa11y>>;

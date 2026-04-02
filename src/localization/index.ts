@@ -5,21 +5,21 @@
  * responsible for accessibility issues.
  */
 
-import type { BrowserPage } from "../browser";
-import type { Issue } from "../types";
+import type { BrowserPage } from "../browser.js";
+import type { Issue } from "../types.js";
 import {
   type AttributeMatch,
   type AttributeSearchOptions,
   findComponentAttribute,
-} from "./attributes";
-import { getReactSourceLocation, type ReactSourceLocation } from "./react";
+} from "./attributes.js";
+import { getReactSourceLocation, type ReactSourceLocation } from "./react.js";
 import {
   captureElementScreenshot,
   type ElementScreenshotResult,
   type ScreenshotOptions,
-} from "./screenshot";
-import { type SearchMatch, type SearchOptions, searchForElement } from "./search";
-import { analyzeSelector, type SelectorAnalysis } from "./selector";
+} from "./screenshot.js";
+import { type SearchMatch, type SearchOptions, searchForElement } from "./search.js";
+import { analyzeSelector, type SelectorAnalysis } from "./selector.js";
 
 export type LocalizationConfidence = "high" | "medium" | "low";
 
@@ -319,26 +319,26 @@ export async function localizeIssues(
   return results;
 }
 
-export type { AttributeMatch, AttributeSearchOptions } from "./attributes";
-export { findComponentAttribute } from "./attributes";
+export type { AttributeMatch, AttributeSearchOptions } from "./attributes.js";
+export { findComponentAttribute } from "./attributes.js";
 export type {
   IssueWithScreenshotPath,
   ScreenshotOutputOptions,
   ScreenshotOutputResult,
-} from "./output";
+} from "./output.js";
 // Screenshot output utilities
 export {
   issuesWithScreenshotPaths,
   prepareOutputWithScreenshots,
   saveAllScreenshots,
   saveIssueScreenshot,
-} from "./output";
-export type { ReactSourceLocation } from "./react";
-export { getReactSourceLocation, isReactDevelopmentMode, isReactDevToolsAvailable } from "./react";
+} from "./output.js";
+export type { ReactSourceLocation } from "./react.js";
+export { getReactSourceLocation, isReactDevelopmentMode, isReactDevToolsAvailable } from "./react.js";
 // Re-export types and utilities
-export type { ElementScreenshotResult, ScreenshotOptions } from "./screenshot";
-export { captureElementScreenshot, captureMultipleElementScreenshots } from "./screenshot";
-export type { SearchMatch, SearchOptions } from "./search";
-export { extractSearchableIdentifiers, searchCodebase, searchForElement } from "./search";
-export type { SelectorAnalysis } from "./selector";
-export { analyzeSelector, extractAllComponentHints } from "./selector";
+export type { ElementScreenshotResult, ScreenshotOptions } from "./screenshot.js";
+export { captureElementScreenshot, captureMultipleElementScreenshots } from "./screenshot.js";
+export type { SearchMatch, SearchOptions } from "./search.js";
+export { extractSearchableIdentifiers, searchCodebase, searchForElement } from "./search.js";
+export type { SelectorAnalysis } from "./selector.js";
+export { analyzeSelector, extractAllComponentHints } from "./selector.js";

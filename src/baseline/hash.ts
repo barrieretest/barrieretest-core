@@ -1,4 +1,4 @@
-import type { Issue } from "../types";
+import type { Issue } from "../types.js";
 
 /**
  * Extracts the element tag name from an HTML string

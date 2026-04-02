@@ -2,8 +2,8 @@
  * OpenAI provider for AI-enhanced accessibility analysis
  */
 
-import type { AIAnalysis, AIAnalysisInput, AIProvider, AIProviderConfig } from "../types";
-import { buildAnalysisPrompt, parseAnalysisResponse } from "../types";
+import type { AIAnalysis, AIAnalysisInput, AIProvider, AIProviderConfig } from "../types.js";
+import { buildAnalysisPrompt, parseAnalysisResponse } from "../types.js";
 
 const DEFAULT_MODEL = "gpt-4o";
 const DEFAULT_MAX_TOKENS = 1024;

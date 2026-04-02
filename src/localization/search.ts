@@ -7,7 +7,7 @@
 
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
-import type { BrowserPage } from "../browser";
+import type { BrowserPage } from "../browser.js";
 
 export interface SearchMatch {
   /** File path relative to project root */

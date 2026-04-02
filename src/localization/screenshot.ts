@@ -5,7 +5,7 @@
  * handling off-screen elements and missing elements gracefully.
  */
 
-import type { BrowserPage } from "../browser";
+import type { BrowserPage } from "../browser.js";
 
 /**
  * Extended page type with full evaluate signature
