@@ -2,6 +2,10 @@
  * Types for AI-enhanced accessibility analysis
  */
 
+import type {
+  SemanticAnalysisInput,
+  SemanticAnalysisResponse,
+} from "../semantic/types.js";
 import type { Issue } from "../types.js";
 
 /**
@@ -41,8 +45,16 @@ export interface AIAnalysisInput {
 export interface AIProvider {
   /** Provider name */
   name: string;
-  /** Analyze an accessibility issue */
+  /** Analyze a single accessibility issue (per-issue enhancement). */
   analyze(input: AIAnalysisInput): Promise<AIAnalysis>;
+  /**
+   * Run a semantic-audit pass.
+   *
+   * Optional — providers that don't implement it cause `semanticAudit()` to
+   * throw a clear "not supported" error. Implementations should return the
+   * raw model output as a string; the runner is responsible for parsing it.
+   */
+  analyzeSemantic?(input: SemanticAnalysisInput): Promise<SemanticAnalysisResponse>;
 }
 
 /**

@@ -5,11 +5,17 @@
  * See: https://nebius.ai/
  */
 
+import type {
+  SemanticAnalysisInput,
+  SemanticAnalysisResponse,
+} from "../../semantic/types.js";
 import type { AIAnalysis, AIAnalysisInput, AIProvider, AIProviderConfig } from "../types.js";
 import { buildAnalysisPrompt, parseAnalysisResponse } from "../types.js";
 
 const DEFAULT_MODEL = "Qwen/Qwen2-VL-72B-Instruct";
 const DEFAULT_MAX_TOKENS = 1024;
+const DEFAULT_SEMANTIC_MAX_TOKENS = 2000;
+const DEFAULT_SEMANTIC_TIMEOUT_MS = 120_000;
 const NEBIUS_API_URL = "https://api.studio.nebius.ai/v1/chat/completions";
 
 interface NebiusMessage {
@@ -105,6 +111,68 @@ export function createNebiusProvider(config: AIProviderConfig): AIProvider {
       }
 
       return parseAnalysisResponse(content);
+    },
+
+    async analyzeSemantic(input: SemanticAnalysisInput): Promise<SemanticAnalysisResponse> {
+      const messages: NebiusMessage[] = [];
+
+      if (input.system) {
+        messages.push({ role: "system", content: input.system });
+      }
+
+      const userContent: NebiusContentPart[] = [{ type: "text", text: input.prompt }];
+
+      if (input.screenshot) {
+        const base64Image = uint8ArrayToBase64(input.screenshot);
+        userContent.push({
+          type: "image_url",
+          image_url: { url: `data:image/png;base64,${base64Image}` },
+        });
+      }
+
+      messages.push({ role: "user", content: userContent });
+
+      const controller = new AbortController();
+      const timeoutMs = input.timeout ?? DEFAULT_SEMANTIC_TIMEOUT_MS;
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const response = await fetch(NEBIUS_API_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            max_tokens: Math.max(maxTokens, DEFAULT_SEMANTIC_MAX_TOKENS),
+            temperature,
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(`Nebius API error: ${response.status} - ${error}`);
+        }
+
+        const data = (await response.json()) as NebiusResponse;
+        const content = data.choices[0]?.message?.content;
+
+        if (!content) {
+          throw new Error("No response content from Nebius");
+        }
+
+        return { content, model };
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new Error(`Nebius semantic call timed out after ${timeoutMs}ms`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeoutId);
+      }
     },
   };
 }

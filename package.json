@@ -1,6 +1,6 @@
 {
   "name": "@barrieretest/core",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Open-source core for single-page accessibility audits",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,8 +19,10 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "bun test",
-    "test:watch": "bun test --watch",
+    "test": "bun test --path-ignore-patterns='**/audit-integration.test.ts' && bun test src/audit-integration.test.ts",
+    "test:unit": "bun test --path-ignore-patterns='**/audit-integration.test.ts'",
+    "test:integration": "bun test src/audit-integration.test.ts",
+    "test:watch": "bun test --path-ignore-patterns='**/audit-integration.test.ts' --watch",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

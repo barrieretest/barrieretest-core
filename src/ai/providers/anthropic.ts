@@ -2,11 +2,17 @@
  * Anthropic provider for AI-enhanced accessibility analysis
  */
 
+import type {
+  SemanticAnalysisInput,
+  SemanticAnalysisResponse,
+} from "../../semantic/types.js";
 import type { AIAnalysis, AIAnalysisInput, AIProvider, AIProviderConfig } from "../types.js";
 import { buildAnalysisPrompt, parseAnalysisResponse } from "../types.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-20250514";
 const DEFAULT_MAX_TOKENS = 1024;
+const DEFAULT_SEMANTIC_MAX_TOKENS = 2000;
+const DEFAULT_SEMANTIC_TIMEOUT_MS = 120_000;
 
 interface AnthropicMessage {
   role: "user" | "assistant";
@@ -103,6 +109,70 @@ export function createAnthropicProvider(config: AIProviderConfig): AIProvider {
       }
 
       return parseAnalysisResponse(content);
+    },
+
+    async analyzeSemantic(input: SemanticAnalysisInput): Promise<SemanticAnalysisResponse> {
+      const userContent: AnthropicContentPart[] = [];
+
+      if (input.screenshot) {
+        const base64Image = uint8ArrayToBase64(input.screenshot);
+        userContent.push({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: "image/png",
+            data: base64Image,
+          },
+        });
+      }
+
+      userContent.push({ type: "text", text: input.prompt });
+
+      const messages: AnthropicMessage[] = [{ role: "user", content: userContent }];
+
+      const controller = new AbortController();
+      const timeoutMs = input.timeout ?? DEFAULT_SEMANTIC_TIMEOUT_MS;
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const response = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            max_tokens: Math.max(maxTokens, DEFAULT_SEMANTIC_MAX_TOKENS),
+            temperature,
+            system: input.system,
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(`Anthropic API error: ${response.status} - ${error}`);
+        }
+
+        const data = (await response.json()) as AnthropicResponse;
+        const content = data.content.find((c) => c.type === "text")?.text;
+
+        if (!content) {
+          throw new Error("No response content from Anthropic");
+        }
+
+        return { content, model };
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new Error(`Anthropic semantic call timed out after ${timeoutMs}ms`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeoutId);
+      }
     },
   };
 }

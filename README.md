@@ -10,6 +10,7 @@ Open-source core for single-page accessibility audits.
 - screenshots
 - baseline workflows for CI
 - optional AI analysis for a single page
+- semantic audits via vision LLMs (`semanticAudit`) with an extensible check registry
 - cookie banner dismissal before audits
 
 It does not include:
@@ -233,6 +234,132 @@ const result = await audit('https://example.com', {
 ```
 
 Providers: `openai`, `anthropic`, `nebius`.
+
+## Semantic audits
+
+`semanticAudit()` runs vision + reasoning checks that rule engines like axe and
+pa11y cannot find on their own. The current built-ins cover ARIA-label/visible-text
+mismatches, page title quality, alt-text quality, form-label clarity, language
+attribute correctness, and landmark labelling. Adding more is one new file plus
+one registry entry — the architecture is built to grow.
+
+Standalone:
+
+```typescript
+import { semanticAudit } from '@barrieretest/core'
+
+const result = await semanticAudit('https://example.com', {
+  provider: {
+    name: 'nebius',
+    apiKey: process.env.NEBIUS_API_KEY!,
+    model: 'Qwen/Qwen2-VL-72B-Instruct',
+  },
+})
+
+console.log(result.issues)        // standard core Issue[] with `semantic` metadata
+console.log(result.meta.checksRun)
+```
+
+Or — usually preferred — combined with `audit()` so a single browser launch
+serves both the engine and semantic passes:
+
+```typescript
+const result = await audit('https://example.com', {
+  semantic: {
+    provider: { name: 'nebius', apiKey: process.env.NEBIUS_API_KEY! },
+    checks: ['aria-mismatch', 'page-title'], // optional: defaults to all built-ins
+  },
+})
+
+// result.issues contains both engine findings and semantic findings as
+// standard core Issue[] entries (semantic ones use the id "semantic:<check-id>").
+// result.semanticMeta exposes pass-level metadata.
+```
+
+Supported `audit({ semantic })` combinations:
+
+| Target | `engine` | Behavior |
+|---|---|---|
+| URL string | `'axe'` (default) | `audit()` owns the browser; engine and semantic share one page |
+| Existing browser page | `'axe'` | Both passes use the page you passed in |
+| URL string | `'pa11y'` | **Semantic is skipped with a warning.** pa11y manages its own browser internally; running semantic would require a second launch in this release |
+
+### How semantic findings are processed
+
+Semantic findings are first-class `Issue` values and participate in the same
+post-engine pipeline as engine findings:
+
+- **`minSeverity` and `ignore` apply to them.** Semantic issues are merged with
+  engine issues *before* filtering, so `minSeverity: 'serious'` will drop a
+  `notice`-severity semantic finding the same way it drops a minor engine one.
+- **Baselines include them.** Baseline diffing runs on the merged + filtered
+  list, so semantic issues appear in `newIssues`, `knownIssues`, and
+  `fixedIssues` like any other issue.
+- **They are not currently localized.** Source-file localization
+  (`detail: 'fix-ready'`) runs on engine issues only in this release.
+- **They are not currently passed through per-issue AI enhancement.** The
+  `audit({ ai })` per-issue enhancer also runs on engine issues only.
+- **Hallucinated or unrequested check IDs are dropped.** If the model returns
+  a finding with a `checkType` that wasn't part of the resolved check set
+  for this run, the runner discards it and warns.
+- **Semantic failure never fails the whole audit.** If the semantic pass
+  throws (timeout, malformed JSON, provider error), `audit()` warns and
+  returns the engine results without `semanticMeta`.
+
+### Screenshot behavior
+
+Screenshot capture differs slightly between entrypoints in this release:
+
+- `audit({ semantic })` reuses the screenshot the engine path captured (full
+  page by default), so the semantic pass and the rest of `audit()` see the
+  same image.
+- Standalone `semanticAudit()` may capture its own screenshot above the fold
+  if a selected check needs one.
+
+The two paths can therefore feed differently sized images to the model.
+
+### Built-in checks
+
+| ID | What it looks for |
+|---|---|
+| `aria-mismatch` | aria-label / aria-labelledby that contradicts visible text |
+| `page-title` | Whether the `<title>` is descriptive and meaningful |
+| `alt-text-quality` | Whether `alt` text actually describes the image |
+| `form-label-clarity` | Whether form labels are clear and unambiguous |
+| `lang-attribute` | Whether `<html lang>` matches the actual page language |
+| `landmarks` | Whether landmark regions are present and properly labelled |
+
+### Adding a custom check
+
+```typescript
+import { semanticAudit, type SemanticCheck } from '@barrieretest/core'
+
+const skipLinkCheck: SemanticCheck = {
+  id: 'skip-link-quality',
+  title: 'Skip-link Quality',
+  description: 'Skip links should be visible on focus and lead to the main content.',
+  promptSection: '**Skip Link Quality**: Check that skip links are present, visible on focus, and target main content',
+  needsScreenshot: true,
+  needsContext: ['head', 'body'],
+}
+
+const result = await semanticAudit('https://example.com', {
+  provider: { name: 'nebius', apiKey: process.env.NEBIUS_API_KEY! },
+  customChecks: [skipLinkCheck],
+  checks: ['skip-link-quality'],
+})
+```
+
+Custom checks can also override built-ins by reusing the same `id` — useful for
+tweaking prompt wording without forking the package.
+
+### Provider support
+
+| Provider | `analyzeSemantic` |
+|---|---|
+| `nebius` | Full support (production-tested) |
+| `openai` | Implemented; pass a vision-capable model (e.g. `gpt-4o`) |
+| `anthropic` | Implemented; pass a vision-capable Claude model |
 
 ## Cookie banner dismissal
 

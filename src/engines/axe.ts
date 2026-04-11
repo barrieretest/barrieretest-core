@@ -12,6 +12,7 @@ import type {
   PuppeteerPageLike,
 } from "../browser.js";
 import { isPuppeteerPage } from "../browser.js";
+import { launchPuppeteerSession, navigateTo } from "../puppeteer-launch.js";
 import type { Issue, IssueSeverity } from "../types.js";
 
 export type AxeNodeResult = {
@@ -58,33 +59,8 @@ type AxeRuntime = {
   };
 };
 
-type PuppeteerLauncher = {
-  launch: (options: {
-    headless: boolean;
-    args: string[];
-  }) => Promise<PuppeteerBrowserLike>;
-};
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object";
-}
-
-function isPuppeteerLauncher(value: unknown): value is PuppeteerLauncher {
-  return isRecord(value) && typeof value.launch === "function";
-}
-
-function resolvePuppeteerLauncher(module: unknown): PuppeteerLauncher {
-  if (isPuppeteerLauncher(module)) {
-    return module;
-  }
-
-  if (isRecord(module) && isPuppeteerLauncher(module.default)) {
-    return module.default;
-  }
-
-  throw new Error(
-    "Running axe-core on a URL requires 'puppeteer'. Install it or pass an existing page."
-  );
 }
 
 function hasAxeSource(value: unknown): value is AxeSourceExport {
@@ -202,38 +178,17 @@ export async function runAxeCore(
       await onProgress?.({ percent: 20, message: "Launching browser" });
       ownsBrowser = true;
 
-      let puppeteerModule: unknown;
-      try {
-        puppeteerModule = await import("puppeteer");
-      } catch {
-        throw new Error(
-          "Running axe-core on a URL requires 'puppeteer'. Install it or pass an existing page."
-        );
-      }
-
-      const puppeteer = resolvePuppeteerLauncher(puppeteerModule);
-      browser = await puppeteer.launch({
-        headless,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-gpu",
-        ],
-      });
-
-      ownedPage = await browser.newPage();
-      await ownedPage.setViewport?.(viewport);
+      const session = await launchPuppeteerSession({ headless, viewport });
+      browser = session.browser;
+      ownedPage = session.page;
       page = ownedPage;
     }
 
     const currentUrl = page.url();
     if (!currentUrl || currentUrl === "about:blank" || currentUrl !== url) {
       await onProgress?.({ percent: 30, message: "Loading page" });
-      const navigationTimeout = timeout ?? 30_000;
-
       if (isPuppeteerPage(page)) {
-        await page.goto(url, { waitUntil: "networkidle2", timeout: navigationTimeout });
+        await navigateTo(page, url, { timeout });
       } else {
         await page.goto(url);
       }

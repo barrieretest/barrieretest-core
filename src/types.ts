@@ -3,6 +3,7 @@ import type { BaselineInfo } from "./baseline/integration.js";
 import type { BrowserPage } from "./browser.js";
 import type { LocalizationResult } from "./localization/index.js";
 import type { ScoreInterpretation, SeverityLevel, TransformedIssue } from "./scoring.js";
+import type { SemanticMeta, SemanticOptions } from "./semantic/types.js";
 
 /**
  * Severity levels for accessibility issues
@@ -27,6 +28,20 @@ export const SEVERITY_HIERARCHY: IssueSeverity[] = ["minor", "moderate", "seriou
 export type DetailLevel = "minimal" | "actionable" | "fix-ready";
 
 /**
+ * Per-issue metadata attached when an Issue was produced by a semantic check
+ * (see `src/semantic/`). Lives here to keep the `Issue` shape self-contained
+ * and avoid circular imports between `types.ts` and `semantic/types.ts`.
+ */
+export interface SemanticIssueMeta {
+  /** Check identifier, e.g. "aria-mismatch". */
+  checkType: string;
+  /** Confidence 0-1 reported by the AI. */
+  confidence: number;
+  /** Suggested fix from the AI, if any. */
+  suggestion?: string;
+}
+
+/**
  * A single accessibility issue
  */
 export interface Issue {
@@ -48,6 +63,8 @@ export interface Issue {
   localization?: LocalizationResult;
   /** AI analysis data (when AI is enabled) */
   ai?: AIAnalysis;
+  /** Semantic-check metadata (when produced by `semanticAudit`) */
+  semantic?: SemanticIssueMeta;
 }
 
 /**
@@ -174,6 +191,25 @@ export interface AuditOptions {
     /** Maximum concurrent requests */
     concurrency?: number;
   };
+
+  /**
+   * Optional semantic-audit pass.
+   *
+   * When set, after the regular engine pass `audit()` runs `semanticAudit()`
+   * against the same page and merges the resulting issues into
+   * `result.issues`. Pass-level metadata is attached as `result.semanticMeta`.
+   *
+   * Supported combinations:
+   * - URL target with `engine: 'axe'` (default) — `audit()` owns the browser
+   *   so the engine and semantic passes share a single page.
+   * - Existing browser page target — both passes use the page you provided.
+   *
+   * Not supported in this release:
+   * - URL target with `engine: 'pa11y'` — the semantic pass is skipped with
+   *   a warning, since pa11y manages its own browser internally and we'd
+   *   need a second launch to run semantic.
+   */
+  semantic?: SemanticOptions;
 }
 
 /**
@@ -198,6 +234,8 @@ export interface AuditResult {
   timestamp: string;
   /** Baseline comparison info (if baseline was provided) */
   baseline?: BaselineInfo;
+  /** Semantic-pass metadata (if `semantic` option was set) */
+  semanticMeta?: SemanticMeta;
 }
 
 export type { BrowserPage } from "./browser.js";

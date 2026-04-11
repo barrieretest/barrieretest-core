@@ -48,6 +48,34 @@ export {
   getSeverityLevel,
   SEVERITY_THRESHOLDS,
 } from "./scoring.js";
+export {
+  altTextQualityCheck,
+  ariaMismatchCheck,
+  BUILT_IN_CHECK_IDS,
+  BUILT_IN_CHECKS,
+  formLabelClarityCheck,
+  landmarksCheck,
+  langAttributeCheck,
+  pageTitleCheck,
+  resolveChecks,
+  semanticAudit,
+  SEMANTIC_SEVERITY_MAP,
+} from "./semantic/index.js";
+export type {
+  RawSemanticFinding,
+  SemanticAnalysisInput,
+  SemanticAnalysisResponse,
+  SemanticAuditResult,
+  SemanticCheck,
+  SemanticContextLimits,
+  SemanticContextSection,
+  SemanticIssueMeta,
+  SemanticLandmark,
+  SemanticMeta,
+  SemanticOptions,
+  SemanticProviderConfig,
+  SemanticSeverity,
+} from "./semantic/index.js";
 export type {
   AuditEngine,
   AuditOptions,
