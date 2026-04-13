@@ -126,6 +126,31 @@ describe("transformAxeViolation", () => {
     expect(issues[1].nodes).toEqual([{ html: "<a></a>" }]);
   });
 
+  test("propagates per-node failureSummary onto the resulting Issue", () => {
+    const violation = createViolation({
+      nodes: [
+        {
+          html: "<span></span>",
+          target: ["span"],
+          failureSummary:
+            "Fix any of the following:\n  Element has insufficient color contrast of 2.89",
+        },
+      ],
+    });
+
+    const issues = transformAxeViolation(violation);
+    expect(issues[0].failureSummary).toContain("insufficient color contrast");
+  });
+
+  test("leaves failureSummary undefined when the node did not provide one", () => {
+    const violation = createViolation({
+      nodes: [{ html: "<span></span>", target: ["span"] }],
+    });
+
+    const issues = transformAxeViolation(violation);
+    expect(issues[0].failureSummary).toBeUndefined();
+  });
+
   test("all issues from same violation share the same rule metadata", () => {
     const violation = createViolation({
       id: "image-alt",

@@ -19,6 +19,7 @@ export type AxeNodeResult = {
   html: string;
   impact?: string | null;
   target: (string | string[])[];
+  failureSummary?: string;
 };
 
 export type AxeViolation = {
@@ -124,6 +125,7 @@ export function transformAxeViolation(violation: AxeViolation): Issue[] {
     description: violation.description,
     help: violation.help,
     helpUrl: violation.helpUrl,
+    failureSummary: node.failureSummary,
     selector: flattenTarget(node.target),
     nodes: [{ html: node.html }],
   }));

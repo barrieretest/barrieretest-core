@@ -178,8 +178,13 @@ function addIssueLines(lines: string[], issues: Issue[], detail: DetailLevel): v
         );
         if (issue.selector) lines.push(`    Element: ${issue.selector}`);
         if (issue.description) lines.push(`    ${issue.description}`);
+        if (issue.help) lines.push(`    Help: ${issue.help}`);
         if (issue.codeSnippet) lines.push(`    Code: ${truncate(issue.codeSnippet)}`);
-        lines.push(`    Fix: ${issue.suggestedFix}`);
+        if (issue.failureSummary) {
+          for (const line of issue.failureSummary.split("\n")) {
+            lines.push(`    ${line}`);
+          }
+        }
         if (issue.documentationUrl) lines.push(`    Docs: ${issue.documentationUrl}`);
       }
       return;
@@ -193,6 +198,7 @@ function addIssueLines(lines: string[], issues: Issue[], detail: DetailLevel): v
         );
         if (issue.selector) lines.push(`    Element: ${issue.selector}`);
         if (issue.description) lines.push(`    ${issue.description}`);
+        if (issue.help) lines.push(`    Help: ${issue.help}`);
       }
     }
   }

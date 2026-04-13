@@ -150,7 +150,7 @@ Notes:
 - `engine: 'axe'` is the default and recommended engine
 - `engine: 'pa11y'` requires `pa11y` and `puppeteer`
 - URL audits with the axe engine require `puppeteer`
-- `detail: 'fix-ready'` adds fix suggestions to formatted output
+- `detail: 'fix-ready'` adds rule help text, per-element failure summaries, code snippets, and documentation links to formatted output
 - Source localization only runs when auditing an existing Puppeteer page
 
 #### Returns
@@ -219,6 +219,8 @@ formatIssues(result.issues, 'minimal')
 formatIssues(result.issues, 'actionable')
 formatIssues(result.issues, 'fix-ready')
 ```
+
+`formatFixReady()` preserves distinct element-level entries so per-element failure summaries and code snippets stay accurate.
 
 ## AI enhancement
 

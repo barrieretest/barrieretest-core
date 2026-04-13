@@ -9,6 +9,8 @@ const mockIssues: Issue[] = [
     description: "This element has insufficient contrast at this conformance level.",
     help: "Color contrast must meet the minimum ratio.",
     helpUrl: "https://www.w3.org/WAI/WCAG21/quickref/#contrast-minimum",
+    failureSummary:
+      "Fix any of the following:\n  Element has insufficient color contrast of 2.89 (foreground color: #777777, background color: #ffffff)",
     selector: "#header > h1",
     nodes: [{ html: '<h1 style="color: #777">Header</h1>' }],
   },
@@ -92,33 +94,46 @@ describe("report formatting", () => {
 
       expect(result[0].description).toContain("contrast");
     });
+
+    test("includes rule-level help text", () => {
+      const result = formatActionable(mockIssues);
+
+      const contrastIssue = result.find((r) => r.wcagCriterion === "1.4.3");
+      expect(contrastIssue?.help).toBe("Color contrast must meet the minimum ratio.");
+    });
   });
 
   describe("formatFixReady", () => {
-    test("includes suggested fix for known criteria", () => {
+    test("surfaces per-node failure summary when the engine provides one", () => {
       const result = formatFixReady(mockIssues);
 
-      const contrastIssue = result.find((r) => r.wcagCriterion === "1.4.3");
-      expect(contrastIssue?.suggestedFix).toContain("contrast ratio");
-      expect(contrastIssue?.suggestedFix).toContain("4.5:1");
+      const contrastIssue = result.find((r) => r.selector === "#header > h1");
+      expect(contrastIssue?.failureSummary).toContain("insufficient color contrast");
     });
 
-    test("includes code snippet from nodes", () => {
+    test("keeps separate entries for distinct elements with the same rule id", () => {
       const result = formatFixReady(mockIssues);
 
-      const contrastIssue = result.find((r) => r.wcagCriterion === "1.4.3");
-      expect(contrastIssue?.codeSnippet).toContain("<h1");
+      const contrastIssues = result.filter((r) => r.wcagCriterion === "1.4.3");
+      expect(contrastIssues).toHaveLength(2);
+      expect(contrastIssues.map((issue) => issue.selector).sort()).toEqual([
+        "#footer > p",
+        "#header > h1",
+      ]);
+      expect(contrastIssues.every((issue) => issue.count === 1)).toBe(true);
     });
 
-    test("includes documentation URL", () => {
-      const result = formatFixReady(mockIssues);
+    test("still counts identical fix-ready entries together", () => {
+      const identicalIssues: Issue[] = [mockIssues[0], { ...mockIssues[0] }];
 
-      const contrastIssue = result.find((r) => r.wcagCriterion === "1.4.3");
-      expect(contrastIssue?.documentationUrl).toContain("w3.org");
+      const result = formatFixReady(identicalIssues);
+      expect(result).toHaveLength(1);
+      expect(result[0].count).toBe(2);
+      expect(result[0].failureSummary).toContain("insufficient color contrast");
     });
 
-    test("provides generic fix for unknown criteria", () => {
-      const unknownIssue: Issue[] = [
+    test("failure summary is null when the engine did not provide one", () => {
+      const issue: Issue[] = [
         {
           id: "unknown-rule",
           impact: "serious",
@@ -129,8 +144,40 @@ describe("report formatting", () => {
         },
       ];
 
-      const result = formatFixReady(unknownIssue);
-      expect(result[0].suggestedFix).toContain("significantly impacts");
+      const result = formatFixReady(issue);
+      expect(result[0].failureSummary).toBeNull();
+    });
+
+    test("includes code snippet from nodes", () => {
+      const result = formatFixReady(mockIssues);
+
+      const contrastIssue = result.find((r) => r.selector === "#header > h1");
+      expect(contrastIssue?.codeSnippet).toContain("<h1");
+    });
+
+    test("uses helpUrl verbatim as the documentation URL", () => {
+      const result = formatFixReady(mockIssues);
+
+      const contrastIssue = result.find((r) => r.selector === "#header > h1");
+      expect(contrastIssue?.documentationUrl).toBe(
+        "https://www.w3.org/WAI/WCAG21/quickref/#contrast-minimum"
+      );
+    });
+
+    test("documentation URL is null when the engine did not provide one", () => {
+      const issue: Issue[] = [
+        {
+          id: "unknown-rule",
+          impact: "serious",
+          description: "Some issue",
+          help: "Help text",
+          selector: "div",
+          nodes: [{ html: "<div></div>" }],
+        },
+      ];
+
+      const result = formatFixReady(issue);
+      expect(result[0].documentationUrl).toBeNull();
     });
   });
 
@@ -146,8 +193,8 @@ describe("report formatting", () => {
       expect(Object.keys(minimal[0]).sort()).toEqual(["count", "id", "impact"]);
 
       const fixReady = formatIssues(mockIssues, "fix-ready");
-      const first = fixReady[0] as { suggestedFix?: string };
-      expect(first.suggestedFix).toBeDefined();
+      const first = fixReady[0] as { failureSummary?: string | null };
+      expect(first).toHaveProperty("failureSummary");
     });
   });
 });

@@ -51,10 +51,12 @@ export interface Issue {
   impact: IssueSeverity;
   /** Human-readable description of the issue */
   description: string;
-  /** Additional context or help text */
+  /** Rule-level remediation summary */
   help: string;
   /** Link to WCAG documentation */
   helpUrl?: string;
+  /** Per-node failure summary describing what is wrong with the specific element, when the engine provides one */
+  failureSummary?: string;
   /** CSS selector for the affected element */
   selector: string | null;
   /** Affected DOM nodes */
@@ -128,7 +130,7 @@ export interface AuditOptions {
    * Detail level for formatted output.
    * - "minimal": rule, severity, count only
    * - "actionable": + selector, WCAG criterion, description (default)
-   * - "fix-ready": + suggested fix, code snippet, documentation links
+   * - "fix-ready": + help text, per-element failure summary, code snippet, documentation links
    * @default "actionable"
    */
   detail?: DetailLevel;
