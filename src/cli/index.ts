@@ -2,10 +2,32 @@ import { audit } from "../audit.js";
 import { CACHE_DIR, getLastRun } from "../baseline/cache.js";
 import { readBaseline, updateBaseline, writeBaseline } from "../baseline/write.js";
 import { formatActionable, formatFixReady, formatMinimal } from "../report.js";
+import type { SemanticMeta } from "../semantic/types.js";
 import type { AuditEngine, AuditOptions, DetailLevel, Issue, IssueSeverity } from "../types.js";
+import {
+  type BarrieretestConfig,
+  getConfigPath,
+  getConfigValue,
+  isSupportedConfigKey,
+  readConfig,
+  setConfigValue,
+  SUPPORTED_CONFIG_KEYS,
+  unsetConfigValue,
+  writeConfig,
+} from "./config.js";
+import { resolveSemanticOptions } from "./semantic-options.js";
 
-export const CLI_COMMANDS = ["audit", "baseline", "baseline:accept", "baseline:update"] as const;
+export const CLI_COMMANDS = [
+  "audit",
+  "baseline",
+  "baseline:accept",
+  "baseline:update",
+  "config",
+  "init",
+] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number] | "help";
+
+export type ConfigSubcommand = "get" | "set" | "unset" | "path";
 
 export interface ParsedArgs {
   command: CliCommand;
@@ -22,6 +44,14 @@ export interface ParsedArgs {
   ignore?: string[];
   baseline?: string;
   json?: boolean;
+  semantic?: boolean;
+  semanticProvider?: string;
+  semanticModel?: string;
+  semanticChecks?: string[];
+  semanticTimeout?: number;
+  configSubcommand?: ConfigSubcommand;
+  configKey?: string;
+  configValue?: string;
 }
 
 export interface CliResult {
@@ -29,6 +59,12 @@ export interface CliResult {
   message?: string;
   error?: string;
   exitCode?: number;
+}
+
+export interface RunCliOptions {
+  cacheDir?: string;
+  env?: Record<string, string | undefined>;
+  configPath?: string;
 }
 
 /**
@@ -92,6 +128,10 @@ export function parseArgs(args: string[]): ParsedArgs {
         i++;
       }
     }
+  } else if (command === "config") {
+    parseConfigSubcommand(args, result);
+  } else if (command === "init") {
+    // no further args
   }
 
   return result;
@@ -125,8 +165,34 @@ function parseAuditFlags(args: string[], startIndex: number, result: ParsedArgs)
     } else if (arg === "--headless") {
       result.headless = nextArg !== "false";
       i++;
+    } else if (arg === "--semantic") {
+      result.semantic = true;
+    } else if (arg === "--semantic-provider") {
+      result.semanticProvider = nextArg;
+      i++;
+    } else if (arg === "--semantic-model") {
+      result.semanticModel = nextArg;
+      i++;
+    } else if (arg === "--semantic-checks") {
+      result.semanticChecks = nextArg
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      i++;
+    } else if (arg === "--semantic-timeout") {
+      result.semanticTimeout = Number.parseInt(nextArg, 10);
+      i++;
     }
   }
+}
+
+function parseConfigSubcommand(args: string[], result: ParsedArgs): void {
+  const sub = args[1];
+  if (sub === "get" || sub === "set" || sub === "unset" || sub === "path") {
+    result.configSubcommand = sub;
+  }
+  if (args[2] !== undefined) result.configKey = args[2];
+  if (args[3] !== undefined) result.configValue = args[3];
 }
 
 function progressLine(message: string, percent: number): string {
@@ -204,13 +270,23 @@ function addIssueLines(lines: string[], issues: Issue[], detail: DetailLevel): v
   }
 }
 
+function addSemanticSummaryLines(lines: string[], meta: SemanticMeta, issues: Issue[]): void {
+  const semanticIssueCount = issues.filter((i) => i.id.startsWith("semantic:")).length;
+  lines.push("  Semantic audit:");
+  lines.push(`    Provider: ${meta.provider}${meta.model ? ` (${meta.model})` : ""}`);
+  lines.push(`    Checks run: ${meta.checksRun.length}`);
+  lines.push(`    Findings: ${semanticIssueCount}`);
+}
+
 /**
  * Run CLI command
  */
-export async function runCli(args: ParsedArgs, cacheDir: string = CACHE_DIR): Promise<CliResult> {
+export async function runCli(args: ParsedArgs, options: RunCliOptions = {}): Promise<CliResult> {
+  const { cacheDir = CACHE_DIR, env = process.env, configPath } = options;
+
   switch (args.command) {
     case "audit":
-      return runAudit(args);
+      return runAudit(args, { env, configPath });
 
     case "baseline":
       return runBaseline(args);
@@ -221,11 +297,25 @@ export async function runCli(args: ParsedArgs, cacheDir: string = CACHE_DIR): Pr
     case "baseline:update":
       return runBaselineUpdate(args);
 
+    case "config":
+      return runConfig(args, configPath);
+
+    case "init": {
+      const { runInit } = await import("./init-wizard.js");
+      return runInit({ env, configPath });
+    }
+
     case "help":
     default:
       return {
         success: true,
-        message: `barrieretest - Single-page accessibility testing CLI
+        message: helpText(),
+      };
+  }
+}
+
+function helpText(): string {
+  return `barrieretest - Single-page accessibility testing CLI
 
 Usage:
   barrieretest <url>                    Run a single-page accessibility audit
@@ -233,29 +323,69 @@ Usage:
   barrieretest baseline <url> [options] Create or update a single-page baseline
   barrieretest baseline:accept <file>   Accept the last audit run into a baseline
   barrieretest baseline:update <dir>    Re-audit and update all baselines
+  barrieretest init                     Interactive wizard for semantic audit setup
+  barrieretest config <get|set|unset|path> [key] [value]
+                                        Manage user config at ~/.barrieretest/config.json
 
 Audit options:
-  -e, --engine <engine>      axe | pa11y (default: axe)
-  -d, --detail <level>       minimal | actionable | fix-ready (default: actionable)
-  -s, --min-severity <level> critical | serious | moderate | minor
-  --ignore <rules>           Comma-separated rule IDs to ignore
-  -b, --baseline <file>      Compare against baseline
-  --json                     Output JSON
-  -o, --output <file>        Write JSON results to file
-  --headless <bool>          Run headless (default: true)
+  -e, --engine <engine>         axe | pa11y (default: axe)
+  -d, --detail <level>          minimal | actionable | fix-ready (default: actionable)
+  -s, --min-severity <level>    critical | serious | moderate | minor
+  --ignore <rules>              Comma-separated rule IDs to ignore
+  -b, --baseline <file>         Compare against baseline
+  --json                        Output JSON
+  -o, --output <file>           Write JSON results to file
+  --headless <bool>             Run headless (default: true)
+
+Semantic AI options (opt-in; any --semantic-* flag enables semantic mode):
+  --semantic                    Enable AI-driven semantic audit
+  --semantic-provider <name>    nebius | openai | anthropic
+  --semantic-model <model>      Provider-specific model identifier
+  --semantic-checks <ids>       Comma-separated check IDs
+  --semantic-timeout <ms>       AI call timeout
+
+Semantic env vars (one of):
+  NEBIUS_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
+
+Note: --semantic is not supported with --engine pa11y in this release.
 
 Baseline options:
-  -o, --output <file>        Output file (default: ./baseline.json)
-  --update <file>            Update existing baseline
-  --base-url <url>           Override base URL for baseline:update`,
-      };
-  }
+  -o, --output <file>           Output file (default: ./baseline.json)
+  --update <file>               Update existing baseline
+  --base-url <url>              Override base URL for baseline:update`;
 }
 
-async function runAudit(args: ParsedArgs): Promise<CliResult> {
+interface RunAuditDeps {
+  env: Record<string, string | undefined>;
+  configPath?: string;
+}
+
+async function runAudit(args: ParsedArgs, deps: RunAuditDeps): Promise<CliResult> {
   if (!args.url) return { success: false, error: "URL required", exitCode: 1 };
 
   const detail = args.detail ?? "actionable";
+
+  let semanticOptions: AuditOptions["semantic"];
+  try {
+    const config: BarrieretestConfig = readConfig(deps.configPath);
+    semanticOptions = resolveSemanticOptions({
+      semantic: args.semantic,
+      semanticProvider: args.semanticProvider,
+      semanticModel: args.semanticModel,
+      semanticChecks: args.semanticChecks,
+      semanticTimeout: args.semanticTimeout,
+      engine: args.engine,
+      config,
+      env: deps.env,
+    });
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      exitCode: 1,
+    };
+  }
+
   const options: AuditOptions = {
     engine: args.engine,
     headless: args.headless ?? true,
@@ -263,6 +393,7 @@ async function runAudit(args: ParsedArgs): Promise<CliResult> {
     minSeverity: args.minSeverity,
     ignore: args.ignore,
     baseline: args.baseline,
+    semantic: semanticOptions,
   };
 
   if (!args.json) {
@@ -303,6 +434,11 @@ async function runAudit(args: ParsedArgs): Promise<CliResult> {
     lines.push(
       `  Baseline: ${b.newIssues.length} new, ${b.knownIssues.length} known, ${b.fixedIssues.length} fixed`
     );
+  }
+
+  if (result.semanticMeta) {
+    lines.push("");
+    addSemanticSummaryLines(lines, result.semanticMeta, result.issues);
   }
 
   lines.push("");
@@ -399,4 +535,83 @@ async function runBaselineAccept(file: string, cacheDir: string): Promise<CliRes
     success: true,
     message: `Created baseline with ${lastRun.issues.length} issues at ${file}`,
   };
+}
+
+async function runConfig(args: ParsedArgs, configPath?: string): Promise<CliResult> {
+  const sub = args.configSubcommand;
+  if (!sub) {
+    return {
+      success: false,
+      error: "Usage: barrieretest config <get|set|unset|path> [key] [value]",
+      exitCode: 1,
+    };
+  }
+
+  try {
+    if (sub === "path") {
+      return { success: true, message: configPath ?? getConfigPath() };
+    }
+
+    if (sub === "get") {
+      const config = readConfig(configPath);
+      if (!args.configKey) {
+        return { success: true, message: JSON.stringify(config, null, 2) };
+      }
+      const value = getConfigValue(config, args.configKey);
+      return { success: true, message: formatConfigValue(value) };
+    }
+
+    if (sub === "set") {
+      if (!args.configKey || args.configValue === undefined) {
+        return {
+          success: false,
+          error: `Usage: barrieretest config set <key> <value>. Known keys: ${SUPPORTED_CONFIG_KEYS.join(", ")}`,
+          exitCode: 1,
+        };
+      }
+      if (!isSupportedConfigKey(args.configKey)) {
+        return {
+          success: false,
+          error: `Unknown config key '${args.configKey}'. Known keys: ${SUPPORTED_CONFIG_KEYS.join(", ")}`,
+          exitCode: 1,
+        };
+      }
+      const current = readConfig(configPath);
+      const next = setConfigValue(current, args.configKey, args.configValue);
+      writeConfig(next, configPath);
+      return {
+        success: true,
+        message: `Set ${args.configKey} = ${formatConfigValue(getConfigValue(next, args.configKey))}`,
+      };
+    }
+
+    if (sub === "unset") {
+      if (!args.configKey) {
+        return {
+          success: false,
+          error: "Usage: barrieretest config unset <key>",
+          exitCode: 1,
+        };
+      }
+      const current = readConfig(configPath);
+      const next = unsetConfigValue(current, args.configKey);
+      writeConfig(next, configPath);
+      return { success: true, message: `Unset ${args.configKey}` };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      exitCode: 1,
+    };
+  }
+
+  return { success: false, error: `Unknown config subcommand: ${sub}`, exitCode: 1 };
+}
+
+function formatConfigValue(value: unknown): string {
+  if (value === undefined) return "";
+  if (Array.isArray(value)) return value.join(",");
+  if (typeof value === "object") return JSON.stringify(value, null, 2);
+  return String(value);
 }

@@ -2,10 +2,7 @@
  * Anthropic provider for AI-enhanced accessibility analysis
  */
 
-import type {
-  SemanticAnalysisInput,
-  SemanticAnalysisResponse,
-} from "../../semantic/types.js";
+import type { SemanticAnalysisInput, SemanticAnalysisResponse } from "../../semantic/types.js";
 import type { AIAnalysis, AIAnalysisInput, AIProvider, AIProviderConfig } from "../types.js";
 import { buildAnalysisPrompt, parseAnalysisResponse } from "../types.js";
 

@@ -29,9 +29,7 @@ describe("transformAxeViolation", () => {
     expect(issues[0].help).toBe(
       "Ensures the contrast between foreground and background colors meets WCAG 2 AA"
     );
-    expect(issues[0].helpUrl).toBe(
-      "https://dequeuniversity.com/rules/axe/4.10/color-contrast"
-    );
+    expect(issues[0].helpUrl).toBe("https://dequeuniversity.com/rules/axe/4.10/color-contrast");
   });
 
   test("maps impact directly — critical", () => {

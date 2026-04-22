@@ -25,9 +25,7 @@ function resolvePuppeteerLauncher(module: unknown): PuppeteerLauncher {
   if (isRecord(module) && isPuppeteerLauncher(module.default)) {
     return module.default;
   }
-  throw new Error(
-    "This operation requires 'puppeteer'. Install it or pass an existing page."
-  );
+  throw new Error("This operation requires 'puppeteer'. Install it or pass an existing page.");
 }
 
 const DEFAULT_LAUNCH_ARGS = [
@@ -61,9 +59,7 @@ export async function launchPuppeteerSession(
   try {
     puppeteerModule = await import("puppeteer");
   } catch {
-    throw new Error(
-      "This operation requires 'puppeteer'. Install it or pass an existing page."
-    );
+    throw new Error("This operation requires 'puppeteer'. Install it or pass an existing page.");
   }
 
   const puppeteer = resolvePuppeteerLauncher(puppeteerModule);

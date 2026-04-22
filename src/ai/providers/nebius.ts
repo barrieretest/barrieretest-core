@@ -5,18 +5,15 @@
  * See: https://nebius.ai/
  */
 
-import type {
-  SemanticAnalysisInput,
-  SemanticAnalysisResponse,
-} from "../../semantic/types.js";
+import type { SemanticAnalysisInput, SemanticAnalysisResponse } from "../../semantic/types.js";
 import type { AIAnalysis, AIAnalysisInput, AIProvider, AIProviderConfig } from "../types.js";
 import { buildAnalysisPrompt, parseAnalysisResponse } from "../types.js";
 
-const DEFAULT_MODEL = "Qwen/Qwen2-VL-72B-Instruct";
+const DEFAULT_MODEL = "openai/gpt-oss-120b";
 const DEFAULT_MAX_TOKENS = 1024;
 const DEFAULT_SEMANTIC_MAX_TOKENS = 2000;
 const DEFAULT_SEMANTIC_TIMEOUT_MS = 120_000;
-const NEBIUS_API_URL = "https://api.studio.nebius.ai/v1/chat/completions";
+const NEBIUS_API_URL = "https://api.tokenfactory.nebius.com/v1/chat/completions";
 
 interface NebiusMessage {
   role: "user" | "assistant" | "system";

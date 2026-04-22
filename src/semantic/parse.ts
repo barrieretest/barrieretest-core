@@ -7,11 +7,7 @@
  * `RawSemanticFinding[]` + `SemanticMeta` for the runner to map into Issues.
  */
 
-import type {
-  RawSemanticFinding,
-  SemanticLandmark,
-  SemanticSeverity,
-} from "./types.js";
+import type { RawSemanticFinding, SemanticLandmark, SemanticSeverity } from "./types.js";
 
 export interface ParsedSemanticResponse {
   findings: RawSemanticFinding[];
@@ -21,11 +17,7 @@ export interface ParsedSemanticResponse {
   overallAssessment?: string;
 }
 
-const VALID_SEVERITIES: ReadonlySet<SemanticSeverity> = new Set([
-  "error",
-  "warning",
-  "notice",
-]);
+const VALID_SEVERITIES: ReadonlySet<SemanticSeverity> = new Set(["error", "warning", "notice"]);
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object";

@@ -91,9 +91,7 @@ describe("resolveChecks", () => {
   });
 
   it("throws on unknown check id", () => {
-    expect(() => resolveChecks(["does-not-exist"], undefined)).toThrow(
-      /Unknown semantic check id/
-    );
+    expect(() => resolveChecks(["does-not-exist"], undefined)).toThrow(/Unknown semantic check id/);
   });
 });
 
@@ -278,10 +276,7 @@ describe("validateFindingsAgainstChecks", () => {
 
   it("drops findings with hallucinated checkType", () => {
     const result = validateFindingsAgainstChecks(
-      [
-        makeFinding({ checkType: "aria-mismatch" }),
-        makeFinding({ checkType: "imaginary-check" }),
-      ],
+      [makeFinding({ checkType: "aria-mismatch" }), makeFinding({ checkType: "imaginary-check" })],
       [ariaCheck]
     );
     expect(result.valid).toHaveLength(1);
@@ -291,10 +286,7 @@ describe("validateFindingsAgainstChecks", () => {
 
   it("drops findings for built-in checks that weren't requested", () => {
     const result = validateFindingsAgainstChecks(
-      [
-        makeFinding({ checkType: "page-title" }),
-        makeFinding({ checkType: "landmarks" }),
-      ],
+      [makeFinding({ checkType: "page-title" }), makeFinding({ checkType: "landmarks" })],
       [titleCheck]
     );
     expect(result.valid).toHaveLength(1);
@@ -495,4 +487,3 @@ describe("runSemanticAudit (with stub provider)", () => {
     expect(evaluateCallCount).toBe(1);
   });
 });
-

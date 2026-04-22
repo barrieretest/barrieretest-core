@@ -42,7 +42,7 @@ export async function readBaseline(path: string): Promise<BaselineFile | null> {
     if (content.score !== undefined && content.issues && content.documentTitle) {
       throw new Error(
         `"${path}" is an audit result, not a baseline file. ` +
-        `Create a baseline with: barrieretest baseline <url> -o <file>`
+          `Create a baseline with: barrieretest baseline <url> -o <file>`
       );
     }
 

@@ -92,11 +92,9 @@ export async function extractHtmlContext(
 
     const ariaElements: string[] = [];
     if (opts.needsAria) {
-      doc
-        .querySelectorAll("[aria-label], [aria-labelledby], [aria-describedby]")
-        .forEach((el) => {
-          ariaElements.push(el.outerHTML.substring(0, 200));
-        });
+      doc.querySelectorAll("[aria-label], [aria-labelledby], [aria-describedby]").forEach((el) => {
+        ariaElements.push(el.outerHTML.substring(0, 200));
+      });
     }
 
     const formElements: string[] = [];

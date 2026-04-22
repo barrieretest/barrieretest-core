@@ -9,11 +9,7 @@ import {
 } from "./browser.js";
 import { runAxeCore } from "./engines/axe.js";
 import { type LocalizationOptions, localizeIssues } from "./localization/index.js";
-import {
-  type LaunchedSession,
-  closeSession,
-  launchPuppeteerSession,
-} from "./puppeteer-launch.js";
+import { type LaunchedSession, closeSession, launchPuppeteerSession } from "./puppeteer-launch.js";
 import {
   calculateScore,
   getScoreInterpretation,
@@ -186,8 +182,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
 
     let engineIssues: Issue[] = filterIssues(engineResult.issues, { minSeverity, ignore });
 
-    const shouldLocalize =
-      detail === "fix-ready" && page && localizationOptions?.enabled !== false;
+    const shouldLocalize = detail === "fix-ready" && page && localizationOptions?.enabled !== false;
 
     if (shouldLocalize && page) {
       try {
@@ -278,14 +273,10 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     const mergedIssues = [...engineIssues, ...semanticIssues];
     const filteredIssues = filterIssues(mergedIssues, { minSeverity, ignore });
 
-    const baselineResult = await processAuditWithBaseline(
-      filteredIssues,
-      engineResult.pageUrl,
-      {
-        baseline,
-        updateBaseline,
-      }
-    );
+    const baselineResult = await processAuditWithBaseline(filteredIssues, engineResult.pageUrl, {
+      baseline,
+      updateBaseline,
+    });
 
     const score = calculateScore(filteredIssues);
     const severityLevel = getSeverityLevel(score);

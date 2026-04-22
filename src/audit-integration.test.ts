@@ -52,9 +52,7 @@ mock.module("./engines/axe.js", () => ({
 }));
 
 mock.module("./semantic/runner.js", () => ({
-  runSemanticAudit: async (
-    runContext: { url: string; pagePrepared?: boolean }
-  ) => {
+  runSemanticAudit: async (runContext: { url: string; pagePrepared?: boolean }) => {
     semanticCalls.push({
       url: runContext.url,
       pagePrepared: runContext.pagePrepared,
@@ -246,9 +244,7 @@ describe("audit() warn-and-continue on semantic failure", () => {
     expect(result.issues.map((i) => i.id)).toEqual(["engine-only"]);
     expect(result.semanticMeta).toBeUndefined();
     expect(
-      consoleWarnSpy.calls.some((args) =>
-        String(args[0] ?? "").includes("Semantic audit failed")
-      )
+      consoleWarnSpy.calls.some((args) => String(args[0] ?? "").includes("Semantic audit failed"))
     ).toBe(true);
   });
 });

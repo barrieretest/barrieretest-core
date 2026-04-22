@@ -2,10 +2,7 @@
  * Types for AI-enhanced accessibility analysis
  */
 
-import type {
-  SemanticAnalysisInput,
-  SemanticAnalysisResponse,
-} from "../semantic/types.js";
+import type { SemanticAnalysisInput, SemanticAnalysisResponse } from "../semantic/types.js";
 import type { Issue } from "../types.js";
 
 /**

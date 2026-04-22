@@ -16,24 +16,16 @@
 import { createProvider } from "../ai/index.js";
 import type { AIProvider } from "../ai/types.js";
 import type { BrowserPage } from "../browser.js";
-import {
-  closeSession,
-  launchPuppeteerSession,
-  navigateTo,
-} from "../puppeteer-launch.js";
+import { closeSession, launchPuppeteerSession, navigateTo } from "../puppeteer-launch.js";
 import type { Issue } from "../types.js";
 import { resolveChecks } from "./checks/index.js";
-import {
-  type ExtractedContext,
-  extractHtmlContext,
-  formatExtractedContext,
-} from "./context.js";
+import { type ExtractedContext, extractHtmlContext, formatExtractedContext } from "./context.js";
 import { parseSemanticResponse } from "./parse.js";
-import { SEMANTIC_SYSTEM_PROMPT, buildSemanticPrompt } from "./prompt.js";
+import { buildSemanticPrompt, SEMANTIC_SYSTEM_PROMPT } from "./prompt.js";
 import { sanitizePromptContext } from "./sanitize.js";
 import {
-  SEMANTIC_SEVERITY_MAP,
   type RawSemanticFinding,
+  SEMANTIC_SEVERITY_MAP,
   type SemanticAuditResult,
   type SemanticCheck,
   type SemanticContextSection,
@@ -179,8 +171,6 @@ export async function runSemanticAudit(
 
   await onProgress?.({ percent: 10, message: "Resolving semantic checks" });
 
-  // Decision 4A: dismiss cookie banners ourselves unless the caller signals
-  // the page is already prepared (typical when called from `audit({ semantic })`).
   if (!pagePrepared) {
     try {
       const { dismissCookieBanner } = await import("../cookie-banner.js");
@@ -191,21 +181,13 @@ export async function runSemanticAudit(
   }
 
   const sections = unionContextSections(checks);
-  const rawContext: ExtractedContext = await extractHtmlContext(
-    page,
-    sections,
-    options.context
-  );
+  const rawContext: ExtractedContext = await extractHtmlContext(page, sections, options.context);
   await onProgress?.({ percent: 30, message: "Extracting page context" });
 
   const formattedContext = formatExtractedContext(rawContext);
   const sanitized = sanitizePromptContext(formattedContext);
 
-  const screenshot = await ensureScreenshot(
-    page,
-    cachedScreenshot,
-    checksNeedScreenshot(checks)
-  );
+  const screenshot = await ensureScreenshot(page, cachedScreenshot, checksNeedScreenshot(checks));
 
   const userPrompt = buildSemanticPrompt({
     checks,
@@ -226,9 +208,7 @@ export async function runSemanticAudit(
     });
 
   if (!provider.analyzeSemantic) {
-    throw new Error(
-      `AI provider '${providerConfig.name}' does not implement analyzeSemantic()`
-    );
+    throw new Error(`AI provider '${providerConfig.name}' does not implement analyzeSemantic()`);
   }
 
   const response = await provider.analyzeSemantic({

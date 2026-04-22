@@ -84,6 +84,110 @@ npx barrieretest https://example.com --engine pa11y
 
 Default CLI engine: `axe`.
 
+### Semantic AI from the CLI
+
+The easiest way to set things up is the interactive wizard:
+
+```bash
+npx barrieretest init
+```
+
+It walks you through provider selection, detects your API-key env var, lets you
+pick which checks to run, and writes the result to
+`~/.barrieretest/config.json`. No flags to remember, no docs to dig through.
+
+After that, any semantic audit is just:
+
+```bash
+npx barrieretest https://example.com --semantic
+```
+
+If you'd rather wire it up by hand, semantic mode is opt-in — add `--semantic`
+(or any `--semantic-*` flag) and set a provider API key via env. The CLI
+resolves the provider from:
+
+1. `--semantic-provider`
+2. `semantic.provider` in user config (see below)
+3. Env inference — exactly one of `NEBIUS_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
+
+```bash
+export NEBIUS_API_KEY=...
+npx barrieretest https://example.com --semantic
+```
+
+Override provider or model per run:
+
+```bash
+npx barrieretest https://example.com \
+  --semantic \
+  --semantic-provider openai \
+  --semantic-model gpt-4o
+```
+
+Restrict which checks run:
+
+```bash
+npx barrieretest https://example.com \
+  --semantic \
+  --semantic-checks aria-mismatch,page-title
+```
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--semantic` | Enable semantic audit (no-op when already implied by another flag) |
+| `--semantic-provider <name>` | `nebius` \| `openai` \| `anthropic` |
+| `--semantic-model <id>` | Provider-specific model identifier |
+| `--semantic-checks <ids>` | Comma-separated check IDs |
+| `--semantic-timeout <ms>` | AI call timeout |
+
+Any `--semantic-*` flag implicitly enables semantic mode. Config defaults alone
+never auto-enable it — semantic always requires an explicit intent.
+
+`--semantic` is not supported with `--engine pa11y` in this release and fails
+with a clear error.
+
+### CLI user config
+
+`barrieretest init` is the friendly front door; `config` is the scriptable
+back door for the same file.
+
+The CLI reads non-secret defaults from `~/.barrieretest/config.json`. API keys
+live only in env vars — `config set` rejects anything else.
+
+```bash
+# Set defaults you don't want to type every time
+npx barrieretest config set semantic.provider nebius
+npx barrieretest config set semantic.model openai/gpt-oss-120b
+npx barrieretest config set semantic.checks aria-mismatch,page-title
+npx barrieretest config set semantic.timeout 120000
+
+# Read back
+npx barrieretest config get
+npx barrieretest config get semantic.provider
+
+# Clear a default
+npx barrieretest config unset semantic.model
+
+# Where does it live
+npx barrieretest config path
+```
+
+Supported keys: `semantic.provider`, `semantic.model`, `semantic.checks`,
+`semantic.timeout`.
+
+CLI flags always override config values. Config never enables semantic on its
+own — pass `--semantic` to activate.
+
+Debug the locally built CLI with the Node inspector:
+
+```bash
+npm run debug:cli -- https://example.com
+```
+
+This builds `dist/` first, then starts `./dist/cli/bin.js` with `--inspect-brk` so you can attach a debugger before execution continues.
+
 Baseline workflow:
 
 ```bash
@@ -254,7 +358,7 @@ const result = await semanticAudit('https://example.com', {
   provider: {
     name: 'nebius',
     apiKey: process.env.NEBIUS_API_KEY!,
-    model: 'Qwen/Qwen2-VL-72B-Instruct',
+    model: 'openai/gpt-oss-120b',
   },
 })
 
@@ -357,11 +461,11 @@ tweaking prompt wording without forking the package.
 
 ### Provider support
 
-| Provider | `analyzeSemantic` |
-|---|---|
-| `nebius` | Full support (production-tested) |
-| `openai` | Implemented; pass a vision-capable model (e.g. `gpt-4o`) |
-| `anthropic` | Implemented; pass a vision-capable Claude model |
+| Provider | Suggested model | Notes |
+|---|---|---|
+| `nebius` | `openai/gpt-oss-120b` | Full support (production-tested); also what the `init` wizard suggests by default |
+| `openai` | `gpt-4o` | Pass a vision-capable model |
+| `anthropic` | `claude-sonnet-4-5` | Pass a vision-capable Claude model |
 
 ## Cookie banner dismissal
 

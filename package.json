@@ -1,6 +1,6 @@
 {
   "name": "@barrieretest/core",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Open-source core for single-page accessibility audits",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,17 +19,20 @@
   ],
   "scripts": {
     "build": "tsc",
+    "debug:cli": "npm run build && node --inspect-brk ./dist/cli/bin.js",
     "prepack": "npm run build",
     "test": "bun test --path-ignore-patterns='**/audit-integration.test.ts' && bun test src/audit-integration.test.ts",
     "test:unit": "bun test --path-ignore-patterns='**/audit-integration.test.ts'",
     "test:integration": "bun test src/audit-integration.test.ts",
     "test:watch": "bun test --path-ignore-patterns='**/audit-integration.test.ts' --watch",
+    "lint": "biome format --write",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "axe-core": "^4.10.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.4.12",
     "@types/bun": "latest",
     "@types/pa11y": "^5.3.7",
     "pa11y": "^9.0.1",

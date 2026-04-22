@@ -73,10 +73,7 @@ export type Pa11yRunResult = {
 };
 
 type PuppeteerLauncher = {
-  launch: (options: {
-    headless: boolean;
-    args: string[];
-  }) => Promise<PuppeteerBrowserLike>;
+  launch: (options: { headless: boolean; args: string[] }) => Promise<PuppeteerBrowserLike>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

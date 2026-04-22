@@ -333,7 +333,11 @@ export {
   saveIssueScreenshot,
 } from "./output.js";
 export type { ReactSourceLocation } from "./react.js";
-export { getReactSourceLocation, isReactDevelopmentMode, isReactDevToolsAvailable } from "./react.js";
+export {
+  getReactSourceLocation,
+  isReactDevelopmentMode,
+  isReactDevToolsAvailable,
+} from "./react.js";
 export type { ElementScreenshotResult, ScreenshotOptions } from "./screenshot.js";
 export { captureElementScreenshot, captureMultipleElementScreenshots } from "./screenshot.js";
 export type { SearchMatch, SearchOptions } from "./search.js";

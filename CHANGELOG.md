@@ -5,6 +5,27 @@ All notable changes to `@barrieretest/core` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.0]
+
+### Added
+
+- `barrieretest init` — interactive TUI wizard that walks users through semantic setup (provider, model, checks, timeout) and writes `~/.barrieretest/config.json`. Auto-detects existing config and provider API-key env vars to pre-select sensible defaults. Suggested model per provider: `nebius` → `openai/gpt-oss-120b`, `openai` → `gpt-4o`, `anthropic` → `claude-sonnet-4-5`. Ctrl+C aborts cleanly with exit code 130; non-TTY environments get a clear error instead of a hang.
+- `--semantic` flag and `--semantic-*` overrides (`--semantic-provider`, `--semantic-model`, `--semantic-checks`, `--semantic-timeout`) on the `barrieretest` CLI. Any `--semantic-*` flag implicitly enables semantic mode; config defaults alone never do.
+- Provider resolution order for the CLI: explicit `--semantic-provider` > `semantic.provider` in user config > inferred from env when exactly one of `NEBIUS_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` is set. Missing or ambiguous resolution fails with a clear error.
+- `barrieretest config <get|set|unset|path>` subcommand for managing non-secret defaults at `~/.barrieretest/config.json`. Supported keys: `semantic.provider`, `semantic.model`, `semantic.checks`, `semantic.timeout`.
+- CLI text output now includes a short semantic summary block (provider, model, checks run, findings count) when a run returned `semanticMeta`.
+- `npm run debug:cli -- <args>` to build the package and launch the local compiled CLI (`dist/cli/bin.js`) under Node's inspector with `--inspect-brk` for easier debugging.
+
+### Changed
+
+- `runCli()`'s second parameter is now an options object (`{ cacheDir?, env?, configPath? }`) instead of a bare `cacheDir` string. Callers passing `cacheDir` positionally should migrate to `runCli(args, { cacheDir })`.
+
+### Notes
+
+- `--semantic` with `--engine pa11y` is rejected with a clear error in this release; pa11y manages its own browser internally and cannot share a page with the semantic pass.
+
 ## [0.4.0]
 
 ### Added

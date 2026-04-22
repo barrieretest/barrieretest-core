@@ -32,7 +32,10 @@ export type PuppeteerBrowserLike = {
 export type PuppeteerPageLike = Omit<BrowserPage, "goto"> & {
   goto: (
     url: string,
-    options?: { waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2"; timeout?: number }
+    options?: {
+      waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
+      timeout?: number;
+    }
   ) => Promise<unknown>;
   browser: () => PuppeteerBrowserLike;
   setViewport?: (viewport: { width: number; height: number }) => Promise<unknown>;

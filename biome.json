@@ -1,14 +1,43 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.4.10/schema.json",
-  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "$schema": "https://biomejs.dev/schemas/2.4.2/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
   "files": {
     "ignoreUnknown": false,
     "maxSize": 1500000,
     "includes": [
       "**",
+      "!**/*.gen.ts",
+      "!**/*.generated.module.css",
+      "!**/generated/**",
       "!**/dist/",
+      "!**/build/",
+      "!**/webpack-dist/",
+      "!**/.output/",
       "!**/node_modules/",
-      "!**/.barrieretest/",
+      "!**/.yarn/",
+      "!**/.cache/",
+      "!**/.coverage/",
+      "!**/.tanstack/",
+      "!**/external/",
+      "!**/externals/",
+      "!**/third_party/",
+      "!**/*_third-party/",
+      "!**/lib/",
+      "!**/dev/",
+      "!**/tests/",
+      "!**/public/",
+      "!**/cmake-build*",
+      "!**/*.stories.ts",
+      "!**/*.stories.tsx",
+      "!*.js",
+      "!*.jsx",
+      "!yarn/",
+      "!**/tsconfig.web.json",
+      "!**/tsconfig.univ.json",
       "!**/tsconfig.json",
       "!tsconfig.json",
       "!package.json"
@@ -138,8 +167,7 @@
       "__dirname",
       "__filename",
       "Buffer",
-      "global",
-      "Bun"
+      "global"
     ]
   },
   "html": {
@@ -153,7 +181,9 @@
       "includes": ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"],
       "linter": {
         "rules": {
-          "complexity": { "noArguments": "error" },
+          "complexity": {
+            "noArguments": "error"
+          },
           "correctness": {
             "noConstAssign": "off",
             "noGlobalObjectCalls": "off",
@@ -164,7 +194,9 @@
             "noUnreachable": "off",
             "noUnreachableSuper": "off"
           },
-          "style": { "useConst": "error" },
+          "style": {
+            "useConst": "error"
+          },
           "suspicious": {
             "noClassAssign": "off",
             "noDuplicateClassMembers": "off",

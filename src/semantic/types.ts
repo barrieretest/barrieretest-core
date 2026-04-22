@@ -23,13 +23,7 @@ export type SemanticSeverity = "error" | "warning" | "notice";
  * Categories of HTML context a semantic check might need extracted from
  * the page. Only the union of needed sections is gathered for a given run.
  */
-export type SemanticContextSection =
-  | "head"
-  | "body"
-  | "aria"
-  | "forms"
-  | "images"
-  | "landmarks";
+export type SemanticContextSection = "head" | "body" | "aria" | "forms" | "images" | "landmarks";
 
 /**
  * A finding produced by the AI for a single check, before it is normalized

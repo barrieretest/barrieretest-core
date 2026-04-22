@@ -135,7 +135,6 @@ describe("parseArgs", () => {
     expect(args.engine).toBe("axe");
   });
 
-
   it("parses detail level with -d flag", () => {
     const args = parseArgs(["audit", "https://example.com", "-d", "minimal"]);
 
@@ -199,6 +198,98 @@ describe("parseArgs", () => {
     expect(args.minSeverity).toBe("serious");
     expect(args.json).toBe(true);
   });
+
+  it("parses --semantic flag", () => {
+    const args = parseArgs(["https://example.com", "--semantic"]);
+
+    expect(args.semantic).toBe(true);
+  });
+
+  it("parses --semantic-provider flag", () => {
+    const args = parseArgs(["https://example.com", "--semantic-provider", "openai"]);
+
+    expect(args.semanticProvider).toBe("openai");
+  });
+
+  it("parses --semantic-model flag", () => {
+    const args = parseArgs(["https://example.com", "--semantic-model", "gpt-4o"]);
+
+    expect(args.semanticModel).toBe("gpt-4o");
+  });
+
+  it("parses --semantic-checks as a comma-separated list", () => {
+    const args = parseArgs([
+      "https://example.com",
+      "--semantic-checks",
+      "aria-mismatch,page-title,alt-text-quality",
+    ]);
+
+    expect(args.semanticChecks).toEqual(["aria-mismatch", "page-title", "alt-text-quality"]);
+  });
+
+  it("parses --semantic-timeout as a number", () => {
+    const args = parseArgs(["https://example.com", "--semantic-timeout", "90000"]);
+
+    expect(args.semanticTimeout).toBe(90_000);
+  });
+
+  it("treats --semantic-* flags on an implicit audit as valid input", () => {
+    const args = parseArgs([
+      "https://example.com",
+      "--semantic-provider",
+      "nebius",
+      "--semantic-model",
+      "openai/gpt-oss-120b",
+    ]);
+
+    expect(args.command).toBe("audit");
+    expect(args.semantic).toBeUndefined();
+    expect(args.semanticProvider).toBe("nebius");
+    expect(args.semanticModel).toBe("openai/gpt-oss-120b");
+  });
+
+  it("parses config get without key", () => {
+    const args = parseArgs(["config", "get"]);
+
+    expect(args.command).toBe("config");
+    expect(args.configSubcommand).toBe("get");
+    expect(args.configKey).toBeUndefined();
+  });
+
+  it("parses config get with key", () => {
+    const args = parseArgs(["config", "get", "semantic.provider"]);
+
+    expect(args.configSubcommand).toBe("get");
+    expect(args.configKey).toBe("semantic.provider");
+  });
+
+  it("parses config set with key and value", () => {
+    const args = parseArgs(["config", "set", "semantic.provider", "nebius"]);
+
+    expect(args.command).toBe("config");
+    expect(args.configSubcommand).toBe("set");
+    expect(args.configKey).toBe("semantic.provider");
+    expect(args.configValue).toBe("nebius");
+  });
+
+  it("parses config unset", () => {
+    const args = parseArgs(["config", "unset", "semantic.model"]);
+
+    expect(args.configSubcommand).toBe("unset");
+    expect(args.configKey).toBe("semantic.model");
+  });
+
+  it("parses config path", () => {
+    const args = parseArgs(["config", "path"]);
+
+    expect(args.configSubcommand).toBe("path");
+  });
+
+  it("parses the init command", () => {
+    const args = parseArgs(["init"]);
+
+    expect(args.command).toBe("init");
+  });
 });
 
 describe("CLI_COMMANDS", () => {
@@ -216,6 +307,124 @@ describe("CLI_COMMANDS", () => {
 
   it("exports baseline:update command", () => {
     expect(CLI_COMMANDS).toContain("baseline:update");
+  });
+
+  it("exports config command", () => {
+    expect(CLI_COMMANDS).toContain("config");
+  });
+
+  it("exports init command", () => {
+    expect(CLI_COMMANDS).toContain("init");
+  });
+});
+
+describe("runCli config", () => {
+  const CONFIG_PATH = join(TEST_DIR, "config.json");
+
+  it("prints the config path", async () => {
+    const result = await runCli(
+      { command: "config", configSubcommand: "path" },
+      { configPath: CONFIG_PATH }
+    );
+    expect(result.success).toBe(true);
+    expect(result.message).toBe(CONFIG_PATH);
+  });
+
+  it("writes and reads a config value", async () => {
+    const setResult = await runCli(
+      {
+        command: "config",
+        configSubcommand: "set",
+        configKey: "semantic.provider",
+        configValue: "nebius",
+      },
+      { configPath: CONFIG_PATH }
+    );
+    expect(setResult.success).toBe(true);
+    expect(existsSync(CONFIG_PATH)).toBe(true);
+
+    const getResult = await runCli(
+      {
+        command: "config",
+        configSubcommand: "get",
+        configKey: "semantic.provider",
+      },
+      { configPath: CONFIG_PATH }
+    );
+    expect(getResult.success).toBe(true);
+    expect(getResult.message).toBe("nebius");
+  });
+
+  it("rejects an unknown config key on set", async () => {
+    const result = await runCli(
+      {
+        command: "config",
+        configSubcommand: "set",
+        configKey: "nonsense.key",
+        configValue: "x",
+      },
+      { configPath: CONFIG_PATH }
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Unknown config key");
+  });
+
+  it("unsets a config value", async () => {
+    await runCli(
+      {
+        command: "config",
+        configSubcommand: "set",
+        configKey: "semantic.model",
+        configValue: "gpt-4o",
+      },
+      { configPath: CONFIG_PATH }
+    );
+
+    const unsetResult = await runCli(
+      {
+        command: "config",
+        configSubcommand: "unset",
+        configKey: "semantic.model",
+      },
+      { configPath: CONFIG_PATH }
+    );
+    expect(unsetResult.success).toBe(true);
+
+    const getResult = await runCli(
+      {
+        command: "config",
+        configSubcommand: "get",
+        configKey: "semantic.model",
+      },
+      { configPath: CONFIG_PATH }
+    );
+    expect(getResult.success).toBe(true);
+    expect(getResult.message).toBe("");
+  });
+
+  it("routes to the init wizard and fails gracefully outside a TTY", async () => {
+    const result = await runCli({ command: "init" }, { configPath: CONFIG_PATH, env: {} });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("interactive terminal");
+  });
+
+  it("prints the whole config for bare get", async () => {
+    await runCli(
+      {
+        command: "config",
+        configSubcommand: "set",
+        configKey: "semantic.provider",
+        configValue: "openai",
+      },
+      { configPath: CONFIG_PATH }
+    );
+
+    const result = await runCli(
+      { command: "config", configSubcommand: "get" },
+      { configPath: CONFIG_PATH }
+    );
+    expect(result.success).toBe(true);
+    expect(result.message).toContain('"provider": "openai"');
   });
 });
 
@@ -251,7 +460,7 @@ describe("runCli baseline:accept", () => {
         command: "baseline:accept",
         file: TEST_BASELINE,
       },
-      TEST_CACHE
+      { cacheDir: TEST_CACHE }
     );
 
     expect(result.success).toBe(true);
@@ -278,7 +487,7 @@ describe("runCli baseline:accept", () => {
         command: "baseline:accept",
         file: TEST_BASELINE,
       },
-      TEST_CACHE
+      { cacheDir: TEST_CACHE }
     );
 
     // Verify merged
@@ -292,7 +501,7 @@ describe("runCli baseline:accept", () => {
         command: "baseline:accept",
         file: TEST_BASELINE,
       },
-      "/non/existent/cache"
+      { cacheDir: "/non/existent/cache" }
     );
 
     expect(result.success).toBe(false);

@@ -6,11 +6,7 @@
  * `Issue` format used throughout the library.
  */
 
-import type {
-  BrowserPage,
-  PuppeteerBrowserLike,
-  PuppeteerPageLike,
-} from "../browser.js";
+import type { BrowserPage, PuppeteerBrowserLike, PuppeteerPageLike } from "../browser.js";
 import { isPuppeteerPage } from "../browser.js";
 import { launchPuppeteerSession, navigateTo } from "../puppeteer-launch.js";
 import type { Issue, IssueSeverity } from "../types.js";
