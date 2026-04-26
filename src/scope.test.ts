@@ -45,6 +45,6 @@ describe("open-source scope", () => {
     const readme = readFileSync("README.md", "utf-8");
 
     expect(readme).toContain("Open-source core for single-page accessibility audits.");
-    expect(readme).toContain("It does not include:");
+    expect(readme).toContain("axe-core audits for single pages");
   });
 });

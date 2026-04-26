@@ -290,6 +290,40 @@ describe("parseArgs", () => {
 
     expect(args.command).toBe("init");
   });
+
+  it("parses check add with bare --needs-screenshot without swallowing the next flag", () => {
+    const args = parseArgs([
+      "check",
+      "add",
+      "--id",
+      "x-check",
+      "--title",
+      "t",
+      "--description",
+      "d",
+      "--prompt",
+      "p enough to pass",
+      "--needs-screenshot",
+      "--scope",
+      "global",
+    ]);
+    expect(args.command).toBe("check");
+    expect(args.checkSubcommand).toBe("add");
+    expect(args.checkNeedsScreenshot).toBe(true);
+    expect(args.checkScope).toBe("global");
+  });
+
+  it("accepts explicit --needs-screenshot false", () => {
+    const args = parseArgs(["check", "add", "--needs-screenshot", "false", "--scope", "project"]);
+    expect(args.checkNeedsScreenshot).toBe(false);
+    expect(args.checkScope).toBe("project");
+  });
+
+  it("accepts explicit --needs-screenshot true", () => {
+    const args = parseArgs(["check", "add", "--needs-screenshot", "true", "--scope", "project"]);
+    expect(args.checkNeedsScreenshot).toBe(true);
+    expect(args.checkScope).toBe("project");
+  });
 });
 
 describe("CLI_COMMANDS", () => {

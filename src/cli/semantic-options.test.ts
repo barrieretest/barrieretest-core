@@ -257,4 +257,76 @@ describe("resolveSemanticOptions", () => {
     });
     expect(result?.provider.name).toBe("openai");
   });
+
+  it("passes user-defined customChecks through to SemanticOptions", () => {
+    const result = resolveSemanticOptions({
+      semantic: true,
+      semanticProvider: "nebius",
+      config: {
+        semantic: {
+          customChecks: [
+            {
+              id: "button-verbs",
+              title: "Button Verbs",
+              description: "Buttons use clear action verbs",
+              prompt: "Flag buttons whose label is not a clear action verb.",
+            },
+          ],
+        },
+      },
+      env: { NEBIUS_API_KEY: "nk" },
+    });
+
+    expect(result?.customChecks).toBeDefined();
+    expect(result?.customChecks?.map((c) => c.id)).toEqual(["button-verbs"]);
+    // Converted to runtime shape:
+    expect(result?.customChecks?.[0].needsScreenshot).toBe(false);
+    expect(result?.customChecks?.[0].needsContext).toEqual(["body"]);
+  });
+
+  it("accepts --semantic-checks pointing at a user-defined id", () => {
+    const result = resolveSemanticOptions({
+      semantic: true,
+      semanticProvider: "nebius",
+      semanticChecks: ["button-verbs"],
+      config: {
+        semantic: {
+          customChecks: [
+            {
+              id: "button-verbs",
+              title: "Button Verbs",
+              description: "Buttons use clear action verbs",
+              prompt: "Flag buttons whose label is not a clear action verb.",
+            },
+          ],
+        },
+      },
+      env: { NEBIUS_API_KEY: "nk" },
+    });
+
+    expect(result?.checks).toEqual(["button-verbs"]);
+  });
+
+  it("rejects --semantic-checks ids that match neither built-in nor user checks", () => {
+    expect(() =>
+      resolveSemanticOptions({
+        semantic: true,
+        semanticProvider: "nebius",
+        semanticChecks: ["nope"],
+        config: {
+          semantic: {
+            customChecks: [
+              {
+                id: "button-verbs",
+                title: "Button Verbs",
+                description: "X",
+                prompt: "Flag buttons whose label is not a clear action verb.",
+              },
+            ],
+          },
+        },
+        env: { NEBIUS_API_KEY: "nk" },
+      })
+    ).toThrow(/Unknown semantic check/);
+  });
 });

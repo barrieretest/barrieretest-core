@@ -5,22 +5,13 @@ Open-source core for single-page accessibility audits.
 `@barrieretest/core` powers the free single-page checks behind barrieretest.at. It includes:
 
 - axe-core audits for single pages
-- optional pa11y fallback support
+- optional pa11y support
 - scoring and severity levels
 - screenshots
 - baseline workflows for CI
-- optional AI analysis for a single page
-- semantic audits via vision LLMs (`semanticAudit`) with an extensible check registry
+- optional AI analysis for individual issues
+- semantic audits via vision LLMs
 - cookie banner dismissal before audits
-
-It does not include:
-
-- multi-page crawling or page discovery
-- cross-page AI synthesis
-- PDF reports
-- payments
-- email delivery
-- invoice generation
 
 ## Install
 
@@ -36,16 +27,9 @@ Add pa11y only if you want the optional pa11y engine:
 npm install @barrieretest/core puppeteer pa11y
 ```
 
-### What you need
-
-- **URL audits and the CLI** need `puppeteer`
-- **Existing Playwright or Puppeteer page audits** use the page you pass in
-- **`engine: 'pa11y'`** needs both `pa11y` and `puppeteer`
-- **Default engine is `axe`**
-
 ## Quick start
 
-Audit a URL with the default axe engine:
+Audit a URL with the axe engine (default):
 
 ```typescript
 import { audit } from '@barrieretest/core'
@@ -55,7 +39,7 @@ console.log(`Score: ${result.score}/100`)
 console.log(`Issues: ${result.issues.length}`)
 ```
 
-Audit an existing page directly:
+Audit an existing Puppeteer or Playwright page directly:
 
 ```typescript
 const result = await audit(page)
@@ -82,32 +66,31 @@ npx barrieretest https://example.com -o results.json
 npx barrieretest https://example.com --engine pa11y
 ```
 
-Default CLI engine: `axe`.
-
 ### Semantic AI from the CLI
 
-The easiest way to set things up is the interactive wizard:
+Semantic AI adds vision and reasoning checks for accessibility issues rule engines do not reliably detect. It can review visible text, labels, page language, image descriptions, form-label clarity, and landmark structure, which is useful for catching meaning and context problems beyond DOM rules.
+
+The easiest way to configure semantic audits is the interactive wizard:
 
 ```bash
 npx barrieretest init
 ```
 
-It walks you through provider selection, detects your API-key env var, lets you
-pick which checks to run, and writes the result to
-`~/.barrieretest/config.json`. No flags to remember, no docs to dig through.
+It walks through provider selection, checks for the provider API-key env var,
+lets you pick which checks to run, and writes non-secret defaults to
+`~/.barrieretest/config.json`.
 
-After that, any semantic audit is just:
+After that, run:
 
 ```bash
 npx barrieretest https://example.com --semantic
 ```
 
-If you'd rather wire it up by hand, semantic mode is opt-in — add `--semantic`
-(or any `--semantic-*` flag) and set a provider API key via env. The CLI
-resolves the provider from:
+For manual setup, pass `--semantic` or any `--semantic-*` flag and provide a
+provider API key via env. The CLI resolves the provider from:
 
 1. `--semantic-provider`
-2. `semantic.provider` in user config (see below)
+2. `semantic.provider` in user config
 3. Env inference — exactly one of `NEBIUS_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
 
 ```bash
@@ -136,22 +119,31 @@ Flags:
 
 | Flag | Description |
 |------|-------------|
-| `--semantic` | Enable semantic audit (no-op when already implied by another flag) |
+| `--semantic` | Enable semantic audit |
 | `--semantic-provider <name>` | `nebius` \| `openai` \| `anthropic` |
 | `--semantic-model <id>` | Provider-specific model identifier |
 | `--semantic-checks <ids>` | Comma-separated check IDs |
 | `--semantic-timeout <ms>` | AI call timeout |
 
 Any `--semantic-*` flag implicitly enables semantic mode. Config defaults alone
-never auto-enable it — semantic always requires an explicit intent.
+never auto-enable it.
 
-`--semantic` is not supported with `--engine pa11y` in this release and fails
-with a clear error.
+### Built-in semantic checks
+
+Built-in semantic checks are predefined prompts that ask a vision-capable LLM to inspect a single page for meaning and context issues. They run as part of semantic audits and return normal `Issue` entries with ids like `semantic:<check-id>`.
+
+| ID | What it looks for |
+|---|---|
+| `aria-mismatch` | aria-label / aria-labelledby that contradicts visible text |
+| `page-title` | Whether the `<title>` is descriptive and meaningful |
+| `alt-text-quality` | Whether `alt` text actually describes the image |
+| `form-label-clarity` | Whether form labels are clear and unambiguous |
+| `lang-attribute` | Whether `<html lang>` matches the actual page language |
+| `landmarks` | Whether landmark regions are present and properly labelled |
 
 ### CLI user config
 
-`barrieretest init` is the friendly front door; `config` is the scriptable
-back door for the same file.
+Use `config` to configure without the interactive wizard.
 
 The CLI reads non-secret defaults from `~/.barrieretest/config.json`. API keys
 live only in env vars — `config set` rejects anything else.
@@ -177,34 +169,89 @@ npx barrieretest config path
 Supported keys: `semantic.provider`, `semantic.model`, `semantic.checks`,
 `semantic.timeout`.
 
-CLI flags always override config values. Config never enables semantic on its
-own — pass `--semantic` to activate.
+CLI flags always override config values.
 
-Debug the locally built CLI with the Node inspector:
+### Custom semantic checks (CLI)
 
-```bash
-npm run debug:cli -- https://example.com
-```
+Every project has its own accessibility language and edge cases. Add custom semantic checks from the CLI and run them alongside the built-ins.
 
-This builds `dist/` first, then starts `./dist/cli/bin.js` with `--inspect-brk` so you can attach a debugger before execution continues.
-
-Baseline workflow:
+The fastest path is the wizard:
 
 ```bash
-# Create a baseline
-npx barrieretest baseline https://example.com -o baseline.json
-
-# Audit against a baseline (only new issues fail)
-npx barrieretest https://example.com -b baseline.json
-
-# Accept the last audit run into a baseline
-npx barrieretest baseline:accept baseline.json
-
-# Re-audit and update all baselines in a directory
-npx barrieretest baseline:update ./baselines
+npx barrieretest check add
 ```
 
-`results.json` from `-o` is an audit result, not a baseline file.
+Example custom check:
+
+```json
+{
+  "id": "button-verbs",
+  "title": "Button Action Verbs",
+  "description": "Buttons should use clear action verbs.",
+  "prompt": "For each visible button or link-as-button, verify the label is a clear action verb. Flag labels like 'Click here', 'OK' when ambiguous, or generic text.",
+  "needsScreenshot": false,
+  "context": ["body"]
+}
+```
+
+The wizard asks for an id, title, description, prompt, whether the check needs
+a screenshot, and which page-context sections the AI should receive. It writes
+the check to your **global** config (`~/.barrieretest/config.json`) or a
+**project-local** file (`.barrieretest.json` at the repo root).
+
+Subcommands:
+
+```bash
+npx barrieretest check list                    # show built-in + user checks
+npx barrieretest check remove <id>             # remove from global or project
+npx barrieretest check test <id> --url <url>   # dry-run one check
+```
+
+#### Config merge rules
+
+The CLI loads both files and merges them. Precedence for each field:
+
+- **Scalars** (`provider`, `model`, `timeout`, `checks`): project wins when set, otherwise global.
+- **`customChecks`**: concatenated. If the same id appears in both, the project entry overrides the global one and audit runs print a warning to stderr.
+- **Built-in ids** cannot be overridden by a user check. The CLI rejects colliding ids at `check add` and at load time.
+
+Project-local files are meant to be committed with the repo so teams share one check set.
+
+#### The JSON shape
+
+If you prefer hand-editing, add this shape to `.barrieretest.json` or
+`~/.barrieretest/config.json`:
+
+```json
+{
+  "semantic": {
+    "customChecks": [
+      {
+        "id": "button-verbs",
+        "title": "Button Action Verbs",
+        "description": "Buttons should use clear action verbs.",
+        "prompt": "For each visible button or link-as-button, verify the label is a clear action verb. Flag labels like 'Click here', 'OK' when ambiguous, or generic text.",
+        "needsScreenshot": false,
+        "context": ["body"]
+      }
+    ]
+  }
+}
+```
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `id` | yes | — | 2-40 lowercase alphanumerics or hyphens. Cannot match a built-in. |
+| `title` | yes | — | Short title shown in reports and prompts. |
+| `description` | yes | — | One-line description. |
+| `prompt` | yes | — | Free-form instruction for the AI. Be specific about what to flag. |
+| `needsScreenshot` | no | `false` | Set `true` if the check needs visual reasoning. |
+| `context` | no | `["body"]` | Page-context sections to include. One or more of: `head`, `body`, `aria`, `forms`, `images`, `landmarks`. |
+| `helpUrl` | no | — | Optional WCAG or internal help link. |
+
+> **Recommendation:** Keep semantic audits under about 20 active checks.
+>
+> All active checks are sent in a single prompt. There is no limit in code, so you can add as many checks as you need. Larger check sets make the prompt harder for the model to follow, which can reduce finding quality.
 
 ## API
 
@@ -314,6 +361,24 @@ Or with an environment variable:
 BARRIERETEST_UPDATE_BASELINE=true npx barrieretest https://example.com -b baseline.json
 ```
 
+Baseline CLI workflow:
+
+```bash
+# Create a baseline
+npx barrieretest baseline https://example.com -o baseline.json
+
+# Audit against a baseline; only new issues fail
+npx barrieretest https://example.com -b baseline.json
+
+# Accept the last audit run into a baseline
+npx barrieretest baseline:accept baseline.json
+
+# Re-audit and update all baselines in a directory
+npx barrieretest baseline:update ./baselines
+```
+
+`results.json` from `-o` is an audit result, not a baseline file.
+
 ## Issue formatting helpers
 
 ```typescript
@@ -341,13 +406,9 @@ const result = await audit('https://example.com', {
 
 Providers: `openai`, `anthropic`, `nebius`.
 
-## Semantic audits
+## Semantic audits API
 
-`semanticAudit()` runs vision + reasoning checks that rule engines like axe and
-pa11y cannot find on their own. The current built-ins cover ARIA-label/visible-text
-mismatches, page title quality, alt-text quality, form-label clarity, language
-attribute correctness, and landmark labelling. Adding more is one new file plus
-one registry entry — the architecture is built to grow.
+`semanticAudit()` runs the same semantic check system exposed by the CLI. Use it standalone when you only need semantic findings, or use `audit({ semantic })` to combine engine and semantic findings in one result.
 
 Standalone:
 
@@ -366,8 +427,7 @@ console.log(result.issues)        // standard core Issue[] with `semantic` metad
 console.log(result.meta.checksRun)
 ```
 
-Or — usually preferred — combined with `audit()` so a single browser launch
-serves both the engine and semantic passes:
+Combined with `audit()` so a single browser launch serves both the engine and semantic passes:
 
 ```typescript
 const result = await audit('https://example.com', {
@@ -378,7 +438,7 @@ const result = await audit('https://example.com', {
 })
 
 // result.issues contains both engine findings and semantic findings as
-// standard core Issue[] entries (semantic ones use the id "semantic:<check-id>").
+// standard core Issue[] entries. Semantic ones use the id "semantic:<check-id>".
 // result.semanticMeta exposes pass-level metadata.
 ```
 
@@ -388,54 +448,29 @@ Supported `audit({ semantic })` combinations:
 |---|---|---|
 | URL string | `'axe'` (default) | `audit()` owns the browser; engine and semantic share one page |
 | Existing browser page | `'axe'` | Both passes use the page you passed in |
-| URL string | `'pa11y'` | **Semantic is skipped with a warning.** pa11y manages its own browser internally; running semantic would require a second launch in this release |
+| URL string | `'pa11y'` | Semantic is skipped with a warning because pa11y manages its own browser internally |
 
 ### How semantic findings are processed
 
-Semantic findings are first-class `Issue` values and participate in the same
-post-engine pipeline as engine findings:
+Semantic findings are first-class `Issue` values and participate in the same post-engine pipeline as engine findings:
 
-- **`minSeverity` and `ignore` apply to them.** Semantic issues are merged with
-  engine issues *before* filtering, so `minSeverity: 'serious'` will drop a
-  `notice`-severity semantic finding the same way it drops a minor engine one.
-- **Baselines include them.** Baseline diffing runs on the merged + filtered
-  list, so semantic issues appear in `newIssues`, `knownIssues`, and
-  `fixedIssues` like any other issue.
-- **They are not currently localized.** Source-file localization
-  (`detail: 'fix-ready'`) runs on engine issues only in this release.
-- **They are not currently passed through per-issue AI enhancement.** The
-  `audit({ ai })` per-issue enhancer also runs on engine issues only.
-- **Hallucinated or unrequested check IDs are dropped.** If the model returns
-  a finding with a `checkType` that wasn't part of the resolved check set
-  for this run, the runner discards it and warns.
-- **Semantic failure never fails the whole audit.** If the semantic pass
-  throws (timeout, malformed JSON, provider error), `audit()` warns and
-  returns the engine results without `semanticMeta`.
+- **`minSeverity` and `ignore` apply to them.** Semantic issues are merged with engine issues before filtering.
+- **Baselines include them.** Baseline diffing runs on the merged and filtered list, so semantic issues appear in `newIssues`, `knownIssues`, and `fixedIssues` like any other issue.
+- **They are not currently localized.** Source-file localization (`detail: 'fix-ready'`) runs on engine issues only.
+- **They are not currently passed through per-issue AI enhancement.** The `audit({ ai })` per-issue enhancer also runs on engine issues only.
+- **Hallucinated or unrequested check IDs are dropped.** If the model returns a finding with a `checkType` that was not part of the resolved check set, the runner discards it and warns.
+- **Semantic failure never fails the whole audit.** If the semantic pass throws, `audit()` warns and returns the engine results without `semanticMeta`.
 
 ### Screenshot behavior
 
-Screenshot capture differs slightly between entrypoints in this release:
+Screenshot capture differs slightly between entrypoints:
 
-- `audit({ semantic })` reuses the screenshot the engine path captured (full
-  page by default), so the semantic pass and the rest of `audit()` see the
-  same image.
-- Standalone `semanticAudit()` may capture its own screenshot above the fold
-  if a selected check needs one.
+- `audit({ semantic })` reuses the screenshot the engine path captured, full page by default.
+- Standalone `semanticAudit()` may capture its own above-the-fold screenshot if a selected check needs one.
 
-The two paths can therefore feed differently sized images to the model.
+### Adding a custom check programmatically
 
-### Built-in checks
-
-| ID | What it looks for |
-|---|---|
-| `aria-mismatch` | aria-label / aria-labelledby that contradicts visible text |
-| `page-title` | Whether the `<title>` is descriptive and meaningful |
-| `alt-text-quality` | Whether `alt` text actually describes the image |
-| `form-label-clarity` | Whether form labels are clear and unambiguous |
-| `lang-attribute` | Whether `<html lang>` matches the actual page language |
-| `landmarks` | Whether landmark regions are present and properly labelled |
-
-### Adding a custom check
+> CLI users: prefer [`barrieretest check add`](#custom-semantic-checks-cli). The programmatic API below is for embedders of `@barrieretest/core`.
 
 ```typescript
 import { semanticAudit, type SemanticCheck } from '@barrieretest/core'
@@ -456,14 +491,13 @@ const result = await semanticAudit('https://example.com', {
 })
 ```
 
-Custom checks can also override built-ins by reusing the same `id` — useful for
-tweaking prompt wording without forking the package.
+Custom checks can override built-ins by reusing the same `id`. This applies only to the programmatic API; the CLI rejects colliding ids to keep global and project behavior predictable.
 
 ### Provider support
 
 | Provider | Suggested model | Notes |
 |---|---|---|
-| `nebius` | `openai/gpt-oss-120b` | Full support (production-tested); also what the `init` wizard suggests by default |
+| `nebius` | `openai/gpt-oss-120b` | Full support; default suggestion in the `init` wizard |
 | `openai` | `gpt-4o` | Pass a vision-capable model |
 | `anthropic` | `claude-sonnet-4-5` | Pass a vision-capable Claude model |
 

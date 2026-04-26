@@ -67,6 +67,41 @@ export interface SemanticCheck {
 }
 
 /**
+ * Declarative JSON-friendly form of a semantic check, authored by CLI
+ * users in global/project config. Converted to a runtime `SemanticCheck`
+ * by `userCheckConfigToSemanticCheck`.
+ *
+ * Unlike `SemanticCheck` this shape is intentionally free of callables —
+ * anything that would require executing user code lives only on the
+ * runtime type so it cannot be shipped via JSON.
+ */
+export interface UserCheckConfig {
+  id: string;
+  title: string;
+  description: string;
+  prompt: string;
+  needsScreenshot?: boolean;
+  context?: SemanticContextSection[];
+  helpUrl?: string;
+}
+
+/**
+ * Valid user-check ID pattern. Lowercase alphanumerics with hyphens, 2-40
+ * chars, must start with alnum. Keeps IDs safe for use as filenames,
+ * prompt labels, and `Issue.id` suffixes.
+ */
+export const USER_CHECK_ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,39}$/;
+
+export const SEMANTIC_CONTEXT_SECTIONS: readonly SemanticContextSection[] = [
+  "head",
+  "body",
+  "aria",
+  "forms",
+  "images",
+  "landmarks",
+];
+
+/**
  * Tunable HTML context extraction limits. Defaults are reasonable for the
  * built-in checks; bump them if a custom check needs more.
  */

@@ -6,8 +6,8 @@
  * API keys are only read from env — never from config or CLI.
  */
 
-import { BUILT_IN_CHECK_IDS } from "../semantic/checks/index.js";
-import type { SemanticOptions } from "../semantic/types.js";
+import { BUILT_IN_CHECK_IDS, userCheckConfigToSemanticCheck } from "../semantic/checks/index.js";
+import type { SemanticCheck, SemanticOptions } from "../semantic/types.js";
 import type { AuditEngine } from "../types.js";
 import type { BarrieretestConfig, SemanticProviderName } from "./config.js";
 import { SEMANTIC_PROVIDERS } from "./config.js";
@@ -75,8 +75,14 @@ export function resolveSemanticOptions(
     );
   }
 
-  const knownCheckIds = input.knownCheckIds ?? BUILT_IN_CHECK_IDS;
   const configSemantic = input.config.semantic ?? {};
+
+  const customChecks: SemanticCheck[] = (configSemantic.customChecks ?? []).map(
+    userCheckConfigToSemanticCheck
+  );
+
+  const baseKnownIds = input.knownCheckIds ?? BUILT_IN_CHECK_IDS;
+  const knownCheckIds = [...baseKnownIds, ...customChecks.map((c) => c.id)];
 
   const provider = resolveProvider(input, configSemantic.provider);
   const apiKey = requireApiKey(provider, input.env);
@@ -106,6 +112,7 @@ export function resolveSemanticOptions(
       ...(model ? { model } : {}),
     },
     ...(checks && checks.length > 0 ? { checks } : {}),
+    ...(customChecks.length > 0 ? { customChecks } : {}),
     ...(timeout !== undefined ? { timeout } : {}),
   };
 

@@ -3,9 +3,15 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import {
   type BarrieretestConfig,
+  findProjectConfigPath,
+  findRepoRoot,
   getConfigPath,
   getConfigValue,
+  loadMergedConfig,
+  mergeConfigs,
+  PROJECT_CONFIG_FILENAME,
   readConfig,
+  resolveProjectConfigWritePath,
   setConfigValue,
   SUPPORTED_CONFIG_KEYS,
   unsetConfigValue,
@@ -60,6 +66,26 @@ describe("readConfig", () => {
   it("returns empty object when file is not an object", () => {
     writeFileSync(TEST_CONFIG, JSON.stringify(["a", "b"]));
     expect(readConfig(TEST_CONFIG)).toEqual({});
+  });
+
+  it("throws a friendly error when semantic.customChecks is not an array", () => {
+    writeFileSync(TEST_CONFIG, JSON.stringify({ semantic: { customChecks: {} } }));
+    expect(() => readConfig(TEST_CONFIG)).toThrow(/semantic\.customChecks must be an array/);
+  });
+
+  it("throws when semantic.customChecks is a string", () => {
+    writeFileSync(TEST_CONFIG, JSON.stringify({ semantic: { customChecks: "oops" } }));
+    expect(() => readConfig(TEST_CONFIG)).toThrow(/semantic\.customChecks must be an array/);
+  });
+
+  it("throws when a customChecks entry is null or a primitive", () => {
+    writeFileSync(TEST_CONFIG, JSON.stringify({ semantic: { customChecks: [null] } }));
+    expect(() => readConfig(TEST_CONFIG)).toThrow(/customChecks\[0\] must be an object/);
+  });
+
+  it("includes the file path in the error message", () => {
+    writeFileSync(TEST_CONFIG, JSON.stringify({ semantic: { customChecks: {} } }));
+    expect(() => readConfig(TEST_CONFIG)).toThrow(new RegExp(TEST_CONFIG));
   });
 });
 
@@ -212,5 +238,183 @@ describe("SUPPORTED_CONFIG_KEYS", () => {
     expect(SUPPORTED_CONFIG_KEYS).toContain("semantic.model");
     expect(SUPPORTED_CONFIG_KEYS).toContain("semantic.checks");
     expect(SUPPORTED_CONFIG_KEYS).toContain("semantic.timeout");
+  });
+
+  it("does not expose customChecks via config get/set (owned by `check` subcommand)", () => {
+    expect(SUPPORTED_CONFIG_KEYS as readonly string[]).not.toContain("semantic.customChecks");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Project-local config discovery + merge
+// ---------------------------------------------------------------------------
+
+describe("findProjectConfigPath", () => {
+  it("returns the file path when .barrieretest.json exists in cwd", () => {
+    const filePath = join(TEST_DIR, PROJECT_CONFIG_FILENAME);
+    writeFileSync(filePath, "{}");
+    expect(findProjectConfigPath(TEST_DIR)).toBe(filePath);
+  });
+
+  it("walks up to find a project config in an ancestor directory", () => {
+    const nested = join(TEST_DIR, "a", "b", "c");
+    mkdirSync(nested, { recursive: true });
+    const filePath = join(TEST_DIR, PROJECT_CONFIG_FILENAME);
+    writeFileSync(filePath, "{}");
+    expect(findProjectConfigPath(nested)).toBe(filePath);
+  });
+
+  it("stops walking at a .git repo root and returns undefined when no config", () => {
+    const repoRoot = join(TEST_DIR, "repo");
+    const inside = join(repoRoot, "src");
+    mkdirSync(inside, { recursive: true });
+    mkdirSync(join(repoRoot, ".git"), { recursive: true });
+    // Put a stray config ABOVE the repo — the walk must not escape to it.
+    writeFileSync(join(TEST_DIR, PROJECT_CONFIG_FILENAME), "{}");
+    expect(findProjectConfigPath(inside)).toBeUndefined();
+  });
+
+  it("returns undefined when no project config exists and walk hits filesystem root", () => {
+    const dir = join(TEST_DIR, "empty", "nested");
+    mkdirSync(dir, { recursive: true });
+    expect(findProjectConfigPath(dir)).toBeUndefined();
+  });
+});
+
+describe("findRepoRoot", () => {
+  it("returns the nearest ancestor containing .git", () => {
+    const repoRoot = join(TEST_DIR, "repo");
+    const nested = join(repoRoot, "packages", "web");
+    mkdirSync(nested, { recursive: true });
+    mkdirSync(join(repoRoot, ".git"), { recursive: true });
+    expect(findRepoRoot(nested)).toBe(repoRoot);
+  });
+
+  it("returns undefined when no .git is found on the way up", () => {
+    const dir = join(TEST_DIR, "no-repo", "nested");
+    mkdirSync(dir, { recursive: true });
+    expect(findRepoRoot(dir)).toBeUndefined();
+  });
+});
+
+describe("resolveProjectConfigWritePath", () => {
+  it("targets the repo root when no config exists yet", () => {
+    const repoRoot = join(TEST_DIR, "repo");
+    const nested = join(repoRoot, "packages", "web");
+    mkdirSync(nested, { recursive: true });
+    mkdirSync(join(repoRoot, ".git"), { recursive: true });
+    expect(resolveProjectConfigWritePath(nested)).toBe(join(repoRoot, PROJECT_CONFIG_FILENAME));
+  });
+
+  it("reuses an existing project config when one is found", () => {
+    const repoRoot = join(TEST_DIR, "repo");
+    const nested = join(repoRoot, "packages", "web");
+    mkdirSync(nested, { recursive: true });
+    mkdirSync(join(repoRoot, ".git"), { recursive: true });
+    const existing = join(repoRoot, PROJECT_CONFIG_FILENAME);
+    writeFileSync(existing, "{}");
+    expect(resolveProjectConfigWritePath(nested)).toBe(existing);
+  });
+
+  it("falls back to cwd when no repo and no existing config", () => {
+    const dir = join(TEST_DIR, "loose");
+    mkdirSync(dir, { recursive: true });
+    expect(resolveProjectConfigWritePath(dir)).toBe(join(dir, PROJECT_CONFIG_FILENAME));
+  });
+});
+
+describe("mergeConfigs", () => {
+  const globalPath = "/tmp/global.json";
+  const projectPath = "/tmp/project.json";
+
+  it("project scalars win when set", () => {
+    const result = mergeConfigs({
+      global: { semantic: { provider: "nebius", model: "gpt-oss", timeout: 60_000 } },
+      project: { semantic: { provider: "anthropic", timeout: 30_000 } },
+      globalPath,
+      projectPath,
+    });
+    expect(result.merged.semantic?.provider).toBe("anthropic");
+    expect(result.merged.semantic?.model).toBe("gpt-oss");
+    expect(result.merged.semantic?.timeout).toBe(30_000);
+  });
+
+  it("falls back to global scalars when project is empty", () => {
+    const result = mergeConfigs({
+      global: { semantic: { provider: "nebius", model: "gpt-oss" } },
+      project: {},
+      globalPath,
+    });
+    expect(result.merged.semantic?.provider).toBe("nebius");
+    expect(result.merged.semantic?.model).toBe("gpt-oss");
+  });
+
+  it("project checks win over global checks when set", () => {
+    const result = mergeConfigs({
+      global: { semantic: { checks: ["aria-mismatch"] } },
+      project: { semantic: { checks: ["page-title"] } },
+      globalPath,
+    });
+    expect(result.merged.semantic?.checks).toEqual(["page-title"]);
+  });
+
+  it("concatenates customChecks and reports overridden IDs", () => {
+    const result = mergeConfigs({
+      global: {
+        semantic: {
+          customChecks: [
+            { id: "a", title: "A", description: "d", prompt: "pa" },
+            { id: "b", title: "B", description: "d", prompt: "pb" },
+          ],
+        },
+      },
+      project: {
+        semantic: {
+          customChecks: [
+            { id: "b", title: "B prime", description: "d", prompt: "pb2" },
+            { id: "c", title: "C", description: "d", prompt: "pc" },
+          ],
+        },
+      },
+      globalPath,
+      projectPath,
+    });
+    const ids = result.merged.semantic?.customChecks?.map((c) => c.id);
+    expect(ids).toEqual(["a", "b", "c"]);
+    const b = result.merged.semantic?.customChecks?.find((c) => c.id === "b");
+    expect(b?.title).toBe("B prime");
+    expect(result.overriddenCustomCheckIds).toEqual(["b"]);
+  });
+
+  it("returns an empty semantic block when neither side sets anything", () => {
+    const result = mergeConfigs({ global: {}, project: {}, globalPath });
+    expect(result.merged).toEqual({});
+    expect(result.overriddenCustomCheckIds).toEqual([]);
+  });
+});
+
+describe("loadMergedConfig", () => {
+  it("merges global + project files from disk", () => {
+    const globalPath = join(TEST_DIR, "global-config.json");
+    writeFileSync(
+      globalPath,
+      JSON.stringify({ semantic: { provider: "nebius", timeout: 60_000 } })
+    );
+    const projectPath = join(TEST_DIR, PROJECT_CONFIG_FILENAME);
+    writeFileSync(projectPath, JSON.stringify({ semantic: { timeout: 30_000 } }));
+
+    const result = loadMergedConfig(TEST_DIR, globalPath);
+    expect(result.merged.semantic?.provider).toBe("nebius");
+    expect(result.merged.semantic?.timeout).toBe(30_000);
+    expect(result.projectPath).toBe(projectPath);
+    expect(result.globalPath).toBe(globalPath);
+  });
+
+  it("works when only a global file exists", () => {
+    const globalPath = join(TEST_DIR, "global-only.json");
+    writeFileSync(globalPath, JSON.stringify({ semantic: { provider: "openai" } }));
+    const result = loadMergedConfig(TEST_DIR, globalPath);
+    expect(result.merged.semantic?.provider).toBe("openai");
+    expect(result.projectPath).toBeUndefined();
   });
 });

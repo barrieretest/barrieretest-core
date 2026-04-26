@@ -1,7 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import type { AIProvider } from "../ai/types.js";
 import type { BrowserPage } from "../browser.js";
-import { BUILT_IN_CHECKS, BUILT_IN_CHECK_IDS, resolveChecks } from "./checks/index.js";
+import {
+  BUILT_IN_CHECKS,
+  BUILT_IN_CHECK_IDS,
+  resolveChecks,
+  userCheckConfigToSemanticCheck,
+} from "./checks/index.js";
 import { extractJsonObject, parseSemanticResponse } from "./parse.js";
 import { buildSemanticPrompt } from "./prompt.js";
 import { runSemanticAudit, validateFindingsAgainstChecks } from "./runner.js";
@@ -92,6 +97,81 @@ describe("resolveChecks", () => {
 
   it("throws on unknown check id", () => {
     expect(() => resolveChecks(["does-not-exist"], undefined)).toThrow(/Unknown semantic check id/);
+  });
+});
+
+describe("userCheckConfigToSemanticCheck", () => {
+  const valid = {
+    id: "button-verbs",
+    title: "Button Verbs",
+    description: "Buttons use clear action verbs",
+    prompt: "Flag buttons whose label is not a clear action verb.",
+  };
+
+  it("converts a minimal valid config, defaulting optional fields", () => {
+    const check = userCheckConfigToSemanticCheck(valid);
+    expect(check.id).toBe("button-verbs");
+    expect(check.title).toBe("Button Verbs");
+    expect(check.needsScreenshot).toBe(false);
+    expect(check.needsContext).toEqual(["body"]);
+    expect(check.promptSection).toContain("Button Verbs");
+    expect(check.promptSection).toContain("Flag buttons");
+  });
+
+  it("preserves needsScreenshot=true and explicit context", () => {
+    const check = userCheckConfigToSemanticCheck({
+      ...valid,
+      needsScreenshot: true,
+      context: ["body", "images"],
+    });
+    expect(check.needsScreenshot).toBe(true);
+    expect(check.needsContext).toEqual(["body", "images"]);
+  });
+
+  it("deduplicates repeated context entries", () => {
+    const check = userCheckConfigToSemanticCheck({
+      ...valid,
+      context: ["body", "body", "forms"],
+    });
+    expect(check.needsContext).toEqual(["body", "forms"]);
+  });
+
+  it("rejects an empty or malformed id", () => {
+    expect(() => userCheckConfigToSemanticCheck({ ...valid, id: "" })).toThrow();
+    expect(() => userCheckConfigToSemanticCheck({ ...valid, id: "Has Space" })).toThrow(/invalid/);
+    expect(() => userCheckConfigToSemanticCheck({ ...valid, id: "-starts" })).toThrow(/invalid/);
+  });
+
+  it("enforces the documented 2-40 char id bound", () => {
+    const id40 = `a${"b".repeat(39)}`;
+    expect(id40.length).toBe(40);
+    expect(() => userCheckConfigToSemanticCheck({ ...valid, id: id40 })).not.toThrow();
+    const id41 = `a${"b".repeat(40)}`;
+    expect(id41.length).toBe(41);
+    expect(() => userCheckConfigToSemanticCheck({ ...valid, id: id41 })).toThrow(/invalid/);
+  });
+
+  it("rejects IDs that collide with built-ins", () => {
+    expect(() => userCheckConfigToSemanticCheck({ ...valid, id: "aria-mismatch" })).toThrow(
+      /built-in/
+    );
+  });
+
+  it("rejects missing required fields", () => {
+    expect(() => userCheckConfigToSemanticCheck({ ...valid, title: "" })).toThrow(/title/);
+    expect(() => userCheckConfigToSemanticCheck({ ...valid, description: "" })).toThrow(
+      /description/
+    );
+    expect(() => userCheckConfigToSemanticCheck({ ...valid, prompt: "" })).toThrow(/prompt/);
+  });
+
+  it("rejects unknown context sections", () => {
+    expect(() =>
+      userCheckConfigToSemanticCheck({
+        ...valid,
+        context: ["nope" as never],
+      })
+    ).toThrow(/unknown context section/i);
   });
 });
 

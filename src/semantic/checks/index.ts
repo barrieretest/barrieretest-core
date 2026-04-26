@@ -8,7 +8,8 @@
  * registry — see `SemanticOptions.customChecks`.
  */
 
-import type { SemanticCheck } from "../types.js";
+import type { SemanticCheck, SemanticContextSection, UserCheckConfig } from "../types.js";
+import { SEMANTIC_CONTEXT_SECTIONS, USER_CHECK_ID_PATTERN } from "../types.js";
 import { altTextQualityCheck } from "./alt-text-quality.js";
 import { ariaMismatchCheck } from "./aria-mismatch.js";
 import { formLabelClarityCheck } from "./form-label-clarity.js";
@@ -70,6 +71,90 @@ export function resolveChecks(
   }
 
   return resolved;
+}
+
+/**
+ * Convert a declarative user check config into a runtime `SemanticCheck`.
+ *
+ * Throws with a user-facing message when the config is invalid — the CLI
+ * surfaces these as-is so authors see actionable errors.
+ *
+ * The runtime `promptSection` follows the built-in convention
+ * (`**Title**: instruction`) so the assembled prompt stays uniform.
+ */
+export function userCheckConfigToSemanticCheck(cfg: UserCheckConfig): SemanticCheck {
+  if (!cfg || typeof cfg !== "object") {
+    throw new Error("Custom check must be an object");
+  }
+
+  const id = String(cfg.id ?? "").trim();
+  if (!id) {
+    throw new Error("Custom check is missing required field 'id'");
+  }
+  if (!USER_CHECK_ID_PATTERN.test(id)) {
+    throw new Error(
+      `Custom check id '${id}' is invalid. Use 2-40 lowercase alphanumerics or hyphens, starting with a letter or digit.`
+    );
+  }
+  if (BUILT_IN_CHECK_IDS.includes(id)) {
+    throw new Error(
+      `Custom check id '${id}' collides with a built-in check. Built-ins cannot be overridden; pick a different id.`
+    );
+  }
+
+  const title = String(cfg.title ?? "").trim();
+  if (!title) {
+    throw new Error(`Custom check '${id}' is missing required field 'title'`);
+  }
+
+  const description = String(cfg.description ?? "").trim();
+  if (!description) {
+    throw new Error(`Custom check '${id}' is missing required field 'description'`);
+  }
+
+  const prompt = String(cfg.prompt ?? "").trim();
+  if (!prompt) {
+    throw new Error(`Custom check '${id}' is missing required field 'prompt'`);
+  }
+
+  const needsScreenshot = typeof cfg.needsScreenshot === "boolean" ? cfg.needsScreenshot : false;
+
+  const needsContext = resolveUserContext(cfg.context, id);
+
+  const helpUrl = cfg.helpUrl ? String(cfg.helpUrl) : undefined;
+
+  return {
+    id,
+    title,
+    description,
+    promptSection: `**${title}**: ${prompt}`,
+    needsScreenshot,
+    needsContext,
+    ...(helpUrl ? { helpUrl } : {}),
+  };
+}
+
+function resolveUserContext(
+  raw: SemanticContextSection[] | undefined,
+  checkId: string
+): SemanticContextSection[] {
+  if (raw === undefined) {
+    return ["body"];
+  }
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(
+      `Custom check '${checkId}' has an invalid 'context' field — must be a non-empty array or omitted.`
+    );
+  }
+  const allowed = new Set<string>(SEMANTIC_CONTEXT_SECTIONS);
+  const bad = raw.filter((s) => !allowed.has(s));
+  if (bad.length > 0) {
+    throw new Error(
+      `Custom check '${checkId}' has unknown context section(s): ${bad.join(", ")}. ` +
+        `Allowed: ${SEMANTIC_CONTEXT_SECTIONS.join(", ")}`
+    );
+  }
+  return Array.from(new Set(raw));
 }
 
 export { altTextQualityCheck } from "./alt-text-quality.js";

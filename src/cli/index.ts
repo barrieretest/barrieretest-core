@@ -9,6 +9,7 @@ import {
   getConfigPath,
   getConfigValue,
   isSupportedConfigKey,
+  loadMergedConfig,
   readConfig,
   setConfigValue,
   SUPPORTED_CONFIG_KEYS,
@@ -22,12 +23,19 @@ export const CLI_COMMANDS = [
   "baseline",
   "baseline:accept",
   "baseline:update",
+  "check",
   "config",
   "init",
 ] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number] | "help";
 
 export type ConfigSubcommand = "get" | "set" | "unset" | "path";
+
+export const CHECK_SUBCOMMANDS = ["add", "list", "remove", "test"] as const;
+export type CheckSubcommand = (typeof CHECK_SUBCOMMANDS)[number];
+
+/** Scope for a custom-check edit. `undefined` lets the wizard decide. */
+export type CheckScope = "global" | "project";
 
 export interface ParsedArgs {
   command: CliCommand;
@@ -52,6 +60,15 @@ export interface ParsedArgs {
   configSubcommand?: ConfigSubcommand;
   configKey?: string;
   configValue?: string;
+  checkSubcommand?: CheckSubcommand;
+  checkId?: string;
+  checkTitle?: string;
+  checkDescription?: string;
+  checkPrompt?: string;
+  checkNeedsScreenshot?: boolean;
+  checkContext?: string[];
+  checkScope?: CheckScope;
+  checkUrl?: string;
 }
 
 export interface CliResult {
@@ -65,6 +82,8 @@ export interface RunCliOptions {
   cacheDir?: string;
   env?: Record<string, string | undefined>;
   configPath?: string;
+  /** Override for project-config discovery. Defaults to `process.cwd()`. */
+  cwd?: string;
 }
 
 /**
@@ -130,6 +149,8 @@ export function parseArgs(args: string[]): ParsedArgs {
     }
   } else if (command === "config") {
     parseConfigSubcommand(args, result);
+  } else if (command === "check") {
+    parseCheckSubcommand(args, result);
   } else if (command === "init") {
     // no further args
   }
@@ -193,6 +214,63 @@ function parseConfigSubcommand(args: string[], result: ParsedArgs): void {
   }
   if (args[2] !== undefined) result.configKey = args[2];
   if (args[3] !== undefined) result.configValue = args[3];
+}
+
+function parseCheckSubcommand(args: string[], result: ParsedArgs): void {
+  const sub = args[1];
+  if (CHECK_SUBCOMMANDS.includes(sub as CheckSubcommand)) {
+    result.checkSubcommand = sub as CheckSubcommand;
+  }
+
+  // Positional ID for `remove` and `test`; flags handle the rest.
+  if (
+    (result.checkSubcommand === "remove" || result.checkSubcommand === "test") &&
+    args[2] !== undefined &&
+    !args[2].startsWith("-")
+  ) {
+    result.checkId = args[2];
+  }
+
+  for (let i = 2; i < args.length; i++) {
+    const arg = args[i];
+    const nextArg = args[i + 1];
+    if (arg === "--id") {
+      result.checkId = nextArg;
+      i++;
+    } else if (arg === "--title") {
+      result.checkTitle = nextArg;
+      i++;
+    } else if (arg === "--description") {
+      result.checkDescription = nextArg;
+      i++;
+    } else if (arg === "--prompt") {
+      result.checkPrompt = nextArg;
+      i++;
+    } else if (arg === "--needs-screenshot") {
+      // Bare flag: presence means true. Accept an explicit `true`/`false`
+      // as the next token, but never swallow an unrelated flag.
+      if (nextArg === "true" || nextArg === "false") {
+        result.checkNeedsScreenshot = nextArg === "true";
+        i++;
+      } else {
+        result.checkNeedsScreenshot = true;
+      }
+    } else if (arg === "--context") {
+      result.checkContext = nextArg
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      i++;
+    } else if (arg === "--scope") {
+      if (nextArg === "global" || nextArg === "project") {
+        result.checkScope = nextArg;
+      }
+      i++;
+    } else if (arg === "--url") {
+      result.checkUrl = nextArg;
+      i++;
+    }
+  }
 }
 
 function progressLine(message: string, percent: number): string {
@@ -282,11 +360,11 @@ function addSemanticSummaryLines(lines: string[], meta: SemanticMeta, issues: Is
  * Run CLI command
  */
 export async function runCli(args: ParsedArgs, options: RunCliOptions = {}): Promise<CliResult> {
-  const { cacheDir = CACHE_DIR, env = process.env, configPath } = options;
+  const { cacheDir = CACHE_DIR, env = process.env, configPath, cwd = process.cwd() } = options;
 
   switch (args.command) {
     case "audit":
-      return runAudit(args, { env, configPath });
+      return runAudit(args, { env, configPath, cwd });
 
     case "baseline":
       return runBaseline(args);
@@ -299,6 +377,11 @@ export async function runCli(args: ParsedArgs, options: RunCliOptions = {}): Pro
 
     case "config":
       return runConfig(args, configPath);
+
+    case "check": {
+      const { runCheck } = await import("./check.js");
+      return runCheck(args, { env, configPath, cwd });
+    }
 
     case "init": {
       const { runInit } = await import("./init-wizard.js");
@@ -326,6 +409,8 @@ Usage:
   barrieretest init                     Interactive wizard for semantic audit setup
   barrieretest config <get|set|unset|path> [key] [value]
                                         Manage user config at ~/.barrieretest/config.json
+  barrieretest check <add|list|remove|test> [id] [options]
+                                        Author, list, or test custom semantic AI checks
 
 Audit options:
   -e, --engine <engine>         axe | pa11y (default: axe)
@@ -358,6 +443,7 @@ Baseline options:
 interface RunAuditDeps {
   env: Record<string, string | undefined>;
   configPath?: string;
+  cwd: string;
 }
 
 async function runAudit(args: ParsedArgs, deps: RunAuditDeps): Promise<CliResult> {
@@ -367,7 +453,13 @@ async function runAudit(args: ParsedArgs, deps: RunAuditDeps): Promise<CliResult
 
   let semanticOptions: AuditOptions["semantic"];
   try {
-    const config: BarrieretestConfig = readConfig(deps.configPath);
+    const merged = loadMergedConfig(deps.cwd, deps.configPath);
+    if (merged.overriddenCustomCheckIds.length > 0) {
+      process.stderr.write(
+        `warning: project config overrides global custom check id(s): ${merged.overriddenCustomCheckIds.join(", ")}\n`
+      );
+    }
+    const config: BarrieretestConfig = merged.merged;
     semanticOptions = resolveSemanticOptions({
       semantic: args.semantic,
       semanticProvider: args.semanticProvider,
