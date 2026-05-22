@@ -2,7 +2,7 @@
 
 Open-source core for single-page accessibility audits.
 
-`@barrieretest/core` powers the free single-page checks behind barrieretest.at. It includes:
+`@barrieretest/core` powers the free single-page checks behind [barrieretest.at](https://barrieretest.at). It includes:
 
 - axe-core audits for single pages
 - optional pa11y support
@@ -12,6 +12,10 @@ Open-source core for single-page accessibility audits.
 - optional AI analysis for individual issues
 - semantic audits via vision LLMs
 - cookie banner dismissal before audits
+
+## Try it
+
+You can try testing your (already deployed) site on [barrieretest.at](https://barrieretest.at) first.
 
 ## Install
 
