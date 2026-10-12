@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { transformAxeViolation, type AxeViolation } from "./axe.js";
+import type { BrowserPage } from "../browser.js";
+import {
+  buildAxeLoadFailureMessage,
+  runAxeCore,
+  transformAxeViolation,
+  type AxeViolation,
+} from "./axe.js";
 
 const createViolation = (overrides: Partial<AxeViolation> = {}): AxeViolation => ({
   id: "color-contrast",
@@ -165,5 +171,82 @@ describe("transformAxeViolation", () => {
       expect(issue.id).toBe("image-alt");
       expect(issue.description).toBe("Images must have alternative text");
     }
+  });
+});
+
+describe("buildAxeLoadFailureMessage", () => {
+  test("includes URL, status, and console diagnostics", () => {
+    const message = buildAxeLoadFailureMessage({
+      url: "https://blocked.example/path",
+      status: 403,
+      title: "Access denied",
+      htmlSnippet: "<html><body>Forbidden</body></html>",
+      consoleLines: ["[console:error] Refused to execute inline script", "[pageerror] blocked"],
+    });
+
+    expect(message).toContain("axe-core failed to load");
+    expect(message).toContain("https://blocked.example/path");
+    expect(message).toContain("403");
+    expect(message).toContain("[console:error] Refused to execute inline script");
+    expect(message).toContain("[pageerror] blocked");
+  });
+});
+
+describe("runAxeCore axe-load failure path", () => {
+  // Fake page that routes page.evaluate by the source of the passed function,
+  // mimicking how a real browser would behave: the axe-presence check throws
+  // the literal "axe-core failed to load." (it runs in browser context and
+  // cannot see Node-scope constants), while the diagnostics helpers return data.
+  function makeFakePage(): {
+    page: BrowserPage;
+    listenerCounts: { added: number; removed: number };
+  } {
+    const listenerCounts = { added: 0, removed: 0 };
+    const page = {
+      url: () => "https://blocked.example/",
+      title: async () => "Just a moment...",
+      // biome-ignore lint/suspicious/noExplicitAny: test stub mirrors the overloaded evaluate signature
+      evaluate: async (fn: any) => {
+        const src = String(fn);
+        if (src.includes("axeRuntime")) {
+          throw new Error("axe-core failed to load.");
+        }
+        if (src.includes("outerHTML")) {
+          return "<html><head><title>Just a moment...</title></head><body>Checking your browser</body></html>";
+        }
+        return undefined;
+      },
+      screenshot: async () => new Uint8Array(),
+      on: () => {
+        listenerCounts.added += 1;
+      },
+      off: () => {
+        listenerCounts.removed += 1;
+      },
+    } as unknown as BrowserPage;
+
+    return { page, listenerCounts };
+  }
+
+  test("throws an enriched diagnostic error and cleans up listeners", async () => {
+    const { page, listenerCounts } = makeFakePage();
+
+    let caught: Error | undefined;
+    try {
+      await runAxeCore("https://blocked.example/", { page });
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    const message = caught?.message ?? "";
+    expect(message).toContain("axe-core failed to load");
+    expect(message).toContain("https://blocked.example/");
+    expect(message).toContain("Just a moment...");
+    expect(message).toContain("Checking your browser");
+
+    // console + pageerror listeners attached, and all detached afterwards.
+    expect(listenerCounts.added).toBeGreaterThan(0);
+    expect(listenerCounts.removed).toBe(listenerCounts.added);
   });
 });

@@ -8,8 +8,10 @@
 import type { LocalizationResult, LocalizedIssue } from "../localization/index.js";
 import type { Issue } from "../types.js";
 import { createAnthropicProvider } from "./providers/anthropic.js";
+import { createMistralProvider } from "./providers/mistral.js";
 import { createNebiusProvider } from "./providers/nebius.js";
 import { createOpenAIProvider } from "./providers/openai.js";
+import { createOpenAICompatibleProvider } from "./providers/openai-compatible.js";
 import type {
   AIAnalysis,
   AIAnalysisInput,
@@ -56,12 +58,16 @@ const DEFAULT_REQUEST_DELAY = 100;
  */
 export function createProvider(name: AIProviderName, config: AIProviderConfig): AIProvider {
   switch (name) {
+    case "mistral":
+      return createMistralProvider(config);
     case "openai":
       return createOpenAIProvider(config);
     case "anthropic":
       return createAnthropicProvider(config);
     case "nebius":
       return createNebiusProvider(config);
+    case "openai-compatible":
+      return createOpenAICompatibleProvider(config);
     default:
       throw new Error(`Unknown AI provider: ${name}`);
   }
@@ -200,14 +206,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export { DEFAULT_MODELS, resolveCapabilities } from "./models.js";
 export { createAnthropicProvider } from "./providers/anthropic.js";
+export { createMistralProvider } from "./providers/mistral.js";
 export { createNebiusProvider } from "./providers/nebius.js";
 export { createOpenAIProvider } from "./providers/openai.js";
+export { createOpenAICompatibleProvider } from "./providers/openai-compatible.js";
 export type {
   AIAnalysis,
   AIAnalysisInput,
   AIProvider,
   AIProviderConfig,
   AIProviderName,
+  JsonSchemaObject,
+  ModelCapabilities,
+  ModelRequest,
+  ModelResponse,
+  ProviderKind,
 } from "./types.js";
 export { buildAnalysisPrompt, parseAnalysisResponse } from "./types.js";

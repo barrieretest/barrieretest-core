@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { AIProvider } from "../ai/types.js";
+import type { AIProvider, ModelCapabilities, ModelRequest } from "../ai/types.js";
 import type { BrowserPage } from "../browser.js";
 import {
   BUILT_IN_CHECKS,
@@ -7,9 +7,10 @@ import {
   resolveChecks,
   userCheckConfigToSemanticCheck,
 } from "./checks/index.js";
-import { extractJsonObject, parseSemanticResponse } from "./parse.js";
+import { extractJsonObject, parseSemanticObject, parseSemanticResponse } from "./parse.js";
 import { buildSemanticPrompt } from "./prompt.js";
 import { runSemanticAudit, validateFindingsAgainstChecks } from "./runner.js";
+import { buildSemanticResponseSchema, SEMANTIC_RESPONSE_SCHEMA } from "./schema.js";
 import { sanitizePromptContext } from "./sanitize.js";
 import type { RawSemanticFinding, SemanticCheck } from "./types.js";
 
@@ -47,16 +48,67 @@ function makeStubPage(overrides: Partial<BrowserPage> = {}): BrowserPage {
   };
 }
 
-function makeStubProvider(content: string): AIProvider {
-  return {
+/**
+ * A stub provider that records what it was asked. `capabilities` and
+ * `complete` are opt-in so the default stub keeps exercising the
+ * `analyzeSemantic()` path that providers without declared capabilities use.
+ */
+interface StubProvider extends AIProvider {
+  /** Prompts received, in call order, across both entry points. */
+  prompts: string[];
+  /** Requests received on the `complete()` path. */
+  requests: ModelRequest[];
+}
+
+function makeStubProvider(
+  content: string,
+  options: {
+    model?: string;
+    capabilities?: ModelCapabilities;
+    /** Expose `complete()`, returning `content` plus `json`. */
+    supportsComplete?: boolean;
+    /** Parsed JSON the structured-output path returns. */
+    json?: unknown;
+    /** Stop reason the structured-output path reports. */
+    finishReason?: string;
+  } = {}
+): StubProvider {
+  const prompts: string[] = [];
+  const requests: ModelRequest[] = [];
+  const model = options.model ?? "stub-model";
+
+  const provider: StubProvider = {
     name: "stub",
+    model,
+    prompts,
+    requests,
     async analyze() {
       return { contextualAnalysis: "n/a", suggestedFix: "n/a", confidence: 1 };
     },
-    async analyzeSemantic() {
-      return { content, model: "stub-model" };
+    async analyzeSemantic(input) {
+      prompts.push(input.prompt);
+      return { content, model };
     },
   };
+
+  if (options.capabilities) {
+    provider.capabilities = options.capabilities;
+  }
+
+  if (options.supportsComplete) {
+    provider.complete = async (request) => {
+      prompts.push(request.text);
+      requests.push(request);
+      return {
+        text: content,
+        json: options.json,
+        model,
+        ...(options.finishReason ? { finishReason: options.finishReason } : {}),
+      };
+    };
+  }
+
+  return provider;
 }
 
 // ----- check registry -----
@@ -172,6 +224,17 @@ describe("userCheckConfigToSemanticCheck", () => {
         context: ["nope" as never],
       })
     ).toThrow(/unknown context section/i);
+  });
+
+  it("passes a valid tier through and leaves it unset when omitted", () => {
+    expect(userCheckConfigToSemanticCheck({ ...valid, tier: "small" }).tier).toBe("small");
+    expect(userCheckConfigToSemanticCheck(valid).tier).toBeUndefined();
+  });
+
+  it("rejects an unknown tier, naming the check and the allowed values", () => {
+    expect(() => userCheckConfigToSemanticCheck({ ...valid, tier: "medium" as never })).toThrow(
+      /button-verbs.*tier.*small, large/s
+    );
   });
 });
 
@@ -325,6 +388,20 @@ describe("buildSemanticPrompt", () => {
 
     const exampleJson = prompt.slice(braceStart, braceEnd + 1);
     expect(() => JSON.parse(exampleJson)).not.toThrow();
+  });
+
+  it("forbids findings outside the listed checks", () => {
+    const prompt = buildSemanticPrompt({
+      checks: [BUILT_IN_CHECKS[0]],
+      url: "https://x.test",
+      context: sanitizePromptContext("<body></body>"),
+      formattedContext: "<body></body>",
+    });
+
+    expect(prompt).toContain(
+      "Every finding must belong to one of the checks listed below. An issue that falls " +
+        "outside those checks is not reported at all, under any checkType."
+    );
   });
 
   it("locks in built-in check id list (snapshot)", () => {
@@ -565,5 +642,620 @@ describe("runSemanticAudit (with stub provider)", () => {
 
     // With pagePrepared:true the only evaluate() is the context extraction call.
     expect(evaluateCallCount).toBe(1);
+  });
+});
+
+// ----- model tiers -----
+
+describe("runSemanticAudit (model tiers)", () => {
+  /** Findings for one large-tier and one small-tier check. */
+  const twoTierResponse = JSON.stringify({
+    issues: [
+      {
+        checkType: "aria-mismatch",
+        severity: "error",
+        message: "label mismatch",
+        location: "button#submit",
+        confidence: 80,
+      },
+      {
+        checkType: "alt-text-quality",
+        severity: "warning",
+        message: "alt text is just the filename",
+        location: "img.hero",
+        confidence: 70,
+      },
+    ],
+    detectedLanguage: "en",
+    overallAssessment: "Mixed",
+  });
+
+  const runWithDefaults = (
+    provider: StubProvider,
+    extra: Parameters<typeof runSemanticAudit>[1] | undefined = undefined
+  ) =>
+    runSemanticAudit(
+      {
+        url: "https://stub.test",
+        page: makeStubPage(),
+        ownsBrowser: false,
+        pagePrepared: true,
+        providerOverride: provider,
+      },
+      extra ?? { provider: { name: "nebius", apiKey: "stub" } }
+    );
+
+  it("splits the default built-ins into one call per tier", async () => {
+    const stub = makeStubProvider(twoTierResponse);
+    const result = await runWithDefaults(stub);
+
+    expect(stub.prompts).toHaveLength(2);
+
+    const smallPrompt = stub.prompts.find((p) => p.includes('"alt-text-quality"'));
+    const largePrompt = stub.prompts.find((p) => p.includes('"aria-mismatch"'));
+    expect(smallPrompt).toBeDefined();
+    expect(largePrompt).toBeDefined();
+    expect(smallPrompt).not.toContain('"aria-mismatch"');
+    expect(largePrompt).not.toContain('"alt-text-quality"');
+
+    // Each tier's response is validated against its own checks, so both
+    // findings survive — one per tier, large first.
+    expect(result.issues.map((i) => i.id)).toEqual([
+      "semantic:aria-mismatch",
+      "semantic:alt-text-quality",
+    ]);
+
+    expect(result.meta.tiers?.small?.checksRun).toEqual(["alt-text-quality"]);
+    expect(result.meta.tiers?.large?.checksRun).toEqual([
+      "aria-mismatch",
+      "page-title",
+      "form-label-clarity",
+      "lang-attribute",
+      "landmarks",
+    ]);
+    expect(result.meta.checksRun).toEqual([...BUILT_IN_CHECK_IDS]);
+  });
+
+  it("runs a single tier when no selected check belongs to the other", async () => {
+    const stub = makeStubProvider(twoTierResponse);
+    const result = await runWithDefaults(stub, {
+      provider: { name: "nebius", apiKey: "stub" },
+      checks: ["aria-mismatch"],
+    });
+
+    expect(stub.prompts).toHaveLength(1);
+    expect(result.meta.tiers?.small).toBeUndefined();
+    expect(result.meta.tiers?.large?.checksRun).toEqual(["aria-mismatch"]);
+    expect(result.meta.provider).toBe("nebius");
+    expect(result.meta.model).toBe("stub-model");
+  });
+
+  it("reports the per-tier provider and model when the tiers differ", async () => {
+    const largeStub = makeStubProvider(twoTierResponse, { model: "large-model" });
+    const smallStub = makeStubProvider(twoTierResponse, { model: "small-model" });
+
+    const result = await runSemanticAudit(
+      {
+        url: "https://stub.test",
+        page: makeStubPage(),
+        ownsBrowser: false,
+        pagePrepared: true,
+        tierProviderOverrides: { large: largeStub, small: smallStub },
+      },
+      {
+        provider: { name: "mistral", apiKey: "stub", model: "mistral-large-4" },
+        tiers: {
+          small: { name: "openai", apiKey: "stub", model: "gpt-4o-mini" },
+        },
+      }
+    );
+
+    expect(smallStub.prompts).toHaveLength(1);
+    expect(smallStub.prompts[0]).toContain('"alt-text-quality"');
+    expect(smallStub.prompts[0]).not.toContain('"aria-mismatch"');
+    expect(largeStub.prompts).toHaveLength(1);
+
+    expect(result.meta.tiers?.small).toEqual({
+      provider: "openai",
+      model: "small-model",
+      checksRun: ["alt-text-quality"],
+    });
+    expect(result.meta.tiers?.large?.provider).toBe("mistral");
+    expect(result.meta.tiers?.large?.model).toBe("large-model");
+    // Page-level metadata follows the large tier.
+    expect(result.meta.provider).toBe("mistral");
+    expect(result.meta.model).toBe("large-model");
+  });
+
+  it("rejects before the request when a tier needs vision the model lacks", async () => {
+    const blindStub = makeStubProvider(twoTierResponse, {
+      model: "openai/gpt-oss-120b",
+      capabilities: { vision: false, jsonSchema: false },
+    });
+
+    const promise = runSemanticAudit(
+      {
+        url: "https://stub.test",
+        page: makeStubPage(),
+        ownsBrowser: false,
+        pagePrepared: true,
+        providerOverride: makeStubProvider(twoTierResponse),
+        tierProviderOverrides: { small: blindStub },
+      },
+      { provider: { name: "nebius", apiKey: "stub" } }
+    );
+
+    await expect(promise).rejects.toThrow(/alt-text-quality/);
+    await expect(promise).rejects.toThrow(/small/);
+    await expect(promise).rejects.toThrow(/openai\/gpt-oss-120b/);
+    expect(blindStub.prompts).toEqual([]);
+    expect(blindStub.requests).toEqual([]);
+  });
+
+  it("accepts a vision-less model for checks that need no screenshot", async () => {
+    const blindStub = makeStubProvider(
+      JSON.stringify({
+        issues: [
+          {
+            checkType: "lang-attribute",
+            severity: "notice",
+            message: "lang is fine",
+            location: "html",
+          },
+        ],
+      }),
+      {
+        model: "openai/gpt-oss-120b",
+        capabilities: { vision: false, jsonSchema: false },
+      }
+    );
+
+    const result = await runWithDefaults(blindStub, {
+      provider: { name: "nebius", apiKey: "stub" },
+      checks: ["lang-attribute"],
+    });
+
+    expect(result.issues).toHaveLength(1);
+    expect(result.screenshot).toBeUndefined();
+  });
+
+  it("uses native structured output and yields the same issues as the text path", async () => {
+    const textStub = makeStubProvider(twoTierResponse);
+    const fromText = await runWithDefaults(textStub);
+
+    // Text the structured path must ignore: it carries no findings and does
+    // not parse, so the issues below can only come from `json`.
+    const schemaStub = makeStubProvider("Sorry, here is my prose instead of JSON.", {
+      capabilities: { vision: true, jsonSchema: true },
+      supportsComplete: true,
+      json: JSON.parse(twoTierResponse),
+    });
+    const fromSchema = await runWithDefaults(schemaStub);
+
+    expect(fromSchema.issues).toEqual(fromText.issues);
+    expect(fromSchema.meta.overallAssessment).toBe("Mixed");
+
+    expect(schemaStub.requests).toHaveLength(2);
+    for (const request of schemaStub.requests) {
+      const schema = request.responseSchema as {
+        properties: {
+          issues: { items: { properties: { checkType: { enum?: string[] } } } };
+        };
+      };
+      expect(schema).toBeDefined();
+      const enumIds = schema.properties.issues.items.properties.checkType.enum;
+      const tier = request.text.includes('"alt-text-quality"') ? "small" : "large";
+      expect(enumIds).toEqual([...(fromSchema.meta.tiers?.[tier]?.checksRun ?? [])]);
+    }
+  });
+
+  it("falls back to parsing text when the provider returns no parsed json", async () => {
+    const stub = makeStubProvider(twoTierResponse, {
+      capabilities: { vision: true, jsonSchema: true },
+      supportsComplete: true,
+    });
+
+    const result = await runWithDefaults(stub, {
+      provider: { name: "nebius", apiKey: "stub" },
+      checks: ["aria-mismatch"],
+    });
+
+    expect(stub.requests).toHaveLength(1);
+    expect(result.issues.map((i) => i.id)).toEqual(["semantic:aria-mismatch"]);
+  });
+
+  it("names the tier and the sent maxTokens when a truncated answer does not parse", async () => {
+    const stub = makeStubProvider('{"issues": [', {
+      capabilities: { vision: true, jsonSchema: true },
+      supportsComplete: true,
+      finishReason: "length",
+    });
+
+    await expect(
+      runWithDefaults(stub, {
+        provider: { name: "nebius", apiKey: "stub" },
+        checks: ["aria-mismatch"],
+      })
+    ).rejects.toThrow(
+      "Semantic tier 'large': response was cut off by max_tokens (4000); raise maxTokens for this tier"
+    );
+  });
+
+  it("keeps the original parse error when the answer was not truncated", async () => {
+    const stub = makeStubProvider('{"issues": [', {
+      capabilities: { vision: true, jsonSchema: true },
+      supportsComplete: true,
+      finishReason: "stop",
+    });
+
+    await expect(
+      runWithDefaults(stub, {
+        provider: { name: "nebius", apiKey: "stub" },
+        checks: ["aria-mismatch"],
+      })
+    ).rejects.toThrow("No JSON object found in semantic AI response");
+  });
+
+  it("lifts maxTokens to the semantic floor but keeps a larger configured value", async () => {
+    const sentMaxTokens = async (configured?: number) => {
+      const stub = makeStubProvider(twoTierResponse, {
+        capabilities: { vision: true, jsonSchema: true },
+        supportsComplete: true,
+        json: JSON.parse(twoTierResponse),
+      });
+
+      await runWithDefaults(stub, {
+        provider: {
+          name: "nebius",
+          apiKey: "stub",
+          ...(configured === undefined ? {} : { maxTokens: configured }),
+        },
+        checks: ["aria-mismatch"],
+      });
+
+      expect(stub.requests).toHaveLength(1);
+      return stub.requests[0].maxTokens;
+    };
+
+    expect(await sentMaxTokens()).toBe(4000);
+    expect(await sentMaxTokens(500)).toBe(4000);
+    expect(await sentMaxTokens(8000)).toBe(8000);
+  });
+
+  it("keeps progress percentages monotonic across tiers", async () => {
+    const percents: number[] = [];
+    await runWithDefaults(makeStubProvider(twoTierResponse), {
+      provider: { name: "nebius", apiKey: "stub" },
+      onProgress: ({ percent }) => {
+        percents.push(percent);
+      },
+    });
+
+    expect(percents.length).toBeGreaterThan(3);
+    for (let i = 1; i < percents.length; i++) {
+      expect(percents[i]).toBeGreaterThanOrEqual(percents[i - 1]);
+    }
+    expect(percents.at(-1)).toBe(100);
+  });
+
+  it("preflights every tier before any request when one model lacks vision", async () => {
+    const seeingStub = makeStubProvider(twoTierResponse, {
+      model: "vision-model",
+      capabilities: { vision: true, jsonSchema: false },
+    });
+    const blindStub = makeStubProvider(twoTierResponse, {
+      model: "openai/gpt-oss-120b",
+      capabilities: { vision: false, jsonSchema: false },
+    });
+
+    const promise = runSemanticAudit(
+      {
+        url: "https://stub.test",
+        page: makeStubPage(),
+        ownsBrowser: false,
+        pagePrepared: true,
+        tierProviderOverrides: { large: seeingStub, small: blindStub },
+      },
+      { provider: { name: "nebius", apiKey: "stub" } }
+    );
+
+    await expect(promise).rejects.toThrow(/small/);
+    // The large tier is preflighted first, so its request must not go out
+    // before the small tier's configuration error is known.
+    expect(seeingStub.prompts).toEqual([]);
+    expect(seeingStub.requests).toEqual([]);
+    expect(blindStub.prompts).toEqual([]);
+    expect(blindStub.requests).toEqual([]);
+  });
+
+  it("rejects through the returned promise when a tier fails during a slow progress callback", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    const largeStub = makeStubProvider(twoTierResponse);
+    const failingLarge: StubProvider = {
+      ...largeStub,
+      analyzeSemantic: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        throw new Error("large tier request failed");
+      },
+    };
+
+    try {
+      const promise = runSemanticAudit(
+        {
+          url: "https://stub.test",
+          page: makeStubPage(),
+          ownsBrowser: false,
+          pagePrepared: true,
+          providerOverride: makeStubProvider(twoTierResponse),
+          tierProviderOverrides: { large: failingLarge },
+        },
+        {
+          provider: { name: "nebius", apiKey: "stub" },
+          onProgress: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 30));
+          },
+        }
+      );
+
+      await expect(promise).rejects.toThrow("large tier request failed");
+      // Give the runtime a turn to report a rejection nobody listened to.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("takes page-level metadata from the small tier on a small-only run", async () => {
+    const smallResponse = JSON.stringify({
+      issues: [
+        {
+          checkType: "alt-text-quality",
+          severity: "warning",
+          message: "alt text is just the filename",
+          location: "img.hero",
+          confidence: 70,
+        },
+      ],
+      detectedLanguage: "de",
+      overallAssessment: "Small tier assessment",
+    });
+    const smallStub = makeStubProvider(smallResponse, { model: "small-model" });
+
+    const result = await runSemanticAudit(
+      {
+        url: "https://stub.test",
+        page: makeStubPage(),
+        ownsBrowser: false,
+        pagePrepared: true,
+        tierProviderOverrides: { small: smallStub },
+      },
+      {
+        provider: { name: "mistral", apiKey: "stub", model: "mistral-large-4" },
+        tiers: { small: { name: "openai", apiKey: "stub", model: "gpt-4o-mini" } },
+        checks: ["alt-text-quality"],
+      }
+    );
+
+    expect(result.meta.tiers?.large).toBeUndefined();
+    expect(result.meta.provider).toBe("openai");
+    expect(result.meta.model).toBe("small-model");
+    expect(result.meta.detectedLanguage).toBe("de");
+    expect(result.meta.overallAssessment).toBe("Small tier assessment");
+    expect(result.issues.map((i) => i.id)).toEqual(["semantic:alt-text-quality"]);
+  });
+
+  it("sends the screenshot only to the tier whose checks need it", async () => {
+    const stubOptions = {
+      capabilities: { vision: true, jsonSchema: true } as ModelCapabilities,
+      supportsComplete: true,
+    };
+    const largeStub = makeStubProvider(twoTierResponse, { ...stubOptions, model: "large-model" });
+    const smallStub = makeStubProvider(twoTierResponse, { ...stubOptions, model: "small-model" });
+
+    await runSemanticAudit(
+      {
+        url: "https://stub.test",
+        page: makeStubPage(),
+        ownsBrowser: false,
+        pagePrepared: true,
+        tierProviderOverrides: { large: largeStub, small: smallStub },
+      },
+      {
+        provider: { name: "nebius", apiKey: "stub" },
+        // lang-attribute is the one large-tier built-in that needs no image.
+        checks: ["lang-attribute", "alt-text-quality"],
+      }
+    );
+
+    expect(largeStub.requests).toHaveLength(1);
+    expect(largeStub.requests[0].images).toBeUndefined();
+    expect(smallStub.requests).toHaveLength(1);
+    expect(smallStub.requests[0].images).toHaveLength(1);
+  });
+
+  it("keeps large-tier findings and metadata first when the small tier finishes first", async () => {
+    const largeResponse = JSON.stringify({
+      issues: [
+        {
+          checkType: "aria-mismatch",
+          severity: "error",
+          message: "label mismatch",
+          location: "button#submit",
+          confidence: 80,
+        },
+      ],
+      detectedLanguage: "en",
+      overallAssessment: "Large tier assessment",
+    });
+    const smallResponse = JSON.stringify({
+      issues: [
+        {
+          checkType: "alt-text-quality",
+          severity: "warning",
+          message: "alt text is just the filename",
+          location: "img.hero",
+          confidence: 70,
+        },
+      ],
+      detectedLanguage: "fr",
+      overallAssessment: "Small tier assessment",
+    });
+
+    const largeStub = makeStubProvider(largeResponse, { model: "large-model" });
+    const slowLarge: StubProvider = {
+      ...largeStub,
+      analyzeSemantic: async (input) => {
+        largeStub.prompts.push(input.prompt);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { content: largeResponse, model: "large-model" };
+      },
+    };
+    const smallStub = makeStubProvider(smallResponse, { model: "small-model" });
+
+    const result = await runSemanticAudit(
+      {
+        url: "https://stub.test",
+        page: makeStubPage(),
+        ownsBrowser: false,
+        pagePrepared: true,
+        tierProviderOverrides: { large: slowLarge, small: smallStub },
+      },
+      {
+        provider: { name: "mistral", apiKey: "stub", model: "mistral-large-4" },
+        tiers: { small: { name: "openai", apiKey: "stub", model: "gpt-4o-mini" } },
+        checks: ["aria-mismatch", "alt-text-quality"],
+      }
+    );
+
+    expect(largeStub.prompts).toHaveLength(1);
+    expect(smallStub.prompts).toHaveLength(1);
+    expect(result.issues.map((i) => i.id)).toEqual([
+      "semantic:aria-mismatch",
+      "semantic:alt-text-quality",
+    ]);
+    expect(result.meta.provider).toBe("mistral");
+    expect(result.meta.model).toBe("large-model");
+    expect(result.meta.overallAssessment).toBe("Large tier assessment");
+  });
+
+  it("forwards a tier's reasoningEffort into the provider request", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(init?.body as string));
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            model: "mistral-large-4",
+            choices: [{ message: { content: twoTierResponse } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      );
+    }) as unknown as typeof fetch;
+
+    try {
+      // No provider override here: the request goes through the real
+      // `createProvider` and transport, so the body shows what the tier config
+      // actually produced.
+      await runSemanticAudit(
+        {
+          url: "https://stub.test",
+          page: makeStubPage(),
+          ownsBrowser: false,
+          pagePrepared: true,
+        },
+        {
+          provider: { name: "mistral", apiKey: "stub", model: "mistral-large-4" },
+          tiers: {
+            large: {
+              name: "mistral",
+              apiKey: "stub",
+              model: "mistral-large-4",
+              reasoningEffort: "high",
+            },
+          },
+          checks: ["aria-mismatch"],
+        }
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].reasoning_effort).toBe("high");
+  });
+});
+
+// ----- response schema -----
+
+describe("buildSemanticResponseSchema", () => {
+  /**
+   * Mistral and OpenAI strict mode reject a schema where an object has
+   * properties outside `required`, or omits `additionalProperties: false`.
+   */
+  function assertStrictMode(node: unknown): void {
+    if (!node || typeof node !== "object") return;
+    const obj = node as Record<string, unknown>;
+
+    if (obj.type === "object") {
+      const properties = (obj.properties ?? {}) as Record<string, unknown>;
+      expect(obj.additionalProperties).toBe(false);
+      expect([...(obj.required as string[])].sort()).toEqual(Object.keys(properties).sort());
+      for (const child of Object.values(properties)) {
+        assertStrictMode(child);
+      }
+    }
+
+    if (obj.type === "array") {
+      assertStrictMode(obj.items);
+    }
+  }
+
+  it("satisfies strict-mode constraints throughout", () => {
+    assertStrictMode(SEMANTIC_RESPONSE_SCHEMA);
+    assertStrictMode(buildSemanticResponseSchema(["aria-mismatch"]));
+  });
+
+  it("constrains checkType to the given ids", () => {
+    const schema = buildSemanticResponseSchema(["a", "b"]) as {
+      properties: { issues: { items: { properties: { checkType: { enum?: string[] } } } } };
+    };
+    expect(schema.properties.issues.items.properties.checkType.enum).toEqual(["a", "b"]);
+
+    const unconstrained = SEMANTIC_RESPONSE_SCHEMA as typeof schema;
+    expect(unconstrained.properties.issues.items.properties.checkType.enum).toBeUndefined();
+  });
+
+  it("expresses optional fields as nullable, which the parser treats as absent", () => {
+    const parsed = parseSemanticObject({
+      issues: [
+        {
+          checkType: "aria-mismatch",
+          severity: "warning",
+          message: "m",
+          location: "l",
+          context: null,
+          suggestion: null,
+          confidence: 40,
+        },
+      ],
+      detectedLanguage: null,
+      declaredLanguage: null,
+      landmarks: [],
+      overallAssessment: null,
+    });
+
+    expect(parsed.findings[0].context).toBeUndefined();
+    expect(parsed.findings[0].suggestion).toBeUndefined();
+    expect(parsed.detectedLanguage).toBeUndefined();
+    expect(parsed.landmarks).toBeUndefined();
+    expect(parsed.overallAssessment).toBeUndefined();
   });
 });

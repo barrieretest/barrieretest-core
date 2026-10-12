@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { UserCheckConfig } from "../semantic/types.js";
+import type { SemanticOptions, UserCheckConfig } from "../semantic/types.js";
 import { runCheck } from "./check.js";
 import { type BarrieretestConfig, PROJECT_CONFIG_FILENAME } from "./config.js";
 import type { ParsedArgs } from "./index.js";
@@ -113,6 +113,34 @@ describe("check add (flag-driven)", () => {
     expect(result.error).toMatch(/built-in/);
   });
 
+  it("rejects an invalid tier in an existing config entry", async () => {
+    writeFileSync(
+      GLOBAL_PATH,
+      JSON.stringify({
+        semantic: {
+          provider: "mistral",
+          customChecks: [
+            {
+              id: "button-verbs",
+              title: "X",
+              description: "X",
+              prompt: "Flag buttons whose label is not a clear action verb.",
+              tier: "medium",
+            },
+          ],
+        },
+      })
+    );
+
+    const result = await runCheck(
+      args({ checkSubcommand: "test", checkId: "button-verbs", checkUrl: "https://example.com" }),
+      { env: { MISTRAL_API_KEY: "mk" }, configPath: GLOBAL_PATH, cwd: TEST_DIR }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/invalid 'tier': medium/);
+  });
+
   it("rejects an invalid id shape", async () => {
     const result = await runCheck(args({ ...baseFlags, checkId: "Bad Id", checkScope: "global" }), {
       env: {},
@@ -138,6 +166,39 @@ describe("check list", () => {
     expect(result.success).toBe(true);
     expect(result.message).toContain("[built-in] aria-mismatch");
     expect(result.message).toContain("No user checks defined");
+  });
+
+  it("shows the tier of each check, defaulting to large", async () => {
+    const smallCheck: UserCheckConfig = {
+      id: "button-verbs",
+      title: "Button Verbs",
+      description: "d",
+      prompt: "Flag buttons whose label is not a clear action verb.",
+      tier: "small",
+    };
+    const defaultTierCheck: UserCheckConfig = {
+      id: "heading-order",
+      title: "Heading Order",
+      description: "d",
+      prompt: "Flag headings whose order does not follow the visual hierarchy.",
+    };
+    writeFileSync(
+      GLOBAL_PATH,
+      JSON.stringify({ semantic: { customChecks: [smallCheck, defaultTierCheck] } })
+    );
+
+    const result = await runCheck(args({ checkSubcommand: "list" }), {
+      env: {},
+      configPath: GLOBAL_PATH,
+      cwd: TEST_DIR,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.message).toContain("[global]   button-verbs  Button Verbs  (small)");
+    expect(result.message).toContain("[global]   heading-order  Heading Order  (large)");
+    // alt-text-quality is the only built-in on the small tier.
+    expect(result.message).toContain("[built-in] alt-text-quality  Alt Text Quality  (small)");
+    expect(result.message).toContain("[built-in] page-title  Page Title Quality  (large)");
   });
 
   it("annotates checks by source and flags overrides", async () => {
@@ -268,5 +329,61 @@ describe("check test (validation)", () => {
     );
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/Unknown check id/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// check test (resolved options) — `audit` is mocked so no provider call happens
+// ---------------------------------------------------------------------------
+
+describe("check test (resolved config)", () => {
+  afterAll(() => {
+    mock.restore();
+  });
+
+  it("merges global and project tier config leaf by leaf", async () => {
+    writeFileSync(
+      GLOBAL_PATH,
+      JSON.stringify({
+        semantic: {
+          provider: "mistral",
+          model: "mistral-large-4",
+          tiers: { small: { provider: "openai" } },
+        },
+      })
+    );
+    writeFileSync(
+      PROJECT_PATH,
+      JSON.stringify({ semantic: { tiers: { small: { model: "gpt-4o-mini" } } } })
+    );
+
+    let resolved: SemanticOptions | undefined;
+    mock.module("../audit.js", () => ({
+      audit: (_url: string, opts: { semantic?: SemanticOptions }) => {
+        resolved = opts.semantic;
+        return Promise.resolve({ issues: [], semanticMeta: { provider: "mistral" } });
+      },
+    }));
+
+    const result = await runCheck(
+      args({ checkSubcommand: "test", checkId: "page-title", checkUrl: "https://example.com" }),
+      {
+        env: { MISTRAL_API_KEY: "mk", OPENAI_API_KEY: "sk" },
+        configPath: GLOBAL_PATH,
+        cwd: TEST_DIR,
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(resolved?.provider).toEqual({
+      name: "mistral",
+      apiKey: "mk",
+      model: "mistral-large-4",
+    });
+    expect(resolved?.tiers?.small).toEqual({
+      name: "openai",
+      apiKey: "sk",
+      model: "gpt-4o-mini",
+    });
   });
 });

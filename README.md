@@ -95,10 +95,11 @@ provider API key via env. The CLI resolves the provider from:
 
 1. `--semantic-provider`
 2. `semantic.provider` in user config
-3. Env inference — exactly one of `NEBIUS_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
+3. Env inference — exactly one of `MISTRAL_API_KEY`, `OPENAI_API_KEY`,
+   `ANTHROPIC_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `NEBIUS_API_KEY`
 
 ```bash
-export NEBIUS_API_KEY=...
+export MISTRAL_API_KEY=...
 npx barrieretest https://example.com --semantic
 ```
 
@@ -124,13 +125,69 @@ Flags:
 | Flag | Description |
 |------|-------------|
 | `--semantic` | Enable semantic audit |
-| `--semantic-provider <name>` | `nebius` \| `openai` \| `anthropic` |
+| `--semantic-provider <name>` | `mistral` \| `openai` \| `anthropic` \| `openai-compatible` \| `nebius` |
 | `--semantic-model <id>` | Provider-specific model identifier |
+| `--semantic-base-url <url>` | API endpoint. Required for `openai-compatible`, an override for the rest |
+| `--semantic-small-provider <name>` | Provider for the small tier |
+| `--semantic-small-model <id>` | Model for the small tier |
+| `--semantic-large-provider <name>` | Provider for the large tier |
+| `--semantic-large-model <id>` | Model for the large tier |
 | `--semantic-checks <ids>` | Comma-separated check IDs |
 | `--semantic-timeout <ms>` | AI call timeout |
 
 Any `--semantic-*` flag implicitly enables semantic mode. Config defaults alone
 never auto-enable it.
+
+Env vars:
+
+| Variable | Used for |
+|---|---|
+| `MISTRAL_API_KEY` | `--semantic-provider mistral` |
+| `OPENAI_API_KEY` | `--semantic-provider openai` |
+| `ANTHROPIC_API_KEY` | `--semantic-provider anthropic` |
+| `OPENAI_COMPATIBLE_API_KEY` | `--semantic-provider openai-compatible` |
+| `OPENAI_COMPATIBLE_BASE_URL` | Base URL fallback for `openai-compatible` |
+| `NEBIUS_API_KEY` | `--semantic-provider nebius` |
+
+API keys are read from the environment only — never from a config file or a flag.
+
+#### Model tiers
+
+Every check declares a model tier. `small` is for cheap per-element judgements,
+`large` for the holistic page review and the default for checks that do not say.
+`alt-text-quality` is the only built-in on the small tier; custom checks opt in
+with `"tier": "small"`.
+
+A tier you do not configure uses the default provider and model, so one model
+for everything stays the default behaviour. Put the cheap checks on a cheap
+model per run:
+
+```bash
+npx barrieretest https://example.com \
+  --semantic \
+  --semantic-provider mistral \
+  --semantic-model mistral-large-4 \
+  --semantic-small-model mistral-small-2603
+```
+
+Or in config, including two different providers:
+
+```json
+{
+  "semantic": {
+    "provider": "mistral",
+    "model": "mistral-large-4",
+    "tiers": {
+      "small": { "provider": "openai", "model": "gpt-4o-mini" }
+    }
+  }
+}
+```
+
+A tier entry without `provider` means "same provider as the default", and then
+inherits the default model and base URL too. A tier that switches provider
+starts from that provider's own default model, since a model id is not portable
+between providers.
 
 ### Built-in semantic checks
 
@@ -154,8 +211,9 @@ live only in env vars — `config set` rejects anything else.
 
 ```bash
 # Set defaults you don't want to type every time
-npx barrieretest config set semantic.provider nebius
-npx barrieretest config set semantic.model openai/gpt-oss-120b
+npx barrieretest config set semantic.provider mistral
+npx barrieretest config set semantic.model mistral-large-4
+npx barrieretest config set semantic.tiers.small.model mistral-small-2603
 npx barrieretest config set semantic.checks aria-mismatch,page-title
 npx barrieretest config set semantic.timeout 120000
 
@@ -170,8 +228,17 @@ npx barrieretest config unset semantic.model
 npx barrieretest config path
 ```
 
-Supported keys: `semantic.provider`, `semantic.model`, `semantic.checks`,
-`semantic.timeout`.
+Supported keys: `semantic.provider`, `semantic.model`, `semantic.baseUrl`,
+`semantic.reasoningEffort`, `semantic.checks`, `semantic.timeout`, and per tier
+`semantic.tiers.small.provider`, `semantic.tiers.small.model`,
+`semantic.tiers.small.baseUrl`, `semantic.tiers.small.reasoningEffort` plus the
+four `semantic.tiers.large.*` equivalents.
+
+`reasoningEffort` is passed to the provider verbatim, because the accepted
+values differ per vendor (Mistral takes `"none"` and `"high"`). A model the
+built-in table marks as a reasoning model is sent `"none"` unless you set it:
+the semantic pass is a single structured extraction, where reasoning adds cost
+and latency and can consume the whole token budget before the answer starts.
 
 CLI flags always override config values.
 
@@ -215,7 +282,8 @@ npx barrieretest check test <id> --url <url>   # dry-run one check
 
 The CLI loads both files and merges them. Precedence for each field:
 
-- **Scalars** (`provider`, `model`, `timeout`, `checks`): project wins when set, otherwise global.
+- **Scalars** (`provider`, `model`, `baseUrl`, `reasoningEffort`, `timeout`, `checks`): project wins when set, otherwise global.
+- **`tiers`**: merged leaf by leaf, so a project can retarget one tier's model without restating its provider. A tier inherits `reasoningEffort` from the merged defaults only while it stays on the default provider, like `model`.
 - **`customChecks`**: concatenated. If the same id appears in both, the project entry overrides the global one and audit runs print a warning to stderr.
 - **Built-in ids** cannot be overridden by a user check. The CLI rejects colliding ids at `check add` and at load time.
 
@@ -250,12 +318,13 @@ If you prefer hand-editing, add this shape to `.barrieretest.json` or
 | `description` | yes | — | One-line description. |
 | `prompt` | yes | — | Free-form instruction for the AI. Be specific about what to flag. |
 | `needsScreenshot` | no | `false` | Set `true` if the check needs visual reasoning. |
+| `tier` | no | `"large"` | `"small"` for a cheap per-element check, `"large"` for the holistic page review. |
 | `context` | no | `["body"]` | Page-context sections to include. One or more of: `head`, `body`, `aria`, `forms`, `images`, `landmarks`. |
 | `helpUrl` | no | — | Optional WCAG or internal help link. |
 
 > **Recommendation:** Keep semantic audits under about 20 active checks.
 >
-> All active checks are sent in a single prompt. There is no limit in code, so you can add as many checks as you need. Larger check sets make the prompt harder for the model to follow, which can reduce finding quality.
+> All active checks are sent in one prompt per model tier. There is no limit in code, so you can add as many checks as you need. Larger check sets make the prompt harder for the model to follow, which can reduce finding quality.
 
 ## API
 
@@ -408,7 +477,7 @@ const result = await audit('https://example.com', {
 })
 ```
 
-Providers: `openai`, `anthropic`, `nebius`.
+Providers: `mistral`, `openai`, `anthropic`, `openai-compatible`, `nebius`.
 
 ## Semantic audits API
 
@@ -421,9 +490,9 @@ import { semanticAudit } from '@barrieretest/core'
 
 const result = await semanticAudit('https://example.com', {
   provider: {
-    name: 'nebius',
-    apiKey: process.env.NEBIUS_API_KEY!,
-    model: 'openai/gpt-oss-120b',
+    name: 'mistral',
+    apiKey: process.env.MISTRAL_API_KEY!,
+    model: 'mistral-large-4',
   },
 })
 
@@ -436,7 +505,7 @@ Combined with `audit()` so a single browser launch serves both the engine and se
 ```typescript
 const result = await audit('https://example.com', {
   semantic: {
-    provider: { name: 'nebius', apiKey: process.env.NEBIUS_API_KEY! },
+    provider: { name: 'mistral', apiKey: process.env.MISTRAL_API_KEY! },
     checks: ['aria-mismatch', 'page-title'], // optional: defaults to all built-ins
   },
 })
@@ -444,6 +513,30 @@ const result = await audit('https://example.com', {
 // result.issues contains both engine findings and semantic findings as
 // standard core Issue[] entries. Semantic ones use the id "semantic:<check-id>".
 // result.semanticMeta exposes pass-level metadata.
+```
+
+`provider` is the default for every tier. `tiers` overrides it per tier; an
+override is a complete config and inherits nothing, so each entry names its own
+provider, key, and model:
+
+```typescript
+const result = await semanticAudit('https://example.com', {
+  provider: {
+    name: 'mistral',
+    apiKey: process.env.MISTRAL_API_KEY!,
+    model: 'mistral-large-4',
+  },
+  tiers: {
+    small: {
+      name: 'mistral',
+      apiKey: process.env.MISTRAL_API_KEY!,
+      model: 'mistral-small-2603',
+    },
+  },
+})
+
+// result.meta.tiers.small / .large report the provider, model, and check ids
+// each tier actually ran.
 ```
 
 Supported `audit({ semantic })` combinations:
@@ -486,10 +579,11 @@ const skipLinkCheck: SemanticCheck = {
   promptSection: '**Skip Link Quality**: Check that skip links are present, visible on focus, and target main content',
   needsScreenshot: true,
   needsContext: ['head', 'body'],
+  tier: 'large', // 'small' for a cheap per-element check; 'large' is the default
 }
 
 const result = await semanticAudit('https://example.com', {
-  provider: { name: 'nebius', apiKey: process.env.NEBIUS_API_KEY! },
+  provider: { name: 'mistral', apiKey: process.env.MISTRAL_API_KEY! },
   customChecks: [skipLinkCheck],
   checks: ['skip-link-quality'],
 })
@@ -501,9 +595,17 @@ Custom checks can override built-ins by reusing the same `id`. This applies only
 
 | Provider | Suggested model | Notes |
 |---|---|---|
-| `nebius` | `openai/gpt-oss-120b` | Full support; default suggestion in the `init` wizard |
+| `mistral` | `mistral-large-4` (small tier: `mistral-small-2603`) | Default suggestion in the `init` wizard; `MISTRAL_API_KEY`. `mistral-large-4` is a reasoning model; reasoning is off by default, set `reasoningEffort: "high"` and a larger `maxTokens` to enable it. With a JSON schema, a response the model cuts off mid-JSON raises an error naming `maxTokens` and the budget that was sent; on the text path it still surfaces as a parse error |
 | `openai` | `gpt-4o` | Pass a vision-capable model |
 | `anthropic` | `claude-sonnet-4-5` | Pass a vision-capable Claude model |
+| `openai-compatible` | — | Any chat-completions endpoint. Needs `baseUrl` and `model`; capabilities default to text-only, so set `capabilities: { vision: true, jsonSchema: true }` when the model has more |
+| `nebius` | `openai/gpt-oss-120b` | Alias for `openai-compatible` with the Nebius base URL. Its default model is declared text-only, so selecting a screenshot check fails loudly instead of sending an image to a text model |
+
+Capabilities come from a small built-in table that is advisory — model lineups
+move faster than releases, so `capabilities` in the provider config always wins.
+An unknown model id on `mistral`, `openai`, or `anthropic` is assumed to do
+vision and structured output; on `openai-compatible` it is assumed to do
+neither.
 
 ## Cookie banner dismissal
 

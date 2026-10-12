@@ -2,7 +2,7 @@ import { audit } from "../audit.js";
 import { CACHE_DIR, getLastRun } from "../baseline/cache.js";
 import { readBaseline, updateBaseline, writeBaseline } from "../baseline/write.js";
 import { formatActionable, formatFixReady, formatMinimal } from "../report.js";
-import type { SemanticMeta } from "../semantic/types.js";
+import type { SemanticMeta, SemanticModelTier } from "../semantic/types.js";
 import type { AuditEngine, AuditOptions, DetailLevel, Issue, IssueSeverity } from "../types.js";
 import {
   type BarrieretestConfig,
@@ -55,6 +55,11 @@ export interface ParsedArgs {
   semantic?: boolean;
   semanticProvider?: string;
   semanticModel?: string;
+  semanticBaseUrl?: string;
+  semanticSmallProvider?: string;
+  semanticSmallModel?: string;
+  semanticLargeProvider?: string;
+  semanticLargeModel?: string;
   semanticChecks?: string[];
   semanticTimeout?: number;
   configSubcommand?: ConfigSubcommand;
@@ -189,22 +194,50 @@ function parseAuditFlags(args: string[], startIndex: number, result: ParsedArgs)
     } else if (arg === "--semantic") {
       result.semantic = true;
     } else if (arg === "--semantic-provider") {
-      result.semanticProvider = nextArg;
+      result.semanticProvider = requireFlagValue(arg, nextArg);
       i++;
     } else if (arg === "--semantic-model") {
-      result.semanticModel = nextArg;
+      result.semanticModel = requireFlagValue(arg, nextArg);
+      i++;
+    } else if (arg === "--semantic-base-url") {
+      result.semanticBaseUrl = requireFlagValue(arg, nextArg);
+      i++;
+    } else if (arg === "--semantic-small-provider") {
+      result.semanticSmallProvider = requireFlagValue(arg, nextArg);
+      i++;
+    } else if (arg === "--semantic-small-model") {
+      result.semanticSmallModel = requireFlagValue(arg, nextArg);
+      i++;
+    } else if (arg === "--semantic-large-provider") {
+      result.semanticLargeProvider = requireFlagValue(arg, nextArg);
+      i++;
+    } else if (arg === "--semantic-large-model") {
+      result.semanticLargeModel = requireFlagValue(arg, nextArg);
       i++;
     } else if (arg === "--semantic-checks") {
-      result.semanticChecks = nextArg
+      result.semanticChecks = requireFlagValue(arg, nextArg)
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
       i++;
     } else if (arg === "--semantic-timeout") {
-      result.semanticTimeout = Number.parseInt(nextArg, 10);
+      result.semanticTimeout = Number.parseInt(requireFlagValue(arg, nextArg), 10);
       i++;
     }
   }
+}
+
+/**
+ * A value-taking semantic flag whose value is missing, or is the next flag,
+ * used to be dropped silently: the run then did less than asked and still
+ * reported success. An empty string is kept, so the resolver's own
+ * validation names it.
+ */
+function requireFlagValue(flag: string, value: string | undefined): string {
+  if (value === undefined || value.startsWith("-")) {
+    throw new Error(`Flag ${flag} requires a value`);
+  }
+  return value;
 }
 
 function parseConfigSubcommand(args: string[], result: ParsedArgs): void {
@@ -348,10 +381,27 @@ function addIssueLines(lines: string[], issues: Issue[], detail: DetailLevel): v
   }
 }
 
+/** Report order for the per-tier provider lines: the page review comes first. */
+const TIER_REPORT_ORDER: readonly SemanticModelTier[] = ["large", "small"];
+
 function addSemanticSummaryLines(lines: string[], meta: SemanticMeta, issues: Issue[]): void {
   const semanticIssueCount = issues.filter((i) => i.id.startsWith("semantic:")).length;
   lines.push("  Semantic audit:");
-  lines.push(`    Provider: ${meta.provider}${meta.model ? ` (${meta.model})` : ""}`);
+
+  const tiers = meta.tiers ?? {};
+  const activeTiers = TIER_REPORT_ORDER.filter((tier) => tiers[tier]);
+  if (activeTiers.length > 1) {
+    for (const tier of activeTiers) {
+      const entry = tiers[tier];
+      if (!entry) continue;
+      lines.push(
+        `    Provider (${tier}): ${entry.provider}${entry.model ? ` (${entry.model})` : ""}`
+      );
+    }
+  } else {
+    lines.push(`    Provider: ${meta.provider}${meta.model ? ` (${meta.model})` : ""}`);
+  }
+
   lines.push(`    Checks run: ${meta.checksRun.length}`);
   lines.push(`    Findings: ${semanticIssueCount}`);
 }
@@ -424,13 +474,21 @@ Audit options:
 
 Semantic AI options (opt-in; any --semantic-* flag enables semantic mode):
   --semantic                    Enable AI-driven semantic audit
-  --semantic-provider <name>    nebius | openai | anthropic
+  --semantic-provider <name>    mistral | openai | anthropic | openai-compatible | nebius
   --semantic-model <model>      Provider-specific model identifier
+  --semantic-base-url <url>     API endpoint (required for openai-compatible)
   --semantic-checks <ids>       Comma-separated check IDs
   --semantic-timeout <ms>       AI call timeout
 
-Semantic env vars (one of):
-  NEBIUS_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
+Model tiers (a check runs on "small" or "large"; large is the default):
+  --semantic-small-provider <name>   Provider for the cheap per-element checks
+  --semantic-small-model <model>     Model for the cheap per-element checks
+  --semantic-large-provider <name>   Provider for the holistic page review
+  --semantic-large-model <model>     Model for the holistic page review
+
+Semantic env vars (API key for the selected provider):
+  MISTRAL_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY,
+  OPENAI_COMPATIBLE_API_KEY (with OPENAI_COMPATIBLE_BASE_URL), NEBIUS_API_KEY
 
 Note: --semantic is not supported with --engine pa11y in this release.
 
@@ -464,6 +522,11 @@ async function runAudit(args: ParsedArgs, deps: RunAuditDeps): Promise<CliResult
       semantic: args.semantic,
       semanticProvider: args.semanticProvider,
       semanticModel: args.semanticModel,
+      semanticBaseUrl: args.semanticBaseUrl,
+      semanticSmallProvider: args.semanticSmallProvider,
+      semanticSmallModel: args.semanticSmallModel,
+      semanticLargeProvider: args.semanticLargeProvider,
+      semanticLargeModel: args.semanticLargeModel,
       semanticChecks: args.semanticChecks,
       semanticTimeout: args.semanticTimeout,
       engine: args.engine,

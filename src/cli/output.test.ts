@@ -140,6 +140,77 @@ describe("CLI semantic summary block", () => {
     nextSemanticMeta = undefined;
   });
 
+  it("prints one provider line per tier when two tiers ran", async () => {
+    nextIssues = [];
+    nextSemanticMeta = {
+      provider: "mistral",
+      model: "mistral-large-4",
+      checksRun: ["page-title", "alt-text-quality"],
+      tiers: {
+        large: {
+          provider: "mistral",
+          model: "mistral-large-4",
+          checksRun: ["page-title"],
+        },
+        small: {
+          provider: "openai",
+          model: "gpt-4o-mini",
+          checksRun: ["alt-text-quality"],
+        },
+      },
+    };
+
+    const result = await runCli(
+      {
+        command: "audit",
+        url: "https://example.com",
+        detail: "actionable",
+        headless: true,
+        semantic: true,
+      },
+      { env: { MISTRAL_API_KEY: "mk" }, configPath: MISSING_CONFIG }
+    );
+
+    expect(result.message).toContain("Provider (large): mistral (mistral-large-4)");
+    expect(result.message).toContain("Provider (small): openai (gpt-4o-mini)");
+    expect(result.message).not.toContain("    Provider: ");
+    // The page review is reported first.
+    const lines = (result.message ?? "").split("\n");
+    expect(lines.findIndex((l) => l.includes("Provider (large)"))).toBeLessThan(
+      lines.findIndex((l) => l.includes("Provider (small)"))
+    );
+
+    nextSemanticMeta = undefined;
+  });
+
+  it("keeps the single provider line when only one tier ran", async () => {
+    nextIssues = [];
+    nextSemanticMeta = {
+      provider: "mistral",
+      model: "mistral-large-4",
+      checksRun: ["page-title"],
+      tiers: {
+        large: { provider: "mistral", model: "mistral-large-4", checksRun: ["page-title"] },
+      },
+    };
+
+    const result = await runCli(
+      {
+        command: "audit",
+        url: "https://example.com",
+        detail: "actionable",
+        headless: true,
+        semantic: true,
+      },
+      { env: { MISTRAL_API_KEY: "mk" }, configPath: MISSING_CONFIG }
+    );
+
+    expect(result.message).toContain("Provider: mistral (mistral-large-4)");
+    expect(result.message).not.toContain("Provider (large)");
+
+    nextSemanticMeta = undefined;
+  });
+
   it("omits the semantic summary when semanticMeta is absent", async () => {
     nextIssues = [];
     nextSemanticMeta = undefined;

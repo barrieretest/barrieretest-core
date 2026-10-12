@@ -1,8 +1,15 @@
 #!/usr/bin/env node
-import { parseArgs, runCli } from "./index.js";
+import { type ParsedArgs, parseArgs, runCli } from "./index.js";
 
 const args = process.argv.slice(2);
-const parsed = parseArgs(args);
+
+let parsed: ParsedArgs;
+try {
+  parsed = parseArgs(args);
+} catch (error) {
+  console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
 
 runCli(parsed)
   .then((result) => {

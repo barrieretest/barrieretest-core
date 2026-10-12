@@ -2,184 +2,23 @@
  * OpenAI provider for AI-enhanced accessibility analysis
  */
 
-import type { SemanticAnalysisInput, SemanticAnalysisResponse } from "../../semantic/types.js";
-import type { AIAnalysis, AIAnalysisInput, AIProvider, AIProviderConfig } from "../types.js";
-import { buildAnalysisPrompt, parseAnalysisResponse } from "../types.js";
+import { normalizeBaseUrl } from "../transports/shared.js";
+import type { AIProvider, AIProviderConfig } from "../types.js";
+import { createChatCompletionsProvider } from "./shared.js";
 
-const DEFAULT_MODEL = "gpt-4o";
-const DEFAULT_MAX_TOKENS = 1024;
-const DEFAULT_SEMANTIC_MAX_TOKENS = 2000;
-const DEFAULT_SEMANTIC_TIMEOUT_MS = 120_000;
-
-interface OpenAIMessage {
-  role: "user" | "assistant" | "system";
-  content: string | OpenAIContentPart[];
-}
-
-interface OpenAIContentPart {
-  type: "text" | "image_url";
-  text?: string;
-  image_url?: {
-    url: string;
-    detail?: "low" | "high" | "auto";
-  };
-}
-
-interface OpenAIResponse {
-  choices: {
-    message: {
-      content: string;
-    };
-  }[];
-}
+const OPENAI_BASE_URL = "https://api.openai.com/v1";
 
 /**
  * Creates an OpenAI provider instance
  */
 export function createOpenAIProvider(config: AIProviderConfig): AIProvider {
-  const {
-    apiKey,
-    model = DEFAULT_MODEL,
-    maxTokens = DEFAULT_MAX_TOKENS,
-    temperature = 0.3,
-  } = config;
-
-  return {
+  return createChatCompletionsProvider({
     name: "openai",
-
-    async analyze(input: AIAnalysisInput): Promise<AIAnalysis> {
-      const prompt = buildAnalysisPrompt(input);
-      const messages: OpenAIMessage[] = [];
-
-      // Build message with optional image
-      if (input.screenshot) {
-        const base64Image = uint8ArrayToBase64(input.screenshot);
-        messages.push({
-          role: "user",
-          content: [
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:image/png;base64,${base64Image}`,
-                detail: "high",
-              },
-            },
-            {
-              type: "text",
-              text: prompt,
-            },
-          ],
-        });
-      } else {
-        messages.push({
-          role: "user",
-          content: prompt,
-        });
-      }
-
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          max_tokens: maxTokens,
-          temperature,
-        }),
-      });
-
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`OpenAI API error: ${response.status} - ${error}`);
-      }
-
-      const data = (await response.json()) as OpenAIResponse;
-      const content = data.choices[0]?.message?.content;
-
-      if (!content) {
-        throw new Error("No response content from OpenAI");
-      }
-
-      return parseAnalysisResponse(content);
-    },
-
-    async analyzeSemantic(input: SemanticAnalysisInput): Promise<SemanticAnalysisResponse> {
-      const messages: OpenAIMessage[] = [];
-
-      if (input.system) {
-        messages.push({ role: "system", content: input.system });
-      }
-
-      const userContent: OpenAIContentPart[] = [{ type: "text", text: input.prompt }];
-
-      if (input.screenshot) {
-        const base64Image = uint8ArrayToBase64(input.screenshot);
-        userContent.push({
-          type: "image_url",
-          image_url: {
-            url: `data:image/png;base64,${base64Image}`,
-            detail: "high",
-          },
-        });
-      }
-
-      messages.push({ role: "user", content: userContent });
-
-      const controller = new AbortController();
-      const timeoutMs = input.timeout ?? DEFAULT_SEMANTIC_TIMEOUT_MS;
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-      try {
-        const response = await fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages,
-            max_tokens: Math.max(maxTokens, DEFAULT_SEMANTIC_MAX_TOKENS),
-            temperature,
-          }),
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          const error = await response.text();
-          throw new Error(`OpenAI API error: ${response.status} - ${error}`);
-        }
-
-        const data = (await response.json()) as OpenAIResponse;
-        const content = data.choices[0]?.message?.content;
-
-        if (!content) {
-          throw new Error("No response content from OpenAI");
-        }
-
-        return { content, model };
-      } catch (error) {
-        if (error instanceof Error && error.name === "AbortError") {
-          throw new Error(`OpenAI semantic call timed out after ${timeoutMs}ms`);
-        }
-        throw error;
-      } finally {
-        clearTimeout(timeoutId);
-      }
-    },
-  };
-}
-
-/**
- * Converts Uint8Array to base64 string
- */
-function uint8ArrayToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
+    kind: "openai",
+    label: "OpenAI",
+    envVar: "OPENAI_API_KEY",
+    baseUrl: normalizeBaseUrl(config.baseUrl ?? OPENAI_BASE_URL),
+    imageDetail: "high",
+    config,
+  });
 }

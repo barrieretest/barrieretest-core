@@ -37,11 +37,82 @@ export interface AIAnalysisInput {
 }
 
 /**
+ * Capabilities a model either has or lacks. Declared, never discovered by a
+ * failed request: an unsupported capability is a configuration error before
+ * the first network call.
+ */
+export interface ModelCapabilities {
+  /** Accepts images in the request. */
+  vision: boolean;
+  /** Native structured output (response_format json_schema, or a forced tool call on Anthropic). */
+  jsonSchema: boolean;
+  /** Omitted when the provider imposes no practical per-request limit. */
+  maxImagesPerRequest?: number;
+  /** Emits reasoning by default; costs output tokens and latency. */
+  reasoning?: boolean;
+}
+
+/** A JSON Schema object describing the expected response shape. */
+export type JsonSchemaObject = Record<string, unknown>;
+
+/**
+ * One request in the shape every provider accepts, independent of wire format.
+ */
+export interface ModelRequest {
+  /** Optional system prompt. */
+  system?: string;
+  /** User prompt. Sent as the first part of the user message. */
+  text: string;
+  /**
+   * PNG images. `label` is sent as a text part directly before its image,
+   * e.g. "Image 2: same capture with numbered marks".
+   */
+  images?: { png: Uint8Array; label?: string }[];
+  /** When set and the model supports it, enforced via provider-native structured output. */
+  responseSchema?: JsonSchemaObject;
+  /** Overrides the provider's configured max output tokens for this request. */
+  maxTokens?: number;
+  /** Per-request timeout in milliseconds. Defaults to the provider's `timeout`. */
+  timeout?: number;
+  /** Caller abort signal, honoured alongside the timeout. */
+  signal?: AbortSignal;
+}
+
+/**
+ * One response in the shape every provider returns.
+ */
+export interface ModelResponse {
+  /** Raw text content. */
+  text: string;
+  /**
+   * Parsed JSON when `responseSchema` was given, the provider enforced it,
+   * and the text parsed; undefined otherwise.
+   */
+  json?: unknown;
+  /** Model the provider reported, falling back to the configured model. */
+  model: string;
+  /** Why the model stopped, as the provider reported it, e.g. "stop" or "length". */
+  finishReason?: string;
+  usage?: { inputTokens: number; outputTokens: number };
+}
+
+/**
  * AI provider interface
  */
 export interface AIProvider {
   /** Provider name */
   name: string;
+  /** Model identifier. Set by every provider `createProvider()` builds. */
+  model?: string;
+  /** Declared model capabilities. Set by every provider `createProvider()` builds. */
+  capabilities?: ModelCapabilities;
+  /**
+   * Single request in the unified shape.
+   *
+   * Optional so hand-written providers and test stubs that only implement
+   * `analyze()` keep compiling.
+   */
+  complete?(request: ModelRequest): Promise<ModelResponse>;
   /** Analyze a single accessibility issue (per-issue enhancement). */
   analyze(input: AIAnalysisInput): Promise<AIAnalysis>;
   /**
@@ -66,12 +137,33 @@ export interface AIProviderConfig {
   maxTokens?: number;
   /** Temperature for generation */
   temperature?: number;
+  /**
+   * Required for "openai-compatible"; optional override for the others
+   * (e.g. https://api.eu.mistral.ai/v1). Trailing slashes are stripped.
+   */
+  baseUrl?: string;
+  /** Overrides or supplies capabilities for models not in the built-in table. */
+  capabilities?: Partial<ModelCapabilities>;
+  /** Default per-request timeout in ms. Default 120_000. */
+  timeout?: number;
+  /**
+   * Reasoning level, passed verbatim to the provider because vendors differ.
+   * Documented values: "none", "high". Unset means "none" for a model the
+   * table declares as `reasoning`, and the vendor default otherwise.
+   */
+  reasoningEffort?: string;
 }
 
 /**
- * Supported AI provider names
+ * Wire formats and capability tables the layer implements.
  */
-export type AIProviderName = "openai" | "anthropic" | "nebius";
+export type ProviderKind = "mistral" | "openai" | "anthropic" | "openai-compatible";
+
+/**
+ * Supported AI provider names. "nebius" is an alias for openai-compatible
+ * with the Nebius base URL and its default model.
+ */
+export type AIProviderName = ProviderKind | "nebius";
 
 /**
  * Builds the prompt for AI analysis

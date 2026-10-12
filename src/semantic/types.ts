@@ -10,6 +10,7 @@
  * file plus one registry entry.
  */
 
+import type { AIProviderName, ModelCapabilities } from "../ai/types.js";
 import type { Issue, IssueSeverity, SemanticIssueMeta } from "../types.js";
 
 export type { SemanticIssueMeta };
@@ -18,6 +19,14 @@ export type { SemanticIssueMeta };
  * Severity used by AI semantic checks before mapping to core's `IssueSeverity`.
  */
 export type SemanticSeverity = "error" | "warning" | "notice";
+
+/**
+ * Which model size a check is sent to. "small" is for cheap per-element
+ * judgements, "large" for the holistic page review.
+ */
+export type SemanticModelTier = "small" | "large";
+
+export const SEMANTIC_MODEL_TIERS: readonly SemanticModelTier[] = ["small", "large"];
 
 /**
  * Categories of HTML context a semantic check might need extracted from
@@ -57,6 +66,8 @@ export interface SemanticCheck {
   needsScreenshot: boolean;
   /** Which HTML context sections this check needs. */
   needsContext: SemanticContextSection[];
+  /** Which model tier runs this check. Default "large". */
+  tier?: SemanticModelTier;
   /** Optional WCAG help URL. */
   helpUrl?: string;
   /**
@@ -82,6 +93,7 @@ export interface UserCheckConfig {
   prompt: string;
   needsScreenshot?: boolean;
   context?: SemanticContextSection[];
+  tier?: SemanticModelTier;
   helpUrl?: string;
 }
 
@@ -124,6 +136,15 @@ export interface SemanticLandmark {
 }
 
 /**
+ * Per-tier metadata for a semantic pass that used more than one model.
+ */
+export interface SemanticTierMeta {
+  provider: string;
+  model: string;
+  checksRun: string[];
+}
+
+/**
  * Pass-level metadata returned by a semantic audit.
  */
 export interface SemanticMeta {
@@ -131,12 +152,17 @@ export interface SemanticMeta {
   declaredLanguage?: string;
   landmarks?: SemanticLandmark[];
   overallAssessment?: string;
-  /** Which check IDs ran in this pass. */
+  /** Which check IDs ran in this pass, across all tiers. */
   checksRun: string[];
-  /** Provider name (e.g., "nebius"). */
+  /**
+   * Provider name (e.g., "nebius"). Describes the large tier when it ran,
+   * otherwise the one tier that did.
+   */
   provider: string;
-  /** Model identifier used. */
+  /** Model identifier used. Follows the same tier rule as `provider`. */
   model: string;
+  /** One entry per tier that ran. */
+  tiers?: Partial<Record<SemanticModelTier, SemanticTierMeta>>;
 }
 
 /**
@@ -156,19 +182,34 @@ export interface SemanticAuditResult {
  * evolve independently.
  */
 export interface SemanticProviderConfig {
-  name: "nebius" | "openai" | "anthropic";
+  name: AIProviderName;
   apiKey: string;
   model?: string;
   maxTokens?: number;
   temperature?: number;
+  /** Required for "openai-compatible"; optional override for the others. */
+  baseUrl?: string;
+  /** Overrides or supplies capabilities for models not in the built-in table. */
+  capabilities?: Partial<ModelCapabilities>;
+  /**
+   * Reasoning level, passed verbatim to the provider. Documented values:
+   * "none", "high". A model declared as `reasoning` defaults to "none" —
+   * opt back in with "high" and a larger `maxTokens`.
+   */
+  reasoningEffort?: string;
 }
 
 /**
  * Options for `semanticAudit()` and the `audit({ semantic: ... })` integration.
  */
 export interface SemanticOptions {
-  /** AI provider configuration. */
+  /** AI provider configuration. Used for every tier unless `tiers` overrides it. */
   provider: SemanticProviderConfig;
+  /**
+   * Per-tier provider overrides. A tier without an override uses `provider`.
+   * An override is a complete config — it inherits nothing from `provider`.
+   */
+  tiers?: Partial<Record<SemanticModelTier, SemanticProviderConfig>>;
   /** Which check IDs to run. Defaults to all built-in checks. */
   checks?: string[];
   /** Custom checks to register for this run. */

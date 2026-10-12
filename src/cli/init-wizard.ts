@@ -14,7 +14,6 @@ import {
   type BarrieretestConfig,
   getConfigPath,
   readConfig,
-  SEMANTIC_PROVIDERS,
   type SemanticProviderName,
   writeConfig,
 } from "./config.js";
@@ -26,23 +25,43 @@ import {
   note,
   outro,
   select,
+  type SelectOption,
   text,
   warn,
 } from "./prompt.js";
 import { SEMANTIC_ENV_VAR_BY_PROVIDER } from "./semantic-options.js";
 
+/**
+ * Providers the wizard offers. `openai-compatible` needs a base URL and a
+ * model the wizard cannot suggest, so it stays a config/flag-only option.
+ */
+export type WizardProviderName = Exclude<SemanticProviderName, "openai-compatible">;
+
+export const PROVIDER_OPTIONS: readonly SelectOption<WizardProviderName>[] = [
+  { value: "mistral", label: "Mistral", hint: "Large 4 for the page review, Small 4 for alt text" },
+  { value: "nebius", label: "Nebius", hint: "gpt-oss-120b, cost-effective" },
+  { value: "openai", label: "OpenAI", hint: "GPT-4o vision" },
+  { value: "anthropic", label: "Anthropic", hint: "Claude with vision" },
+];
+
 /** Suggested default model per provider. Users can override at any time. */
-export const DEFAULT_MODELS: Record<SemanticProviderName, string> = {
+export const DEFAULT_MODELS: Record<WizardProviderName, string> = {
+  mistral: "mistral-large-4",
   nebius: "openai/gpt-oss-120b",
   openai: "gpt-4o",
   anthropic: "claude-sonnet-4-5",
 };
 
+/** Cheap Mistral model offered for the small tier. */
+export const MISTRAL_SMALL_MODEL = "mistral-small-2603";
+
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 export interface WizardAnswers {
-  provider: SemanticProviderName;
+  provider: WizardProviderName;
   model?: string;
+  /** Model for the small tier; omitted means "one model for every tier". */
+  smallTierModel?: string;
   checks?: string[];
   timeout: number;
 }
@@ -84,14 +103,10 @@ export async function runInit(deps: RunInitDeps): Promise<CliResult> {
   }
 
   const defaultProvider = pickDefaultProvider(existing, deps.env);
-  const provider = await select<SemanticProviderName>({
+  const provider = await select<WizardProviderName>({
     message: "Which AI provider?",
-    options: [
-      { value: "nebius", label: "Nebius", hint: "gpt-oss-120b, cost-effective" },
-      { value: "openai", label: "OpenAI", hint: "GPT-4o vision" },
-      { value: "anthropic", label: "Anthropic", hint: "Claude with vision" },
-    ],
-    initialIndex: SEMANTIC_PROVIDERS.indexOf(defaultProvider),
+    options: [...PROVIDER_OPTIONS],
+    initialIndex: PROVIDER_OPTIONS.findIndex((o) => o.value === defaultProvider),
   });
 
   const envVar = SEMANTIC_ENV_VAR_BY_PROVIDER[provider];
@@ -116,6 +131,14 @@ export async function runInit(deps: RunInitDeps): Promise<CliResult> {
         default: suggestedModel,
         validate: (v) => (v.trim() ? null : "Model cannot be empty."),
       });
+
+  // Mistral is the only provider whose small model the wizard knows about.
+  const useSmallTier =
+    provider === "mistral" &&
+    (await confirm({
+      message: `Use ${MISTRAL_SMALL_MODEL} for lightweight checks (alt text)?`,
+      default: true,
+    }));
 
   const initialCheckValues = existing.semantic?.checks ?? [...BUILT_IN_CHECK_IDS];
   const chosenChecks = await multiselect<string>({
@@ -142,6 +165,7 @@ export async function runInit(deps: RunInitDeps): Promise<CliResult> {
   const answers: WizardAnswers = {
     provider,
     model,
+    ...(useSmallTier ? { smallTierModel: MISTRAL_SMALL_MODEL } : {}),
     checks: chosenChecks.length === BUILT_IN_CHECK_IDS.length ? undefined : chosenChecks,
     timeout,
   };
@@ -177,24 +201,28 @@ export function hasExistingSemanticConfig(config: BarrieretestConfig): boolean {
 /**
  * Pick the provider we'll highlight as the default in the select prompt.
  *
- * Priority: existing config > sole env-var match > lexical default (nebius).
+ * Priority: existing config > sole env-var match > lexical default (mistral).
  * Multiple env-var matches mean we can't guess, so we just fall back to the
- * lexical default and let the user pick.
+ * lexical default and let the user pick. A configured provider the wizard
+ * does not offer (`openai-compatible`) also falls back.
  */
 export function pickDefaultProvider(
   existing: BarrieretestConfig,
   env: Record<string, string | undefined>
-): SemanticProviderName {
-  if (existing.semantic?.provider) {
-    return existing.semantic.provider;
+): WizardProviderName {
+  const offered = PROVIDER_OPTIONS.map((o) => o.value);
+
+  const configured = existing.semantic?.provider;
+  if (configured && offered.includes(configured as WizardProviderName)) {
+    return configured as WizardProviderName;
   }
 
-  const fromEnv = SEMANTIC_PROVIDERS.filter((p) => !!env[SEMANTIC_ENV_VAR_BY_PROVIDER[p]]);
+  const fromEnv = offered.filter((p) => !!env[SEMANTIC_ENV_VAR_BY_PROVIDER[p]]);
   if (fromEnv.length === 1) {
     return fromEnv[0];
   }
 
-  return "nebius";
+  return "mistral";
 }
 
 /**
@@ -210,6 +238,8 @@ export function buildConfigFromAnswers(
     semantic: {
       provider: answers.provider,
       ...(answers.model ? { model: answers.model } : {}),
+      // A tier entry without `provider` means "same provider as the default".
+      ...(answers.smallTierModel ? { tiers: { small: { model: answers.smallTierModel } } } : {}),
       ...(answers.checks && answers.checks.length > 0 ? { checks: answers.checks } : {}),
       timeout: answers.timeout,
     },

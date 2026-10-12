@@ -56,8 +56,196 @@ type AxeRuntime = {
   };
 };
 
+export type AxeLoadFailureMessageInput = {
+  url?: string;
+  status?: number;
+  title?: string;
+  htmlSnippet?: string;
+  consoleLines?: string[];
+};
+
+const AXE_LOAD_FAILURE_PREFIX = "axe-core failed to load.";
+const MAX_DIAGNOSTIC_LINES = 20;
+const MAX_DIAGNOSTIC_LINE_LENGTH = 300;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object";
+}
+
+function pushDiagnosticLine(lines: string[], line: string): void {
+  const bounded =
+    line.length > MAX_DIAGNOSTIC_LINE_LENGTH
+      ? `${line.slice(0, MAX_DIAGNOSTIC_LINE_LENGTH)}…`
+      : line;
+  lines.push(bounded);
+  if (lines.length > MAX_DIAGNOSTIC_LINES) {
+    lines.splice(0, lines.length - MAX_DIAGNOSTIC_LINES);
+  }
+}
+
+function callStringMethod(value: unknown, methodName: "text" | "type"): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const method = value[methodName];
+  if (typeof method !== "function") {
+    return null;
+  }
+
+  try {
+    return String(method.call(value));
+  } catch {
+    return null;
+  }
+}
+
+function formatDiagnosticValue(value: unknown): string {
+  if (value instanceof Error) {
+    return value.stack ?? value.message;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatConsoleEvent(args: unknown[]): string {
+  const event = args[0];
+  const type = callStringMethod(event, "type");
+  const text = callStringMethod(event, "text") ?? args.map(formatDiagnosticValue).join(" ");
+
+  return type ? `[console:${type}] ${text}` : `[console] ${text}`;
+}
+
+function formatPageErrorEvent(args: unknown[]): string {
+  return `[pageerror] ${args.map(formatDiagnosticValue).join(" ")}`;
+}
+
+function attachAxeDiagnostics(
+  page: BrowserPage,
+  consoleLines: string[]
+): { event: string; handler: (...args: unknown[]) => void }[] {
+  if (!page.on) {
+    return [];
+  }
+
+  const listeners: { event: string; handler: (...args: unknown[]) => void }[] = [];
+  const consoleHandler = (...args: unknown[]) => {
+    pushDiagnosticLine(consoleLines, formatConsoleEvent(args));
+  };
+  const pageErrorHandler = (...args: unknown[]) => {
+    pushDiagnosticLine(consoleLines, formatPageErrorEvent(args));
+  };
+
+  try {
+    page.on("console", consoleHandler);
+    listeners.push({ event: "console", handler: consoleHandler });
+  } catch {
+    // Diagnostics must never affect the audit itself.
+  }
+
+  try {
+    page.on("pageerror", pageErrorHandler);
+    listeners.push({ event: "pageerror", handler: pageErrorHandler });
+  } catch {
+    // Diagnostics must never affect the audit itself.
+  }
+
+  return listeners;
+}
+
+function detachAxeDiagnostics(
+  page: BrowserPage | null,
+  listeners: { event: string; handler: (...args: unknown[]) => void }[]
+): void {
+  if (!page || listeners.length === 0) {
+    return;
+  }
+
+  const removeListener = page.off ?? page.removeListener;
+  if (!removeListener) {
+    return;
+  }
+
+  for (const { event, handler } of listeners) {
+    try {
+      removeListener.call(page, event, handler);
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }
+}
+
+export function buildAxeLoadFailureMessage({
+  url = "unknown",
+  status,
+  title = "unknown",
+  htmlSnippet = "",
+  consoleLines = [],
+}: AxeLoadFailureMessageInput): string {
+  const lines = [
+    AXE_LOAD_FAILURE_PREFIX,
+    `Final URL: ${url}`,
+    `HTTP status: ${status ?? "unknown"}`,
+    `Page title: ${title}`,
+    `Served HTML (first 500 chars): ${htmlSnippet.slice(0, 500)}`,
+  ];
+
+  if (consoleLines.length > 0) {
+    lines.push("Console/page errors:", ...consoleLines.map((line) => `- ${line}`));
+  } else {
+    lines.push("Console/page errors: none captured");
+  }
+
+  return lines.join("\n");
+}
+
+async function buildAxeLoadFailureMessageForPage(
+  page: BrowserPage,
+  status: number | undefined,
+  consoleLines: string[]
+): Promise<string> {
+  let finalUrl = "unavailable";
+  try {
+    finalUrl = page.url();
+  } catch (error) {
+    finalUrl = `unavailable (${formatDiagnosticValue(error)})`;
+  }
+
+  let title = "unavailable";
+  try {
+    title = await page.title();
+  } catch (error) {
+    title = `unavailable (${formatDiagnosticValue(error)})`;
+  }
+
+  let htmlSnippet = "unavailable";
+  try {
+    htmlSnippet = await page.evaluate(
+      () => document.documentElement?.outerHTML?.slice(0, 500) ?? ""
+    );
+  } catch (error) {
+    htmlSnippet = `unavailable (${formatDiagnosticValue(error)})`;
+  }
+
+  return buildAxeLoadFailureMessage({
+    url: finalUrl,
+    status,
+    title,
+    htmlSnippet,
+    consoleLines,
+  });
+}
+
+function isAxeLoadFailure(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("axe-core failed to load");
 }
 
 function hasAxeSource(value: unknown): value is AxeSourceExport {
@@ -132,6 +320,9 @@ async function runAxe(page: BrowserPage, timeout?: number): Promise<AxeResults> 
     page.evaluate(() => {
       const axeRuntime = globalThis as typeof globalThis & AxeRuntime;
       if (!axeRuntime.axe) {
+        // NOTE: this runs in the browser via page.evaluate — it cannot
+        // reference Node-scope constants, so the message must be a literal.
+        // Keep it in sync with AXE_LOAD_FAILURE_PREFIX / isAxeLoadFailure().
         throw new Error("axe-core failed to load.");
       }
       return axeRuntime.axe.run(document);
@@ -141,12 +332,22 @@ async function runAxe(page: BrowserPage, timeout?: number): Promise<AxeResults> 
     return run();
   }
 
-  return Promise.race([
-    run(),
-    new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error(`axe-core timed out after ${timeout}ms`)), timeout);
-    }),
-  ]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`axe-core timed out after ${timeout}ms`)),
+          timeout
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 export async function runAxeCore(
@@ -165,6 +366,9 @@ export async function runAxeCore(
   let browser: PuppeteerBrowserLike | null = null;
   let page: BrowserPage | null = null;
   let ownedPage: PuppeteerPageLike | null = null;
+  let navigationStatus: number | undefined;
+  const consoleLines: string[] = [];
+  let diagnosticListeners: { event: string; handler: (...args: unknown[]) => void }[] = [];
 
   try {
     await onProgress?.({ percent: 10, message: `Starting axe-core audit for ${url}` });
@@ -182,11 +386,17 @@ export async function runAxeCore(
       page = ownedPage;
     }
 
+    if (!page) {
+      throw new Error("Browser page was not initialized.");
+    }
+
+    diagnosticListeners = attachAxeDiagnostics(page, consoleLines);
+
     const currentUrl = page.url();
     if (!currentUrl || currentUrl === "about:blank" || currentUrl !== url) {
       await onProgress?.({ percent: 30, message: "Loading page" });
       if (isPuppeteerPage(page)) {
-        await navigateTo(page, url, { timeout });
+        navigationStatus = await navigateTo(page, url, { timeout });
       } else {
         await page.goto(url);
       }
@@ -212,7 +422,23 @@ export async function runAxeCore(
     }, axeSource);
 
     await onProgress?.({ percent: 60, message: "Running accessibility tests" });
-    const results = await runAxe(page, timeout);
+    let results: AxeResults;
+    try {
+      results = await runAxe(page, timeout);
+    } catch (error) {
+      if (isAxeLoadFailure(error)) {
+        let message = AXE_LOAD_FAILURE_PREFIX;
+        try {
+          message = await buildAxeLoadFailureMessageForPage(page, navigationStatus, consoleLines);
+        } catch {
+          // Preserve the original axe-load failure even if diagnostics fail unexpectedly.
+        }
+
+        throw new Error(message);
+      }
+
+      throw error;
+    }
 
     await onProgress?.({ percent: 70, message: "Capturing screenshot" });
 
@@ -233,6 +459,8 @@ export async function runAxeCore(
 
     return { issues, documentTitle, pageUrl, screenshot };
   } finally {
+    detachAxeDiagnostics(page, diagnosticListeners);
+
     if (ownsBrowser) {
       if (ownedPage?.close) {
         try {

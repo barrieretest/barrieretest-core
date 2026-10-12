@@ -82,8 +82,16 @@ export function extractJsonObject(content: string): string {
  */
 export function parseSemanticResponse(content: string): ParsedSemanticResponse {
   const json = extractJsonObject(content);
-  const parsed = JSON.parse(json) as unknown;
+  return parseSemanticObject(JSON.parse(json) as unknown);
+}
 
+/**
+ * Validate an already-parsed response object. Used directly on the native
+ * structured-output path, where the provider hands back parsed JSON; the text
+ * path reaches it through `parseSemanticResponse`. Optional fields may be
+ * `null` (strict JSON Schema expresses them that way) and are treated as absent.
+ */
+export function parseSemanticObject(parsed: unknown): ParsedSemanticResponse {
   if (!isObject(parsed)) {
     throw new Error("Semantic AI response was not a JSON object");
   }

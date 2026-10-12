@@ -22,7 +22,12 @@ export type BrowserPage = {
   }) => Promise<Uint8Array>;
   url: () => string;
   title: () => Promise<string>;
+  on?: (event: string, handler: (...args: unknown[]) => void) => unknown;
+  off?: (event: string, handler: (...args: unknown[]) => void) => unknown;
+  removeListener?: (event: string, handler: (...args: unknown[]) => void) => unknown;
 };
+
+export type NavigationResponse = { status: () => number; ok?: () => boolean } | null;
 
 export type PuppeteerBrowserLike = {
   newPage: () => Promise<PuppeteerPageLike>;
@@ -36,9 +41,10 @@ export type PuppeteerPageLike = Omit<BrowserPage, "goto"> & {
       waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
       timeout?: number;
     }
-  ) => Promise<unknown>;
+  ) => Promise<NavigationResponse>;
   browser: () => PuppeteerBrowserLike;
   setViewport?: (viewport: { width: number; height: number }) => Promise<unknown>;
+  setUserAgent?: (ua: string) => Promise<unknown>;
   close?: () => Promise<unknown>;
 };
 

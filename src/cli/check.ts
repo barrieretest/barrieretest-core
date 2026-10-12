@@ -22,12 +22,14 @@ import {
 import {
   SEMANTIC_CONTEXT_SECTIONS,
   type SemanticContextSection,
+  type SemanticModelTier,
   type UserCheckConfig,
 } from "../semantic/types.js";
 import type { AuditOptions } from "../types.js";
 import {
   findProjectConfigPath,
   getConfigPath,
+  mergeConfigs,
   PROJECT_CONFIG_FILENAME,
   readConfig,
   resolveProjectConfigWritePath,
@@ -148,7 +150,7 @@ function runCheckList(deps: RunCheckDeps): CliResult {
   const lines: string[] = [];
   lines.push("Built-in checks:");
   for (const c of BUILT_IN_CHECKS) {
-    lines.push(`  [built-in] ${c.id}  ${c.title}`);
+    lines.push(`  [built-in] ${c.id}  ${c.title}  (${tierLabel(c.tier)})`);
   }
 
   const globalChecks = globalCfg.semantic?.customChecks ?? [];
@@ -160,7 +162,7 @@ function runCheckList(deps: RunCheckDeps): CliResult {
     lines.push("Global checks (~/.barrieretest/config.json):");
     for (const c of globalChecks) {
       const overridden = projectIdSet.has(c.id) ? "  (overridden by project)" : "";
-      lines.push(`  [global]   ${c.id}  ${c.title}${overridden}`);
+      lines.push(`  [global]   ${c.id}  ${c.title}  (${tierLabel(c.tier)})${overridden}`);
     }
   }
 
@@ -168,7 +170,7 @@ function runCheckList(deps: RunCheckDeps): CliResult {
     lines.push("");
     lines.push(`Project checks (${projectPath ?? PROJECT_CONFIG_FILENAME}):`);
     for (const c of projectChecks) {
-      lines.push(`  [project]  ${c.id}  ${c.title}`);
+      lines.push(`  [project]  ${c.id}  ${c.title}  (${tierLabel(c.tier)})`);
     }
   }
 
@@ -267,9 +269,17 @@ async function runCheckTest(args: ParsedArgs, deps: RunCheckDeps): Promise<CliRe
     };
   }
 
-  const { globalCfg, projectCfg } = loadScopes(deps);
-  const merged = mergeCustomChecks(globalCfg, projectCfg);
-  const allIds = new Set<string>([...BUILT_IN_CHECK_IDS, ...merged.map((c) => c.id)]);
+  const { globalPath, projectPath, globalCfg, projectCfg } = loadScopes(deps);
+  // Same merge the audit path uses, so a test run resolves exactly what a
+  // real run would — including per-tier overrides split across both scopes.
+  const { merged } = mergeConfigs({
+    global: globalCfg,
+    project: projectCfg,
+    globalPath,
+    projectPath,
+  });
+  const customChecks = merged.semantic?.customChecks ?? [];
+  const allIds = new Set<string>([...BUILT_IN_CHECK_IDS, ...customChecks.map((c) => c.id)]);
   if (!allIds.has(id)) {
     return {
       success: false,
@@ -278,18 +288,10 @@ async function runCheckTest(args: ParsedArgs, deps: RunCheckDeps): Promise<CliRe
     };
   }
 
-  const configForResolve: BarrieretestConfig = {
-    semantic: {
-      ...(globalCfg.semantic ?? {}),
-      ...(projectCfg.semantic ?? {}),
-      customChecks: merged,
-    },
-  };
-
   const semanticOptions = resolveSemanticOptions({
     semantic: true,
     semanticChecks: [id],
-    config: configForResolve,
+    config: merged,
     env: deps.env,
   });
 
@@ -343,18 +345,13 @@ function loadScopes(deps: RunCheckDeps): LoadedScopes {
   };
 }
 
-function listUserIds(cfg: BarrieretestConfig): string[] {
-  return (cfg.semantic?.customChecks ?? []).map((c) => c.id);
+/** Checks without an explicit tier run on the large model. */
+function tierLabel(tier: SemanticModelTier | undefined): SemanticModelTier {
+  return tier ?? "large";
 }
 
-function mergeCustomChecks(
-  global: BarrieretestConfig,
-  project: BarrieretestConfig
-): UserCheckConfig[] {
-  const byId = new Map<string, UserCheckConfig>();
-  for (const c of global.semantic?.customChecks ?? []) byId.set(c.id, c);
-  for (const c of project.semantic?.customChecks ?? []) byId.set(c.id, c);
-  return Array.from(byId.values());
+function listUserIds(cfg: BarrieretestConfig): string[] {
+  return (cfg.semantic?.customChecks ?? []).map((c) => c.id);
 }
 
 function hasAllRequiredAddFlags(args: ParsedArgs): boolean {

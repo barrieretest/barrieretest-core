@@ -12,6 +12,7 @@ import {
   SEMANTIC_CONTEXT_SECTIONS,
   USER_CHECK_ID_PATTERN,
   type SemanticContextSection,
+  type SemanticModelTier,
   type UserCheckConfig,
 } from "../semantic/types.js";
 import { confirm, multiselect, select, text } from "./prompt.js";
@@ -91,6 +92,14 @@ export async function runCheckAddWizard(ctx: CheckWizardContext): Promise<CheckW
     required: true,
   });
 
+  const tier = await select<SemanticModelTier>({
+    message: "Which model tier?",
+    options: [
+      { value: "large", label: "large", hint: "holistic page review" },
+      { value: "small", label: "small", hint: "cheap per-element check" },
+    ],
+  });
+
   const check: UserCheckConfig = {
     id: id.trim(),
     title: title.trim(),
@@ -98,6 +107,8 @@ export async function runCheckAddWizard(ctx: CheckWizardContext): Promise<CheckW
     prompt: prompt.trim(),
     needsScreenshot,
     context,
+    // "large" is the runtime default, so only "small" needs recording.
+    ...(tier === "small" ? { tier } : {}),
   };
 
   return { check, scope };

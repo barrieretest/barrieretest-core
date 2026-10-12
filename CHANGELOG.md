@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0]
+
+### Added
+
+- **`mistral` provider.** `MISTRAL_API_KEY`, default model `mistral-large-4`, suggested small-tier model `mistral-small-2603`. Mistral is now the first option and the lexical default in the `init` wizard.
+- **`openai-compatible` provider.** Any chat-completions endpoint, configured with `baseUrl` + `model` (`OPENAI_COMPATIBLE_API_KEY`, `OPENAI_COMPATIBLE_BASE_URL`).
+- `baseUrl`, `capabilities`, and `timeout` on the provider config, plus a built-in model capability table (vision, JSON schema). A model that lacks a capability the run needs — a screenshot check on a text-only model, for example — now throws a configuration error naming the provider, the model, and what is missing, before any network call. The table is advisory; `capabilities` always wins.
+- **Native structured output.** With a JSON-schema-capable provider the semantic runner passes the response schema to the model and uses the parsed object instead of parsing JSON out of prose. Providers without it keep the prose-described schema and the text parser.
+- **Two model tiers for the semantic pass.** `SemanticCheck.tier` (`"small"` | `"large"`, default `"large"`), `SemanticOptions.tiers` for per-tier provider configs, and `SemanticMeta.tiers` reporting the provider, model, and check ids each tier ran. `alt-text-quality` is the only built-in on the small tier.
+- CLI flags `--semantic-base-url`, `--semantic-small-provider`, `--semantic-small-model`, `--semantic-large-provider`, `--semantic-large-model`, and config keys `semantic.baseUrl`, `semantic.tiers.{small,large}.{provider,model,baseUrl}`. Project config merges tier overrides leaf by leaf.
+- `barrieretest check add` asks for the model tier, and `check list` shows it.
+- **Reasoning control.** `reasoningEffort` on the provider and semantic-tier configs (passed verbatim; documented values `"none"` and `"high"`), config keys `semantic.reasoningEffort` and `semantic.tiers.{small,large}.reasoningEffort`, and a `reasoning` model capability for models that emit reasoning by default. `mistral-large-4` is declared as one.
+
+### Changed
+
+- **`nebius` is an alias for `openai-compatible`** with the Nebius base URL and its existing default model. Existing configurations keep working unchanged. That default model, `openai/gpt-oss-120b`, is declared text-only, so a Nebius configuration that selects a screenshot check now throws a configuration error instead of silently sending images to a text model. Pick a vision model, declare `capabilities: { vision: true }`, or deselect those checks.
+- **Reasoning is off by default on known reasoning models.** A chat-completions request for a model the capability table marks as `reasoning` sends `reasoning_effort: "none"` unless `reasoningEffort` says otherwise. The semantic pass is a one-shot structured extraction, and on `mistral-large-4` the reasoning pass alone consumed the whole 2000-token budget and returned no answer. Set `reasoningEffort: "high"` plus a larger `maxTokens` to opt back in.
+- **Semantic responses have a 4000-token floor, and truncation says so.** `maxTokens` for the semantic pass is lifted to at least 4000 (was 2000); a page with many images or form fields produced more than 2000 tokens of findings. On providers that take a JSON schema, a response the model cut off mid-JSON now throws an error naming `max_tokens` and the budget that was sent instead of surfacing as a bare JSON parse error; on the text path a cut-off response still surfaces as a parse error.
+- Empty or whitespace-only API keys throw at provider creation instead of failing as an authentication error on the first request.
+- Every provider request has a timeout and an abort path, and retries once on HTTP 429 and 5xx with a short jittered backoff. Errors carry the HTTP status and at most 500 characters of the response body; request bodies, headers, and keys are never logged.
+
+### Fixed
+
+- `navigateTo` no longer throws for HTTP status `>= 400` (introduced in 0.7.0). It returns the status, warns `Target returned HTTP <status> for <url>; auditing the served page (bot protection or rate limiting may be in effect).`, and the page is audited as served; the axe-load failure message includes the status among its diagnostics.
+
+## [0.7.0]
+
+### Added
+
+- **Diagnostic axe-load failures.** When axe-core does not become available after injection (commonly a strict CSP on a bot-protection / WAF challenge page), the thrown error now includes the final URL, HTTP status, page title, a snippet of the served HTML, and captured browser `console`/`pageerror` output — instead of a bare `axe-core failed to load.` Browser console and page errors are captured during the run for this purpose.
+- `navigateTo` now returns the navigation HTTP status (`number | undefined`).
+
+### Changed
+
+- **Fail fast on non-OK navigations.** A navigation that resolves with an HTTP status `>= 400` throws `Target returned HTTP <status> for <url> — navigation blocked (possibly bot protection or rate limiting).` before the audit proceeds. Reverted in 0.8.0 (see the Fixed entry there).
+- Browser pages now send a realistic desktop Chrome user-agent (no `HeadlessChrome` token) to reduce the chance of being served a bot-protection challenge.
+
+### Fixed
+
+- `runAxe` no longer leaks its timeout timer when the audit completes before the timeout fires.
+
+## [0.6.1]
+
+### Changed
+
+- Documentation updates: clarified that `@barrieretest/core` powers the free single-page checks on [barrieretest.at](https://barrieretest.at) and added a "Try it" pointer.
+
+## [0.6.0]
+
+### Added
+
+- **Custom semantic checks.** Author your own vision-LLM accessibility checks declaratively (`UserCheckConfig`: id, title, description, prompt, optional `needsScreenshot` and `context` sections) and run them alongside the built-ins. Findings are returned as normal `Issue` entries with ids `semantic:<check-id>`.
+- `barrieretest check` command with `add` (interactive wizard), `list` (built-in + user checks), `remove <id>`, and `test <id> --url <url>` (dry-run a single check) subcommands.
+- Project-level config file `.barrieretest.json`, intended to be committed so a team shares one check set. Custom checks can live in the global config (`~/.barrieretest/config.json`) or per-project.
+- `semantic.customChecks` config key, with validation of its shape at load time.
+
+### Changed
+
+- Config merge semantics for global + project: scalar keys (`provider`, `model`, `timeout`, `checks`) resolve project-over-global; `customChecks` are concatenated, with a project entry overriding a global one of the same id (and a stderr warning). Built-in check ids cannot be overridden by a user check — colliding ids are rejected at `check add` and at load time.
+
+### Notes
+
+- User-check ids must match `^[a-z0-9][a-z0-9-]{1,39}$` so they are safe as filenames, prompt labels, and `Issue.id` suffixes.
+- The semantic runner drops findings whose `checkType` was not in the resolved check set (hallucinated or unrequested ids) and warns.
+
 ## [0.5.0]
 
 ### Added
@@ -64,6 +129,12 @@ If you consumed `FixReadyIssue.suggestedFix`, migrate as follows:
 
 - Semantic audit engine with vision-LLM checks for issues that static rules cannot catch (alt-text quality, landmark usage, aria-mismatch, language correctness, page title quality, form label clarity).
 - `AuditOptions.semantic` to opt into a semantic pass alongside the regular engine run; merges results into `AuditResult.issues` and attaches `semanticMeta`.
+
+## [0.2.1]
+
+### Changed
+
+- Documentation: expanded the README to specify the new engine and option defaults introduced in 0.2.0.
 
 ## [0.2.0]
 

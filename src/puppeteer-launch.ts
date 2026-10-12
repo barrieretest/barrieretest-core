@@ -6,7 +6,7 @@
  * (e.g. axe-core + the semantic runner).
  */
 
-import type { PuppeteerBrowserLike, PuppeteerPageLike } from "./browser.js";
+import type { NavigationResponse, PuppeteerBrowserLike, PuppeteerPageLike } from "./browser.js";
 
 export interface PuppeteerLauncher {
   launch: (options: { headless: boolean; args: string[] }) => Promise<PuppeteerBrowserLike>;
@@ -34,6 +34,9 @@ const DEFAULT_LAUNCH_ARGS = [
   "--disable-dev-shm-usage",
   "--disable-gpu",
 ];
+
+const REALISTIC_DESKTOP_CHROME_UA =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 export interface LaunchedSession {
   browser: PuppeteerBrowserLike;
@@ -69,6 +72,7 @@ export async function launchPuppeteerSession(
   });
 
   const page = await browser.newPage();
+  await page.setUserAgent?.(REALISTIC_DESKTOP_CHROME_UA);
   await page.setViewport?.(viewport);
 
   return { browser, page };
@@ -85,11 +89,20 @@ export async function navigateTo(
   page: PuppeteerPageLike,
   url: string,
   options: NavigateOptions = {}
-): Promise<void> {
-  await page.goto(url, {
+): Promise<number | undefined> {
+  const response: NavigationResponse = await page.goto(url, {
     waitUntil: "networkidle2",
     timeout: options.timeout ?? 30_000,
   });
+
+  const status = typeof response?.status === "function" ? response.status() : undefined;
+  if (status !== undefined && status >= 400) {
+    console.warn(
+      `Target returned HTTP ${status} for ${url}; auditing the served page (bot protection or rate limiting may be in effect).`
+    );
+  }
+
+  return status;
 }
 
 /**

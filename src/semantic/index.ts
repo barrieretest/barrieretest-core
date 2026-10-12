@@ -62,7 +62,8 @@ export {
   pageTitleCheck,
 } from "./checks/index.js";
 export { buildSemanticPrompt, SEMANTIC_SYSTEM_PROMPT } from "./prompt.js";
-export { extractJsonObject, parseSemanticResponse } from "./parse.js";
+export { extractJsonObject, parseSemanticObject, parseSemanticResponse } from "./parse.js";
+export { buildSemanticResponseSchema, SEMANTIC_RESPONSE_SCHEMA } from "./schema.js";
 export {
   type SanitizedPromptContext,
   sanitizePromptContext,
@@ -84,8 +85,10 @@ export type {
   SemanticIssueMeta,
   SemanticLandmark,
   SemanticMeta,
+  SemanticModelTier,
   SemanticOptions,
   SemanticProviderConfig,
   SemanticSeverity,
+  SemanticTierMeta,
 } from "./types.js";
-export { SEMANTIC_SEVERITY_MAP } from "./types.js";
+export { SEMANTIC_MODEL_TIERS, SEMANTIC_SEVERITY_MAP } from "./types.js";

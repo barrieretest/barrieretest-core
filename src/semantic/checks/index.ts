@@ -8,8 +8,17 @@
  * registry — see `SemanticOptions.customChecks`.
  */
 
-import type { SemanticCheck, SemanticContextSection, UserCheckConfig } from "../types.js";
-import { SEMANTIC_CONTEXT_SECTIONS, USER_CHECK_ID_PATTERN } from "../types.js";
+import type {
+  SemanticCheck,
+  SemanticContextSection,
+  SemanticModelTier,
+  UserCheckConfig,
+} from "../types.js";
+import {
+  SEMANTIC_CONTEXT_SECTIONS,
+  SEMANTIC_MODEL_TIERS,
+  USER_CHECK_ID_PATTERN,
+} from "../types.js";
 import { altTextQualityCheck } from "./alt-text-quality.js";
 import { ariaMismatchCheck } from "./aria-mismatch.js";
 import { formLabelClarityCheck } from "./form-label-clarity.js";
@@ -121,6 +130,8 @@ export function userCheckConfigToSemanticCheck(cfg: UserCheckConfig): SemanticCh
 
   const needsContext = resolveUserContext(cfg.context, id);
 
+  const tier = resolveUserTier(cfg.tier, id);
+
   const helpUrl = cfg.helpUrl ? String(cfg.helpUrl) : undefined;
 
   return {
@@ -130,6 +141,7 @@ export function userCheckConfigToSemanticCheck(cfg: UserCheckConfig): SemanticCh
     promptSection: `**${title}**: ${prompt}`,
     needsScreenshot,
     needsContext,
+    ...(tier ? { tier } : {}),
     ...(helpUrl ? { helpUrl } : {}),
   };
 }
@@ -155,6 +167,22 @@ function resolveUserContext(
     );
   }
   return Array.from(new Set(raw));
+}
+
+function resolveUserTier(
+  raw: SemanticModelTier | undefined,
+  checkId: string
+): SemanticModelTier | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!SEMANTIC_MODEL_TIERS.includes(raw)) {
+    throw new Error(
+      `Custom check '${checkId}' has an invalid 'tier': ${String(raw)}. ` +
+        `Allowed: ${SEMANTIC_MODEL_TIERS.join(", ")}`
+    );
+  }
+  return raw;
 }
 
 export { altTextQualityCheck } from "./alt-text-quality.js";

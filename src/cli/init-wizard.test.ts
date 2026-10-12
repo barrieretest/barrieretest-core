@@ -5,7 +5,9 @@ import {
   buildConfigFromAnswers,
   DEFAULT_MODELS,
   hasExistingSemanticConfig,
+  MISTRAL_SMALL_MODEL,
   pickDefaultProvider,
+  PROVIDER_OPTIONS,
   runInit,
 } from "./init-wizard.js";
 
@@ -38,11 +40,11 @@ describe("pickDefaultProvider", () => {
     expect(pickDefaultProvider({}, { ANTHROPIC_API_KEY: "ak" })).toBe("anthropic");
   });
 
-  it("returns nebius when no signals are present", () => {
-    expect(pickDefaultProvider({}, {})).toBe("nebius");
+  it("returns mistral when no signals are present", () => {
+    expect(pickDefaultProvider({}, {})).toBe("mistral");
   });
 
-  it("returns nebius when multiple env keys are present (ambiguous)", () => {
+  it("returns mistral when multiple env keys are present (ambiguous)", () => {
     expect(
       pickDefaultProvider(
         {},
@@ -51,7 +53,37 @@ describe("pickDefaultProvider", () => {
           OPENAI_API_KEY: "ok",
         }
       )
-    ).toBe("nebius");
+    ).toBe("mistral");
+  });
+
+  it("falls back to mistral for a configured provider the wizard does not offer", () => {
+    expect(pickDefaultProvider({ semantic: { provider: "openai-compatible" } }, {})).toBe(
+      "mistral"
+    );
+  });
+
+  it("falls back to the provider for a sole MISTRAL_API_KEY", () => {
+    expect(pickDefaultProvider({}, { MISTRAL_API_KEY: "mk" })).toBe("mistral");
+  });
+});
+
+describe("PROVIDER_OPTIONS", () => {
+  it("offers Mistral first", () => {
+    expect(PROVIDER_OPTIONS[0].value).toBe("mistral");
+    expect(PROVIDER_OPTIONS[0].hint).toContain("alt text");
+  });
+
+  it("keeps the previously offered providers", () => {
+    expect(PROVIDER_OPTIONS.map((o) => o.value)).toEqual([
+      "mistral",
+      "nebius",
+      "openai",
+      "anthropic",
+    ]);
+  });
+
+  it("does not offer openai-compatible (config/flag only)", () => {
+    expect(PROVIDER_OPTIONS.map((o) => String(o.value))).not.toContain("openai-compatible");
   });
 });
 
@@ -80,6 +112,30 @@ describe("buildConfigFromAnswers", () => {
   it("omits checks when answers.checks is undefined (default = all built-ins)", () => {
     const next = buildConfigFromAnswers({}, { provider: "openai", timeout: 120_000 });
     expect(next.semantic?.checks).toBeUndefined();
+  });
+
+  it("writes the small tier when the small-model question was answered yes", () => {
+    const next = buildConfigFromAnswers(
+      {},
+      {
+        provider: "mistral",
+        model: "mistral-large-4",
+        smallTierModel: MISTRAL_SMALL_MODEL,
+        timeout: 120_000,
+      }
+    );
+
+    expect(next.semantic?.tiers).toEqual({ small: { model: "mistral-small-2603" } });
+    // Provider omitted means "same provider as the default".
+    expect(next.semantic?.tiers?.small?.provider).toBeUndefined();
+  });
+
+  it("omits tiers when the small-model question was declined", () => {
+    const next = buildConfigFromAnswers(
+      {},
+      { provider: "mistral", model: "mistral-large-4", timeout: 120_000 }
+    );
+    expect(next.semantic?.tiers).toBeUndefined();
   });
 
   it("omits model when not provided", () => {
@@ -138,6 +194,11 @@ describe("DEFAULT_MODELS", () => {
     expect(DEFAULT_MODELS.nebius).toBeTruthy();
     expect(DEFAULT_MODELS.openai).toBeTruthy();
     expect(DEFAULT_MODELS.anthropic).toBeTruthy();
+  });
+
+  it("suggests Mistral Large for the default tier and Small for the cheap one", () => {
+    expect(DEFAULT_MODELS.mistral).toBe("mistral-large-4");
+    expect(MISTRAL_SMALL_MODEL).toBe("mistral-small-2603");
   });
 });
 

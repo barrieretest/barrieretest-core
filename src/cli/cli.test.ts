@@ -217,6 +217,36 @@ describe("parseArgs", () => {
     expect(args.semanticModel).toBe("gpt-4o");
   });
 
+  it("parses --semantic-base-url flag", () => {
+    const args = parseArgs([
+      "https://example.com",
+      "--semantic-base-url",
+      "https://api.eu.mistral.ai/v1",
+    ]);
+
+    expect(args.semanticBaseUrl).toBe("https://api.eu.mistral.ai/v1");
+  });
+
+  it("parses the per-tier provider and model flags", () => {
+    const args = parseArgs([
+      "https://example.com",
+      "--semantic-small-provider",
+      "mistral",
+      "--semantic-small-model",
+      "mistral-small-2603",
+      "--semantic-large-provider",
+      "anthropic",
+      "--semantic-large-model",
+      "claude-sonnet-4-5",
+    ]);
+
+    expect(args.command).toBe("audit");
+    expect(args.semanticSmallProvider).toBe("mistral");
+    expect(args.semanticSmallModel).toBe("mistral-small-2603");
+    expect(args.semanticLargeProvider).toBe("anthropic");
+    expect(args.semanticLargeModel).toBe("claude-sonnet-4-5");
+  });
+
   it("parses --semantic-checks as a comma-separated list", () => {
     const args = parseArgs([
       "https://example.com",
@@ -323,6 +353,68 @@ describe("parseArgs", () => {
     const args = parseArgs(["check", "add", "--needs-screenshot", "true", "--scope", "project"]);
     expect(args.checkNeedsScreenshot).toBe(true);
     expect(args.checkScope).toBe("project");
+  });
+});
+
+describe("parseArgs (missing semantic flag values)", () => {
+  const VALUE_FLAGS = [
+    "--semantic-provider",
+    "--semantic-model",
+    "--semantic-base-url",
+    "--semantic-small-provider",
+    "--semantic-small-model",
+    "--semantic-large-provider",
+    "--semantic-large-model",
+    "--semantic-checks",
+    "--semantic-timeout",
+  ];
+
+  it("rejects every value-taking semantic flag at the end of the argv", () => {
+    for (const flag of VALUE_FLAGS) {
+      expect(() => parseArgs(["https://example.com", flag])).toThrow(
+        `Flag ${flag} requires a value`
+      );
+    }
+  });
+
+  it("rejects a value-taking semantic flag followed by another flag", () => {
+    for (const flag of VALUE_FLAGS) {
+      expect(() => parseArgs(["https://example.com", flag, "--json"])).toThrow(
+        `Flag ${flag} requires a value`
+      );
+    }
+  });
+
+  it("rejects a missing value on the explicit audit command too", () => {
+    expect(() => parseArgs(["audit", "https://example.com", "--semantic-small-model"])).toThrow(
+      "Flag --semantic-small-model requires a value"
+    );
+  });
+
+  it("keeps an explicitly empty value so the resolver can reject it", () => {
+    const args = parseArgs(["https://example.com", "--semantic-small-model", ""]);
+
+    expect(args.semanticSmallModel).toBe("");
+  });
+
+  it("keeps an explicitly empty tier provider value", () => {
+    const args = parseArgs(["https://example.com", "--semantic", "--semantic-small-provider", ""]);
+
+    expect(args.semantic).toBe(true);
+    expect(args.semanticSmallProvider).toBe("");
+  });
+
+  it("keeps an empty --semantic-checks value as an empty list", () => {
+    const args = parseArgs(["https://example.com", "--semantic-checks", ""]);
+
+    expect(args.semanticChecks).toEqual([]);
+  });
+
+  it("leaves the non-semantic flags untouched", () => {
+    const args = parseArgs(["https://example.com", "-o", "results.json", "--json"]);
+
+    expect(args.output).toBe("results.json");
+    expect(args.json).toBe(true);
   });
 });
 
@@ -436,6 +528,59 @@ describe("runCli config", () => {
     expect(getResult.message).toBe("");
   });
 
+  it("writes and reads a three-level tier key", async () => {
+    const setResult = await runCli(
+      {
+        command: "config",
+        configSubcommand: "set",
+        configKey: "semantic.tiers.small.model",
+        configValue: "mistral-small-2603",
+      },
+      { configPath: CONFIG_PATH }
+    );
+    expect(setResult.success).toBe(true);
+
+    const getResult = await runCli(
+      {
+        command: "config",
+        configSubcommand: "get",
+        configKey: "semantic.tiers.small.model",
+      },
+      { configPath: CONFIG_PATH }
+    );
+    expect(getResult.message).toBe("mistral-small-2603");
+
+    const unsetResult = await runCli(
+      {
+        command: "config",
+        configSubcommand: "unset",
+        configKey: "semantic.tiers.small.model",
+      },
+      { configPath: CONFIG_PATH }
+    );
+    expect(unsetResult.success).toBe(true);
+
+    const afterUnset = await runCli(
+      { command: "config", configSubcommand: "get" },
+      { configPath: CONFIG_PATH }
+    );
+    expect(afterUnset.message).not.toContain("tiers");
+  });
+
+  it("rejects an invalid base URL on set", async () => {
+    const result = await runCli(
+      {
+        command: "config",
+        configSubcommand: "set",
+        configKey: "semantic.baseUrl",
+        configValue: "nope",
+      },
+      { configPath: CONFIG_PATH }
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("http(s) URL");
+  });
+
   it("routes to the init wizard and fails gracefully outside a TTY", async () => {
     const result = await runCli({ command: "init" }, { configPath: CONFIG_PATH, env: {} });
     expect(result.success).toBe(false);
@@ -470,6 +615,25 @@ describe("runCli help", () => {
     expect(result.message).toContain("barrieretest");
     expect(result.message).toContain("audit");
     expect(result.message).toContain("baseline");
+  });
+
+  it("documents every provider, the new flags, and the new env vars", async () => {
+    const result = await runCli({ command: "help" });
+    const help = result.message ?? "";
+
+    expect(help).toContain("mistral | openai | anthropic | openai-compatible | nebius");
+    for (const flag of [
+      "--semantic-base-url",
+      "--semantic-small-provider",
+      "--semantic-small-model",
+      "--semantic-large-provider",
+      "--semantic-large-model",
+    ]) {
+      expect(help).toContain(flag);
+    }
+    expect(help).toContain("MISTRAL_API_KEY");
+    expect(help).toContain("OPENAI_COMPATIBLE_API_KEY");
+    expect(help).toContain("OPENAI_COMPATIBLE_BASE_URL");
   });
 
   it("returns help for no-args", async () => {

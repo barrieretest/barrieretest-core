@@ -9,19 +9,42 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, parse as parsePath } from "node:path";
-import type { UserCheckConfig } from "../semantic/types.js";
+import type { AIProviderName } from "../ai/types.js";
+import type { SemanticModelTier, UserCheckConfig } from "../semantic/types.js";
+import { SEMANTIC_MODEL_TIERS } from "../semantic/types.js";
 
-export type SemanticProviderName = "nebius" | "openai" | "anthropic";
+export type SemanticProviderName = AIProviderName;
 
 export const SEMANTIC_PROVIDERS: readonly SemanticProviderName[] = [
-  "nebius",
+  "mistral",
   "openai",
   "anthropic",
+  "openai-compatible",
+  "nebius",
 ];
+
+/**
+ * Per-tier overrides. An omitted field inherits from the `semantic` defaults
+ * — `resolveSemanticOptions` does that completion.
+ */
+export interface SemanticTierConfig {
+  provider?: SemanticProviderName;
+  model?: string;
+  baseUrl?: string;
+  reasoningEffort?: string;
+}
 
 export interface SemanticConfig {
   provider?: SemanticProviderName;
   model?: string;
+  /** Required for `openai-compatible`; an endpoint override for the others. */
+  baseUrl?: string;
+  /** Passed verbatim to the provider; documented values `"none"` and `"high"`. */
+  reasoningEffort?: string;
+  tiers?: {
+    small?: SemanticTierConfig;
+    large?: SemanticTierConfig;
+  };
   checks?: string[];
   timeout?: number;
   /**
@@ -41,8 +64,18 @@ export const PROJECT_CONFIG_FILENAME = ".barrieretest.json";
 export const SUPPORTED_CONFIG_KEYS = [
   "semantic.provider",
   "semantic.model",
+  "semantic.baseUrl",
+  "semantic.reasoningEffort",
   "semantic.checks",
   "semantic.timeout",
+  "semantic.tiers.small.provider",
+  "semantic.tiers.small.model",
+  "semantic.tiers.small.baseUrl",
+  "semantic.tiers.small.reasoningEffort",
+  "semantic.tiers.large.provider",
+  "semantic.tiers.large.model",
+  "semantic.tiers.large.baseUrl",
+  "semantic.tiers.large.reasoningEffort",
 ] as const;
 
 export type SupportedConfigKey = (typeof SUPPORTED_CONFIG_KEYS)[number];
@@ -76,13 +109,14 @@ export function readConfig(configPath: string = getConfigPath()): BarrieretestCo
   // relies on — bad shapes here come from hand-edited JSON, so we want
   // a message that names the field and the file.
   assertCustomChecksShape(parsed, configPath);
+  assertTiersShape(parsed, configPath);
 
   return parsed as BarrieretestConfig;
 }
 
 function assertCustomChecksShape(parsed: unknown, configPath: string): void {
-  const semantic = (parsed as { semantic?: unknown }).semantic;
-  if (!semantic || typeof semantic !== "object" || Array.isArray(semantic)) return;
+  const semantic = semanticSection(parsed);
+  if (!semantic) return;
   const raw = (semantic as { customChecks?: unknown }).customChecks;
   if (raw === undefined) return;
   if (!Array.isArray(raw)) {
@@ -100,6 +134,34 @@ function assertCustomChecksShape(parsed: unknown, configPath: string): void {
   }
 }
 
+function assertTiersShape(parsed: unknown, configPath: string): void {
+  const semantic = semanticSection(parsed);
+  if (!semantic) return;
+  const tiers = (semantic as { tiers?: unknown }).tiers;
+  if (tiers === undefined) return;
+  if (!isPlainObject(tiers)) {
+    throw new Error(
+      `Invalid config at ${configPath}: semantic.tiers must be an object with optional 'small' and 'large' keys.`
+    );
+  }
+  for (const tier of SEMANTIC_MODEL_TIERS) {
+    const entry = (tiers as Record<string, unknown>)[tier];
+    if (entry === undefined) continue;
+    if (!isPlainObject(entry)) {
+      throw new Error(`Invalid config at ${configPath}: semantic.tiers.${tier} must be an object.`);
+    }
+  }
+}
+
+function semanticSection(parsed: unknown): object | undefined {
+  const semantic = (parsed as { semantic?: unknown }).semantic;
+  return isPlainObject(semantic) ? semantic : undefined;
+}
+
+function isPlainObject(value: unknown): value is object {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function writeConfig(
   config: BarrieretestConfig,
   configPath: string = getConfigPath()
@@ -113,6 +175,12 @@ export function getConfigValue(config: BarrieretestConfig, key: string): unknown
     return config.semantic;
   }
   assertSupportedKey(key);
+
+  const tierPath = parseTierKey(key);
+  if (tierPath) {
+    return config.semantic?.tiers?.[tierPath.tier]?.[tierPath.leaf];
+  }
+
   const subkey = key.split(".")[1] as keyof SemanticConfig;
   return config.semantic?.[subkey];
 }
@@ -123,26 +191,46 @@ export function setConfigValue(
   rawValue: string
 ): BarrieretestConfig {
   assertSupportedKey(key);
-  const subkey = key.split(".")[1] as keyof SemanticConfig;
 
   const next: BarrieretestConfig = { ...config, semantic: { ...(config.semantic ?? {}) } };
   const semantic = next.semantic as SemanticConfig;
 
+  const tierPath = parseTierKey(key);
+  if (tierPath) {
+    const { tier, leaf } = tierPath;
+    const tiers = { ...(semantic.tiers ?? {}) };
+    const tierConfig: SemanticTierConfig = { ...(tiers[tier] ?? {}) };
+    if (leaf === "provider") {
+      tierConfig.provider = parseProviderValue(key, rawValue);
+    } else if (leaf === "model") {
+      tierConfig.model = parseModelValue(key, rawValue);
+    } else if (leaf === "baseUrl") {
+      tierConfig.baseUrl = parseBaseUrlValue(key, rawValue);
+    } else {
+      tierConfig.reasoningEffort = parseReasoningEffortValue(key, rawValue);
+    }
+    tiers[tier] = tierConfig;
+    semantic.tiers = tiers;
+    return next;
+  }
+
+  const subkey = key.split(".")[1] as keyof SemanticConfig;
+
   switch (subkey) {
     case "provider":
-      if (!(SEMANTIC_PROVIDERS as readonly string[]).includes(rawValue)) {
-        throw new Error(
-          `Invalid provider '${rawValue}'. Must be one of: ${SEMANTIC_PROVIDERS.join(", ")}`
-        );
-      }
-      semantic.provider = rawValue as SemanticProviderName;
+      semantic.provider = parseProviderValue(key, rawValue);
       break;
 
     case "model":
-      if (!rawValue.trim()) {
-        throw new Error("semantic.model cannot be empty");
-      }
-      semantic.model = rawValue;
+      semantic.model = parseModelValue(key, rawValue);
+      break;
+
+    case "baseUrl":
+      semantic.baseUrl = parseBaseUrlValue(key, rawValue);
+      break;
+
+    case "reasoningEffort":
+      semantic.reasoningEffort = parseReasoningEffortValue(key, rawValue);
       break;
 
     case "checks": {
@@ -174,9 +262,33 @@ export function unsetConfigValue(config: BarrieretestConfig, key: string): Barri
   assertSupportedKey(key);
   if (!config.semantic) return config;
 
-  const subkey = key.split(".")[1] as keyof SemanticConfig;
   const semantic: SemanticConfig = { ...config.semantic };
-  delete semantic[subkey];
+
+  const tierPath = parseTierKey(key);
+  if (tierPath) {
+    const { tier, leaf } = tierPath;
+    const existingTier = semantic.tiers?.[tier];
+    if (!existingTier) return config;
+
+    const tierConfig: SemanticTierConfig = { ...existingTier };
+    delete tierConfig[leaf];
+
+    const tiers = { ...semantic.tiers };
+    if (Object.keys(tierConfig).length === 0) {
+      delete tiers[tier];
+    } else {
+      tiers[tier] = tierConfig;
+    }
+
+    if (Object.keys(tiers).length === 0) {
+      delete semantic.tiers;
+    } else {
+      semantic.tiers = tiers;
+    }
+  } else {
+    const subkey = key.split(".")[1] as keyof SemanticConfig;
+    delete semantic[subkey];
+  }
 
   const next: BarrieretestConfig = { ...config };
   if (Object.keys(semantic).length === 0) {
@@ -185,6 +297,83 @@ export function unsetConfigValue(config: BarrieretestConfig, key: string): Barri
     next.semantic = semantic;
   }
   return next;
+}
+
+/** Leaf fields a `semantic.tiers.<tier>.<leaf>` key can address. */
+type TierLeaf = keyof SemanticTierConfig;
+
+/**
+ * Split a three-level `semantic.tiers.<tier>.<leaf>` key. Returns undefined
+ * for the two-level keys, which the callers handle directly — one small
+ * helper beats a generic deep-path accessor for a known key list.
+ */
+function parseTierKey(key: string): { tier: SemanticModelTier; leaf: TierLeaf } | undefined {
+  const parts = key.split(".");
+  if (parts.length !== 4 || parts[0] !== "semantic" || parts[1] !== "tiers") {
+    return undefined;
+  }
+  return { tier: parts[2] as SemanticModelTier, leaf: parts[3] as TierLeaf };
+}
+
+function parseProviderValue(key: string, rawValue: string): SemanticProviderName {
+  if (!(SEMANTIC_PROVIDERS as readonly string[]).includes(rawValue)) {
+    throw new Error(
+      `Invalid provider '${rawValue}' for ${key}. Must be one of: ${SEMANTIC_PROVIDERS.join(", ")}`
+    );
+  }
+  return rawValue as SemanticProviderName;
+}
+
+/**
+ * Shared with `resolveSemanticOptions`, which applies the same rules to
+ * hand-edited config and CLI flags. `key` is whatever names the value to the
+ * user: a config key, a flag, or an env var.
+ *
+ * A hand-edited config can hold any JSON type here, so the string check is a
+ * runtime one despite the signature.
+ */
+export function parseModelValue(key: string, rawValue: string): string {
+  assertStringValue(key, rawValue);
+  if (!rawValue.trim()) {
+    throw new Error(`${key} cannot be empty`);
+  }
+  return rawValue;
+}
+
+/**
+ * Accepted values differ per vendor (Mistral takes "none" and "high", OpenAI
+ * has its own ladder), so only the shape is checked here and the value is
+ * passed through. See `parseModelValue` for the `key` convention.
+ */
+export function parseReasoningEffortValue(key: string, rawValue: string): string {
+  assertStringValue(key, rawValue);
+  const value = rawValue.trim();
+  if (!value) {
+    throw new Error(`${key} cannot be empty`);
+  }
+  return value;
+}
+
+/** See `parseModelValue` for the `key` convention. */
+export function parseBaseUrlValue(key: string, rawValue: string): string {
+  assertStringValue(key, rawValue);
+  const value = rawValue.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`Invalid ${key} '${rawValue}': must be an http(s) URL`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Invalid ${key} '${rawValue}': must be an http(s) URL`);
+  }
+  return value;
+}
+
+function assertStringValue(key: string, rawValue: unknown): asserts rawValue is string {
+  if (typeof rawValue !== "string") {
+    throw new Error(`Invalid ${key}: must be a string`);
+  }
 }
 
 function assertSupportedKey(key: string): asserts key is SupportedConfigKey {
@@ -260,6 +449,8 @@ export interface MergedConfig {
  * nearest `.barrieretest.json` walking up from `cwd`.
  *
  * Scalars: project wins when set.
+ * `tiers.<tier>.<leaf>`: project wins per leaf, so a project can retarget one
+ * tier's model without restating the provider.
  * `checks` (selected subset): project wins when set.
  * `customChecks`: concatenated; project entries override global entries
  * with the same id. Caller decides what to do about
@@ -301,6 +492,12 @@ export function mergeConfigs(args: {
   if (provider !== undefined) mergedSemantic.provider = provider;
   const model = ps.model ?? gs.model;
   if (model !== undefined) mergedSemantic.model = model;
+  const baseUrl = ps.baseUrl ?? gs.baseUrl;
+  if (baseUrl !== undefined) mergedSemantic.baseUrl = baseUrl;
+  const reasoningEffort = ps.reasoningEffort ?? gs.reasoningEffort;
+  if (reasoningEffort !== undefined) mergedSemantic.reasoningEffort = reasoningEffort;
+  const tiers = mergeTiers(gs.tiers, ps.tiers);
+  if (tiers !== undefined) mergedSemantic.tiers = tiers;
   const timeout = ps.timeout ?? gs.timeout;
   if (timeout !== undefined) mergedSemantic.timeout = timeout;
   const checks = ps.checks ?? gs.checks;
@@ -316,4 +513,33 @@ export function mergeConfigs(args: {
     ...(projectPath ? { projectPath } : {}),
     overriddenCustomCheckIds: overridden,
   };
+}
+
+/**
+ * Merge the per-tier overrides leaf by leaf so a project config can retarget
+ * a single field. A tier that ends up empty is dropped entirely.
+ */
+function mergeTiers(
+  global: SemanticConfig["tiers"],
+  project: SemanticConfig["tiers"]
+): SemanticConfig["tiers"] | undefined {
+  if (!global && !project) return undefined;
+
+  const merged: NonNullable<SemanticConfig["tiers"]> = {};
+  for (const tier of SEMANTIC_MODEL_TIERS) {
+    const g = global?.[tier] ?? {};
+    const p = project?.[tier] ?? {};
+    const tierConfig: SemanticTierConfig = {};
+    const provider = p.provider ?? g.provider;
+    if (provider !== undefined) tierConfig.provider = provider;
+    const model = p.model ?? g.model;
+    if (model !== undefined) tierConfig.model = model;
+    const baseUrl = p.baseUrl ?? g.baseUrl;
+    if (baseUrl !== undefined) tierConfig.baseUrl = baseUrl;
+    const reasoningEffort = p.reasoningEffort ?? g.reasoningEffort;
+    if (reasoningEffort !== undefined) tierConfig.reasoningEffort = reasoningEffort;
+    if (Object.keys(tierConfig).length > 0) merged[tier] = tierConfig;
+  }
+
+  return Object.keys(merged).length > 0 ? merged : undefined;
 }

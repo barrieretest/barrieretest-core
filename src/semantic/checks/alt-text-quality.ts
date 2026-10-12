@@ -9,5 +9,6 @@ export const altTextQualityCheck: SemanticCheck = {
     "**Alt Text Quality**: Check if image alt texts are meaningful and describe the image content (not just present, but actually useful)",
   needsScreenshot: true,
   needsContext: ["images"],
+  tier: "small",
   helpUrl: "https://www.w3.org/WAI/WCAG21/Understanding/non-text-content.html",
 };

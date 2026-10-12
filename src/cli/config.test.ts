@@ -12,6 +12,7 @@ import {
   PROJECT_CONFIG_FILENAME,
   readConfig,
   resolveProjectConfigWritePath,
+  SEMANTIC_PROVIDERS,
   setConfigValue,
   SUPPORTED_CONFIG_KEYS,
   unsetConfigValue,
@@ -86,6 +87,25 @@ describe("readConfig", () => {
   it("includes the file path in the error message", () => {
     writeFileSync(TEST_CONFIG, JSON.stringify({ semantic: { customChecks: {} } }));
     expect(() => readConfig(TEST_CONFIG)).toThrow(new RegExp(TEST_CONFIG));
+  });
+
+  it("throws when semantic.tiers is not an object", () => {
+    writeFileSync(TEST_CONFIG, JSON.stringify({ semantic: { tiers: "small" } }));
+    expect(() => readConfig(TEST_CONFIG)).toThrow(/semantic\.tiers must be an object/);
+    expect(() => readConfig(TEST_CONFIG)).toThrow(new RegExp(TEST_CONFIG));
+  });
+
+  it("throws when a tier entry is not an object", () => {
+    writeFileSync(TEST_CONFIG, JSON.stringify({ semantic: { tiers: { small: "mistral" } } }));
+    expect(() => readConfig(TEST_CONFIG)).toThrow(/semantic\.tiers\.small must be an object/);
+
+    writeFileSync(TEST_CONFIG, JSON.stringify({ semantic: { tiers: { large: [] } } }));
+    expect(() => readConfig(TEST_CONFIG)).toThrow(/semantic\.tiers\.large must be an object/);
+  });
+
+  it("accepts a config without tiers and one with empty tier objects", () => {
+    writeFileSync(TEST_CONFIG, JSON.stringify({ semantic: { tiers: { small: {} } } }));
+    expect(readConfig(TEST_CONFIG)).toEqual({ semantic: { tiers: { small: {} } } });
   });
 });
 
@@ -206,6 +226,105 @@ describe("setConfigValue", () => {
   });
 });
 
+describe("setConfigValue (baseUrl and tiers)", () => {
+  it("stores a base URL", () => {
+    const cfg = setConfigValue({}, "semantic.baseUrl", "https://api.eu.mistral.ai/v1");
+    expect(cfg.semantic?.baseUrl).toBe("https://api.eu.mistral.ai/v1");
+  });
+
+  it("rejects a base URL that is not an http(s) URL", () => {
+    expect(() => setConfigValue({}, "semantic.baseUrl", "not a url")).toThrow(
+      /must be an http\(s\) URL/
+    );
+    expect(() => setConfigValue({}, "semantic.baseUrl", "ftp://example.com")).toThrow(
+      /must be an http\(s\) URL/
+    );
+  });
+
+  it("sets a tier provider, model, and base URL", () => {
+    let cfg = setConfigValue({}, "semantic.tiers.small.provider", "mistral");
+    cfg = setConfigValue(cfg, "semantic.tiers.small.model", "mistral-small-2603");
+    cfg = setConfigValue(cfg, "semantic.tiers.large.model", "mistral-large-4");
+    cfg = setConfigValue(cfg, "semantic.tiers.large.baseUrl", "https://api.eu.mistral.ai/v1");
+
+    expect(cfg.semantic?.tiers).toEqual({
+      small: { provider: "mistral", model: "mistral-small-2603" },
+      large: { model: "mistral-large-4", baseUrl: "https://api.eu.mistral.ai/v1" },
+    });
+  });
+
+  it("rejects an invalid tier provider and an empty tier model", () => {
+    expect(() => setConfigValue({}, "semantic.tiers.small.provider", "llama")).toThrow(
+      /Invalid provider 'llama' for semantic\.tiers\.small\.provider/
+    );
+    expect(() => setConfigValue({}, "semantic.tiers.large.model", "  ")).toThrow(
+      /semantic\.tiers\.large\.model cannot be empty/
+    );
+  });
+
+  it("sets a reasoning effort on the default provider and on a tier", () => {
+    let cfg = setConfigValue({}, "semantic.reasoningEffort", "high");
+    cfg = setConfigValue(cfg, "semantic.tiers.large.reasoningEffort", " none ");
+
+    expect(cfg.semantic?.reasoningEffort).toBe("high");
+    expect(cfg.semantic?.tiers?.large).toEqual({ reasoningEffort: "none" });
+    expect(getConfigValue(cfg, "semantic.reasoningEffort")).toBe("high");
+    expect(getConfigValue(cfg, "semantic.tiers.large.reasoningEffort")).toBe("none");
+
+    const cleared = unsetConfigValue(
+      unsetConfigValue(cfg, "semantic.tiers.large.reasoningEffort"),
+      "semantic.reasoningEffort"
+    );
+    expect(cleared.semantic).toBeUndefined();
+  });
+
+  it("rejects an empty reasoning effort", () => {
+    expect(() => setConfigValue({}, "semantic.reasoningEffort", "  ")).toThrow(
+      /semantic\.reasoningEffort cannot be empty/
+    );
+    expect(() => setConfigValue({}, "semantic.tiers.small.reasoningEffort", "")).toThrow(
+      /semantic\.tiers\.small\.reasoningEffort cannot be empty/
+    );
+  });
+
+  it("accepts every provider name, including the new ones", () => {
+    for (const name of SEMANTIC_PROVIDERS) {
+      expect(setConfigValue({}, "semantic.provider", name).semantic?.provider).toBe(name);
+    }
+  });
+
+  it("preserves the other tier when setting one", () => {
+    const cfg = setConfigValue(
+      { semantic: { tiers: { large: { model: "mistral-large-4" } } } },
+      "semantic.tiers.small.model",
+      "mistral-small-2603"
+    );
+    expect(cfg.semantic?.tiers?.large?.model).toBe("mistral-large-4");
+    expect(cfg.semantic?.tiers?.small?.model).toBe("mistral-small-2603");
+  });
+});
+
+describe("getConfigValue (tiers)", () => {
+  it("reads a three-level key", () => {
+    const cfg: BarrieretestConfig = {
+      semantic: { tiers: { small: { model: "mistral-small-2603" } } },
+    };
+    expect(getConfigValue(cfg, "semantic.tiers.small.model")).toBe("mistral-small-2603");
+    expect(getConfigValue(cfg, "semantic.tiers.small.provider")).toBeUndefined();
+    expect(getConfigValue(cfg, "semantic.tiers.large.model")).toBeUndefined();
+  });
+
+  it("still returns the whole semantic object, tiers included", () => {
+    const cfg: BarrieretestConfig = {
+      semantic: { provider: "mistral", tiers: { small: { model: "mistral-small-2603" } } },
+    };
+    expect(getConfigValue(cfg, "semantic")).toEqual({
+      provider: "mistral",
+      tiers: { small: { model: "mistral-small-2603" } },
+    });
+  });
+});
+
 describe("unsetConfigValue", () => {
   it("removes a single key", () => {
     const cfg: BarrieretestConfig = {
@@ -230,6 +349,35 @@ describe("unsetConfigValue", () => {
     const cfg: BarrieretestConfig = {};
     expect(unsetConfigValue(cfg, "semantic.model")).toEqual({});
   });
+
+  it("removes a tier leaf but keeps the rest of the tier", () => {
+    const cfg: BarrieretestConfig = {
+      semantic: { tiers: { small: { provider: "mistral", model: "mistral-small-2603" } } },
+    };
+    const next = unsetConfigValue(cfg, "semantic.tiers.small.model");
+    expect(next.semantic?.tiers?.small).toEqual({ provider: "mistral" });
+  });
+
+  it("removes an emptied tier and then the tiers object", () => {
+    const cfg: BarrieretestConfig = {
+      semantic: { provider: "mistral", tiers: { small: { model: "mistral-small-2603" } } },
+    };
+    const next = unsetConfigValue(cfg, "semantic.tiers.small.model");
+    expect(next.semantic?.tiers).toBeUndefined();
+    expect(next.semantic?.provider).toBe("mistral");
+  });
+
+  it("removes the semantic section when the last tier leaf goes", () => {
+    const cfg: BarrieretestConfig = {
+      semantic: { tiers: { large: { model: "mistral-large-4" } } },
+    };
+    expect(unsetConfigValue(cfg, "semantic.tiers.large.model").semantic).toBeUndefined();
+  });
+
+  it("is a no-op for a tier that was never set", () => {
+    const cfg: BarrieretestConfig = { semantic: { provider: "mistral" } };
+    expect(unsetConfigValue(cfg, "semantic.tiers.small.model")).toEqual(cfg);
+  });
 });
 
 describe("SUPPORTED_CONFIG_KEYS", () => {
@@ -238,6 +386,18 @@ describe("SUPPORTED_CONFIG_KEYS", () => {
     expect(SUPPORTED_CONFIG_KEYS).toContain("semantic.model");
     expect(SUPPORTED_CONFIG_KEYS).toContain("semantic.checks");
     expect(SUPPORTED_CONFIG_KEYS).toContain("semantic.timeout");
+  });
+
+  it("covers the base URL, the reasoning effort, and both tiers", () => {
+    expect(SUPPORTED_CONFIG_KEYS).toContain("semantic.baseUrl");
+    expect(SUPPORTED_CONFIG_KEYS).toContain("semantic.reasoningEffort");
+    for (const tier of ["small", "large"]) {
+      for (const leaf of ["provider", "model", "baseUrl", "reasoningEffort"]) {
+        expect(SUPPORTED_CONFIG_KEYS as readonly string[]).toContain(
+          `semantic.tiers.${tier}.${leaf}`
+        );
+      }
+    }
   });
 
   it("does not expose customChecks via config get/set (owned by `check` subcommand)", () => {
@@ -384,6 +544,73 @@ describe("mergeConfigs", () => {
     const b = result.merged.semantic?.customChecks?.find((c) => c.id === "b");
     expect(b?.title).toBe("B prime");
     expect(result.overriddenCustomCheckIds).toEqual(["b"]);
+  });
+
+  it("project baseUrl wins over global", () => {
+    const result = mergeConfigs({
+      global: { semantic: { baseUrl: "https://api.mistral.ai/v1" } },
+      project: { semantic: { baseUrl: "https://api.eu.mistral.ai/v1" } },
+      globalPath,
+      projectPath,
+    });
+    expect(result.merged.semantic?.baseUrl).toBe("https://api.eu.mistral.ai/v1");
+  });
+
+  it("project reasoningEffort wins over global, as scalar and as tier leaf", () => {
+    const result = mergeConfigs({
+      global: {
+        semantic: { reasoningEffort: "none", tiers: { large: { reasoningEffort: "none" } } },
+      },
+      project: {
+        semantic: { reasoningEffort: "high", tiers: { large: { model: "mistral-large-4" } } },
+      },
+      globalPath,
+      projectPath,
+    });
+    expect(result.merged.semantic?.reasoningEffort).toBe("high");
+    expect(result.merged.semantic?.tiers?.large).toEqual({
+      model: "mistral-large-4",
+      reasoningEffort: "none",
+    });
+  });
+
+  it("merges tiers leaf by leaf, project over global", () => {
+    const result = mergeConfigs({
+      global: {
+        semantic: {
+          tiers: {
+            small: { provider: "mistral", model: "mistral-small-2603" },
+            large: { model: "mistral-large-4" },
+          },
+        },
+      },
+      project: { semantic: { tiers: { small: { model: "ministral-8b" } } } },
+      globalPath,
+      projectPath,
+    });
+    expect(result.merged.semantic?.tiers).toEqual({
+      small: { provider: "mistral", model: "ministral-8b" },
+      large: { model: "mistral-large-4" },
+    });
+  });
+
+  it("keeps a project-only tier when global has none", () => {
+    const result = mergeConfigs({
+      global: { semantic: { provider: "mistral" } },
+      project: { semantic: { tiers: { small: { model: "mistral-small-2603" } } } },
+      globalPath,
+      projectPath,
+    });
+    expect(result.merged.semantic?.tiers).toEqual({ small: { model: "mistral-small-2603" } });
+  });
+
+  it("omits tiers when neither side sets one", () => {
+    const result = mergeConfigs({
+      global: { semantic: { provider: "mistral" } },
+      project: {},
+      globalPath,
+    });
+    expect(result.merged.semantic?.tiers).toBeUndefined();
   });
 
   it("returns an empty semantic block when neither side sets anything", () => {

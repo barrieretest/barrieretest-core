@@ -5,8 +5,19 @@ export type {
   AIProvider,
   AIProviderConfig,
   AIProviderName,
+  JsonSchemaObject,
+  ModelCapabilities,
+  ModelRequest,
+  ModelResponse,
+  ProviderKind,
 } from "./ai/index.js";
-export { createProvider, enhanceWithAI } from "./ai/index.js";
+export {
+  createMistralProvider,
+  createOpenAICompatibleProvider,
+  createProvider,
+  enhanceWithAI,
+  resolveCapabilities,
+} from "./ai/index.js";
 export { audit } from "./audit.js";
 export { type BaselineDiffResult, diffAgainstBaseline } from "./baseline/diff.js";
 export type { BaselineInfo } from "./baseline/integration.js";
@@ -53,12 +64,16 @@ export {
   ariaMismatchCheck,
   BUILT_IN_CHECK_IDS,
   BUILT_IN_CHECKS,
+  buildSemanticResponseSchema,
   formLabelClarityCheck,
   landmarksCheck,
   langAttributeCheck,
   pageTitleCheck,
+  parseSemanticObject,
   resolveChecks,
   semanticAudit,
+  SEMANTIC_MODEL_TIERS,
+  SEMANTIC_RESPONSE_SCHEMA,
   SEMANTIC_SEVERITY_MAP,
 } from "./semantic/index.js";
 export type {
@@ -72,9 +87,11 @@ export type {
   SemanticIssueMeta,
   SemanticLandmark,
   SemanticMeta,
+  SemanticModelTier,
   SemanticOptions,
   SemanticProviderConfig,
   SemanticSeverity,
+  SemanticTierMeta,
 } from "./semantic/index.js";
 export type {
   AuditEngine,
