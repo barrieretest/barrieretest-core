@@ -38,7 +38,7 @@ import { SEMANTIC_ENV_VAR_BY_PROVIDER } from "./semantic-options.js";
 export type WizardProviderName = Exclude<SemanticProviderName, "openai-compatible">;
 
 export const PROVIDER_OPTIONS: readonly SelectOption<WizardProviderName>[] = [
-  { value: "mistral", label: "Mistral", hint: "Large 4 for the page review, Small 4 for alt text" },
+  { value: "mistral", label: "Mistral", hint: "mistral-large-4" },
   { value: "nebius", label: "Nebius", hint: "gpt-oss-120b, cost-effective" },
   { value: "openai", label: "OpenAI", hint: "GPT-4o vision" },
   { value: "anthropic", label: "Anthropic", hint: "Claude with vision" },
@@ -52,16 +52,11 @@ export const DEFAULT_MODELS: Record<WizardProviderName, string> = {
   anthropic: "claude-sonnet-4-5",
 };
 
-/** Cheap Mistral model offered for the small tier. */
-export const MISTRAL_SMALL_MODEL = "mistral-small-2603";
-
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 export interface WizardAnswers {
   provider: WizardProviderName;
   model?: string;
-  /** Model for the small tier; omitted means "one model for every tier". */
-  smallTierModel?: string;
   checks?: string[];
   timeout: number;
 }
@@ -132,14 +127,6 @@ export async function runInit(deps: RunInitDeps): Promise<CliResult> {
         validate: (v) => (v.trim() ? null : "Model cannot be empty."),
       });
 
-  // Mistral is the only provider whose small model the wizard knows about.
-  const useSmallTier =
-    provider === "mistral" &&
-    (await confirm({
-      message: `Use ${MISTRAL_SMALL_MODEL} for lightweight checks (alt text)?`,
-      default: true,
-    }));
-
   const initialCheckValues = existing.semantic?.checks ?? [...BUILT_IN_CHECK_IDS];
   const chosenChecks = await multiselect<string>({
     message: "Which semantic checks should run?",
@@ -165,7 +152,6 @@ export async function runInit(deps: RunInitDeps): Promise<CliResult> {
   const answers: WizardAnswers = {
     provider,
     model,
-    ...(useSmallTier ? { smallTierModel: MISTRAL_SMALL_MODEL } : {}),
     checks: chosenChecks.length === BUILT_IN_CHECK_IDS.length ? undefined : chosenChecks,
     timeout,
   };
@@ -238,8 +224,6 @@ export function buildConfigFromAnswers(
     semantic: {
       provider: answers.provider,
       ...(answers.model ? { model: answers.model } : {}),
-      // A tier entry without `provider` means "same provider as the default".
-      ...(answers.smallTierModel ? { tiers: { small: { model: answers.smallTierModel } } } : {}),
       ...(answers.checks && answers.checks.length > 0 ? { checks: answers.checks } : {}),
       timeout: answers.timeout,
     },

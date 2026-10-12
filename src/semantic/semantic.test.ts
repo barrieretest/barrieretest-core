@@ -323,6 +323,21 @@ describe("sanitizePromptContext", () => {
     expect(result.removedSections).toEqual([]);
     expect(result.flaggedPatterns).toEqual([]);
   });
+
+  it("keeps the line breaks that give the structured sections one element per line", () => {
+    const section =
+      '=== IMAGES ===\nImage 1: alt text = "Logo" | selector = img#logo\nImage 2: alt text = (empty) | selector = img#spacer';
+    expect(sanitizePromptContext(section).sanitized).toBe(section);
+  });
+
+  it("caps blank lines without joining lines or touching runs of spaces", () => {
+    const result = sanitizePromptContext(
+      'Image 1: alt text = "a" | selector = img[src$="team  photo.jpg"]  \n\n\n\nImage 2: alt text'
+    );
+    expect(result.sanitized).toBe(
+      'Image 1: alt text = "a" | selector = img[src$="team  photo.jpg"]\n\nImage 2: alt text'
+    );
+  });
 });
 
 // ----- prompt assembly -----
@@ -401,6 +416,92 @@ describe("buildSemanticPrompt", () => {
     expect(prompt).toContain(
       "Every finding must belong to one of the checks listed below. An issue that falls " +
         "outside those checks is not reported at all, under any checkType."
+    );
+  });
+
+  it("asks for one entry per element and forbids entries that describe a pass", () => {
+    const prompt = buildSemanticPrompt({
+      checks: [BUILT_IN_CHECKS[0]],
+      url: "https://x.test",
+      context: sanitizePromptContext("<body></body>"),
+      formattedContext: "<body></body>",
+    });
+
+    expect(prompt).toContain(
+      "One entry per element per check. When an element fails a check for more than one " +
+        "reason, write one entry that lists the reasons."
+    );
+    expect(prompt).toContain(
+      "Decide before you write. If, while describing an element, you conclude it does not " +
+        "fail the check, leave it out entirely; never include an entry whose message says " +
+        "it is acceptable."
+    );
+  });
+
+  it("caps the message length and forbids deliberating inside it", () => {
+    const prompt = buildSemanticPrompt({
+      checks: [BUILT_IN_CHECKS[0]],
+      url: "https://x.test",
+      context: sanitizePromptContext("<body></body>"),
+      formattedContext: "<body></body>",
+    });
+
+    expect(prompt).toContain(
+      '"message" states the failure in at most two sentences. Do not deliberate or ' +
+        "re-evaluate inside the message; if you are unsure whether it fails, leave it out."
+    );
+  });
+
+  it("names the IMAGES section as the authoritative record of each alt attribute", () => {
+    const prompt = buildSemanticPrompt({
+      checks: resolveChecks(["alt-text-quality"], undefined),
+      url: "https://x.test",
+      context: sanitizePromptContext("<body></body>"),
+      formattedContext: "<body></body>",
+    });
+
+    expect(prompt).toContain(
+      "The IMAGES section is the authoritative record of each image's alt attribute. " +
+        "Never report an alt as missing or empty when the line shows an alt text."
+    );
+  });
+
+  it("separates the alt text from the selector and pins what counts as generic", () => {
+    const prompt = buildSemanticPrompt({
+      checks: resolveChecks(["alt-text-quality"], undefined),
+      url: "https://x.test",
+      context: sanitizePromptContext("<body></body>"),
+      formattedContext: "<body></body>",
+    });
+
+    expect(prompt).toContain(
+      "The `alt text =` value is the alt attribute. The `selector =` value is only where " +
+        "the image is; it is never the alt text and must not be judged."
+    );
+    expect(prompt).toContain(
+      "A filename alt means the alt text itself ends in an image extension or is a hash. " +
+        "Compare the alt text only."
+    );
+    expect(prompt).toContain(
+      "Sufficient alt texts, never a failure: `Screenshot of the SELF tool.`, `Portrait of " +
+        "Andreas Steinkellner`, `Acurion Logo`, `Mitglieds-Logo der Charta der Vielfalt`. An " +
+        "alt is generic only when it carries no information about this particular image, such " +
+        "as `image`, `photo`, `logo`, `icon`, `Bild`."
+    );
+    expect(prompt).toContain("Report `location` as the `selector =` value, unchanged.");
+  });
+
+  it("scopes the alt check to the images the IMAGES section lists", () => {
+    const prompt = buildSemanticPrompt({
+      checks: resolveChecks(["alt-text-quality"], undefined),
+      url: "https://x.test",
+      context: sanitizePromptContext("<body></body>"),
+      formattedContext: "<body></body>",
+    });
+
+    expect(prompt).toContain(
+      "Evaluate exactly the images listed in the IMAGES section and no others; images " +
+        "absent from the list are out of scope."
     );
   });
 
@@ -484,7 +585,9 @@ describe("runSemanticAudit (with stub provider)", () => {
     detectedLanguage: "en",
   });
 
-  it("clamps out-of-range model confidence to [0, 1]", async () => {
+  // A negative confidence also falls below the confidence floor, so the
+  // clamped-to-0 value is no longer observable on an issue.
+  it("clamps an over-range model confidence to 1 and drops a negative one", async () => {
     const wildResponse = JSON.stringify({
       issues: [
         {
@@ -518,9 +621,251 @@ describe("runSemanticAudit (with stub provider)", () => {
       }
     );
 
-    expect(result.issues).toHaveLength(2);
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0].description).toBe("over");
     expect(result.issues[0].semantic?.confidence).toBe(1);
-    expect(result.issues[1].semantic?.confidence).toBe(0);
+  });
+
+  it("reads confidence as 0-100 even when the value is below 1", async () => {
+    const lowScaleResponse = JSON.stringify({
+      issues: [
+        {
+          checkType: "aria-mismatch",
+          severity: "error",
+          message: "half a percent",
+          location: ".half",
+          confidence: 0.5,
+        },
+        {
+          checkType: "aria-mismatch",
+          severity: "error",
+          message: "one percent",
+          location: ".one",
+          confidence: 1,
+        },
+        {
+          checkType: "aria-mismatch",
+          severity: "error",
+          message: "ten percent",
+          location: ".ten",
+          confidence: 10,
+        },
+      ],
+    });
+
+    const result = await runSemanticAudit(
+      {
+        url: "https://stub.test",
+        page: makeStubPage(),
+        ownsBrowser: false,
+        pagePrepared: true,
+        providerOverride: makeStubProvider(lowScaleResponse),
+      },
+      {
+        provider: { name: "nebius", apiKey: "stub" },
+        checks: ["aria-mismatch"],
+      }
+    );
+
+    // 0.5 and 1 are half a percent and one percent, not 50% and 100%, so
+    // both fall below the confidence floor.
+    expect(result.issues.map((i) => i.description)).toEqual(["ten percent"]);
+    expect(result.issues[0].semantic?.confidence).toBe(0.1);
+  });
+
+  it("drops findings the model rated below 10% confidence and warns once per tier", async () => {
+    const unsureResponse = JSON.stringify({
+      issues: [
+        {
+          checkType: "aria-mismatch",
+          severity: "error",
+          message: "this is NOT a failure",
+          location: ".zero",
+          confidence: 0,
+        },
+        {
+          checkType: "aria-mismatch",
+          severity: "error",
+          message: "probably fine",
+          location: ".five",
+          confidence: 5,
+        },
+        {
+          checkType: "aria-mismatch",
+          severity: "error",
+          message: "kept",
+          location: ".ten",
+          confidence: 10,
+        },
+      ],
+    });
+
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(String(args[0] ?? ""));
+    };
+
+    try {
+      const result = await runSemanticAudit(
+        {
+          url: "https://stub.test",
+          page: makeStubPage(),
+          ownsBrowser: false,
+          pagePrepared: true,
+          providerOverride: makeStubProvider(unsureResponse),
+        },
+        {
+          provider: { name: "nebius", apiKey: "stub" },
+          checks: ["aria-mismatch"],
+        }
+      );
+
+      expect(result.issues.map((i) => i.description)).toEqual(["kept"]);
+      expect(result.issues[0].semantic?.confidence).toBe(0.1);
+      expect(
+        warnings.filter((message) =>
+          message.includes(
+            "Semantic runner dropped 2 finding(s) the model rated below 10% confidence"
+          )
+        )
+      ).toHaveLength(1);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  it("merges two findings for the same element into one issue and warns once", async () => {
+    const duplicateResponse = JSON.stringify({
+      issues: [
+        {
+          checkType: "page-title",
+          severity: "warning",
+          message: "The title does not name the site.",
+          location: "<title>",
+          confidence: 80,
+        },
+        {
+          checkType: "page-title",
+          severity: "error",
+          message: "The title is a generic placeholder.",
+          location: "  <title>  ",
+          confidence: 40,
+        },
+      ],
+    });
+
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(String(args[0] ?? ""));
+    };
+
+    try {
+      const result = await runSemanticAudit(
+        {
+          url: "https://stub.test",
+          page: makeStubPage(),
+          ownsBrowser: false,
+          pagePrepared: true,
+          providerOverride: makeStubProvider(duplicateResponse),
+        },
+        {
+          provider: { name: "nebius", apiKey: "stub" },
+          checks: ["page-title"],
+        }
+      );
+
+      expect(result.issues).toHaveLength(1);
+      expect(result.issues[0].description).toBe(
+        "The title does not name the site. The title is a generic placeholder."
+      );
+      // The stronger severity wins; the first finding's confidence is kept.
+      expect(result.issues[0].impact).toBe("serious");
+      expect(result.issues[0].semantic?.confidence).toBe(0.8);
+      expect(result.issues[0].selector).toBe("<title>");
+      expect(
+        warnings.filter((message) =>
+          message.includes("Semantic runner merged 1 duplicate finding(s) for the same element")
+        )
+      ).toHaveLength(1);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  it("keeps findings whose locations differ only in inner whitespace as separate issues", async () => {
+    const twoElements = JSON.stringify({
+      issues: [
+        {
+          checkType: "page-title",
+          severity: "warning",
+          message: "descendant element",
+          location: ".a .b",
+          confidence: 80,
+        },
+        {
+          checkType: "page-title",
+          severity: "warning",
+          message: "element with both classes",
+          location: ".a.b",
+          confidence: 80,
+        },
+      ],
+    });
+
+    const result = await runSemanticAudit(
+      {
+        url: "https://stub.test",
+        page: makeStubPage(),
+        ownsBrowser: false,
+        pagePrepared: true,
+        providerOverride: makeStubProvider(twoElements),
+      },
+      {
+        provider: { name: "nebius", apiKey: "stub" },
+        checks: ["page-title"],
+      }
+    );
+
+    expect(result.issues.map((i) => i.selector)).toEqual([".a .b", ".a.b"]);
+  });
+
+  it("keeps findings whose locations differ only in case as separate issues", async () => {
+    const twoElements = JSON.stringify({
+      issues: [
+        {
+          checkType: "page-title",
+          severity: "warning",
+          message: "lowercase element",
+          location: "#logo",
+          confidence: 80,
+        },
+        {
+          checkType: "page-title",
+          severity: "warning",
+          message: "uppercase element",
+          location: "#Logo",
+          confidence: 80,
+        },
+      ],
+    });
+
+    const result = await runSemanticAudit(
+      {
+        url: "https://stub.test",
+        page: makeStubPage(),
+        ownsBrowser: false,
+        pagePrepared: true,
+        providerOverride: makeStubProvider(twoElements),
+      },
+      {
+        provider: { name: "nebius", apiKey: "stub" },
+        checks: ["page-title"],
+      }
+    );
+
+    expect(result.issues.map((i) => i.selector)).toEqual(["#logo", "#Logo"]);
   });
 
   it("only returns issues for requested checks", async () => {
@@ -648,6 +993,20 @@ describe("runSemanticAudit (with stub provider)", () => {
 // ----- model tiers -----
 
 describe("runSemanticAudit (model tiers)", () => {
+  /**
+   * No built-in runs on the small tier, so the tier split is exercised with
+   * a custom check that opts in — the only way a small tier exists.
+   */
+  const smallTierCheck: SemanticCheck = {
+    id: "custom-image-review",
+    title: "Custom Image Review",
+    description: "A custom per-image check on the cheap tier",
+    promptSection: "**Custom Image Review**: judge each image",
+    needsScreenshot: true,
+    needsContext: ["images"],
+    tier: "small",
+  };
+
   /** Findings for one large-tier and one small-tier check. */
   const twoTierResponse = JSON.stringify({
     issues: [
@@ -659,7 +1018,7 @@ describe("runSemanticAudit (model tiers)", () => {
         confidence: 80,
       },
       {
-        checkType: "alt-text-quality",
+        checkType: "custom-image-review",
         severity: "warning",
         message: "alt text is just the filename",
         location: "img.hero",
@@ -682,38 +1041,108 @@ describe("runSemanticAudit (model tiers)", () => {
         pagePrepared: true,
         providerOverride: provider,
       },
-      extra ?? { provider: { name: "nebius", apiKey: "stub" } }
+      {
+        provider: { name: "nebius", apiKey: "stub" },
+        customChecks: [smallTierCheck],
+        ...extra,
+      }
     );
 
-  it("splits the default built-ins into one call per tier", async () => {
+  it("splits the built-ins and a small-tier custom check into one call per tier", async () => {
     const stub = makeStubProvider(twoTierResponse);
     const result = await runWithDefaults(stub);
 
     expect(stub.prompts).toHaveLength(2);
 
-    const smallPrompt = stub.prompts.find((p) => p.includes('"alt-text-quality"'));
+    const smallPrompt = stub.prompts.find((p) => p.includes('"custom-image-review"'));
     const largePrompt = stub.prompts.find((p) => p.includes('"aria-mismatch"'));
     expect(smallPrompt).toBeDefined();
     expect(largePrompt).toBeDefined();
     expect(smallPrompt).not.toContain('"aria-mismatch"');
-    expect(largePrompt).not.toContain('"alt-text-quality"');
+    expect(largePrompt).not.toContain('"custom-image-review"');
 
     // Each tier's response is validated against its own checks, so both
     // findings survive — one per tier, large first.
     expect(result.issues.map((i) => i.id)).toEqual([
       "semantic:aria-mismatch",
-      "semantic:alt-text-quality",
+      "semantic:custom-image-review",
     ]);
 
-    expect(result.meta.tiers?.small?.checksRun).toEqual(["alt-text-quality"]);
-    expect(result.meta.tiers?.large?.checksRun).toEqual([
-      "aria-mismatch",
-      "page-title",
-      "form-label-clarity",
-      "lang-attribute",
-      "landmarks",
-    ]);
-    expect(result.meta.checksRun).toEqual([...BUILT_IN_CHECK_IDS]);
+    // Every built-in is on the large tier; only the custom check is small.
+    expect(result.meta.tiers?.small?.checksRun).toEqual(["custom-image-review"]);
+    expect(result.meta.tiers?.large?.checksRun).toEqual([...BUILT_IN_CHECK_IDS]);
+    expect(result.meta.checksRun).toEqual([...BUILT_IN_CHECK_IDS, "custom-image-review"]);
+  });
+
+  it("gives each tier only the context sections its own checks need", async () => {
+    // A page where every section carries content, so a section reaching the
+    // wrong tier is visible in that tier's prompt.
+    const fullPage = makeStubPage({
+      evaluate: (async () => ({
+        pageTitle: "Stub",
+        langAttr: "en",
+        headSnippet: "<title>Stub</title>",
+        bodySnippet: '<img src="/hero.jpg" alt="Hero">',
+        ariaElements: ['<button aria-label="Menü"></button>'],
+        formElements: ["<input> type=search name=q | label: (none)"],
+        images: ['Image 1: alt text = "Hero" | selector = img[src$="hero.jpg"] | 800x400'],
+        landmarks: ['<nav aria-label="Hauptnavigation"></nav>'],
+      })) as unknown as BrowserPage["evaluate"],
+    });
+
+    const stub = makeStubProvider(twoTierResponse);
+    await runSemanticAudit(
+      {
+        url: "https://stub.test",
+        page: fullPage,
+        ownsBrowser: false,
+        pagePrepared: true,
+        providerOverride: stub,
+      },
+      {
+        provider: { name: "nebius", apiKey: "stub" },
+        customChecks: [smallTierCheck],
+        // alt-text-quality is left out so the images section belongs to the
+        // small tier alone.
+        checks: [
+          "aria-mismatch",
+          "page-title",
+          "form-label-clarity",
+          "lang-attribute",
+          "landmarks",
+          "custom-image-review",
+        ],
+      }
+    );
+
+    const smallPrompt = stub.prompts.find((p) => p.includes('"custom-image-review"')) ?? "";
+    const largePrompt = stub.prompts.find((p) => p.includes('"aria-mismatch"')) ?? "";
+
+    // The small tier runs only the custom image check, which needs the images.
+    expect(smallPrompt).toContain("=== IMAGES ===");
+    for (const section of [
+      "=== HEAD (snippet) ===",
+      "=== BODY (snippet) ===",
+      "=== ARIA ELEMENTS ===",
+      "=== FORM ELEMENTS ===",
+      "=== LANDMARKS ===",
+    ]) {
+      expect(smallPrompt).not.toContain(section);
+    }
+    // Page facts stay in every tier's prompt.
+    expect(smallPrompt).toContain("Page Title: Stub");
+    expect(smallPrompt).toContain("Lang Attribute: en");
+
+    for (const section of [
+      "=== HEAD (snippet) ===",
+      "=== BODY (snippet) ===",
+      "=== ARIA ELEMENTS ===",
+      "=== FORM ELEMENTS ===",
+      "=== LANDMARKS ===",
+    ]) {
+      expect(largePrompt).toContain(section);
+    }
+    expect(largePrompt).not.toContain("=== IMAGES ===");
   });
 
   it("runs a single tier when no selected check belongs to the other", async () => {
@@ -744,6 +1173,7 @@ describe("runSemanticAudit (model tiers)", () => {
       },
       {
         provider: { name: "mistral", apiKey: "stub", model: "mistral-large-4" },
+        customChecks: [smallTierCheck],
         tiers: {
           small: { name: "openai", apiKey: "stub", model: "gpt-4o-mini" },
         },
@@ -751,14 +1181,14 @@ describe("runSemanticAudit (model tiers)", () => {
     );
 
     expect(smallStub.prompts).toHaveLength(1);
-    expect(smallStub.prompts[0]).toContain('"alt-text-quality"');
+    expect(smallStub.prompts[0]).toContain('"custom-image-review"');
     expect(smallStub.prompts[0]).not.toContain('"aria-mismatch"');
     expect(largeStub.prompts).toHaveLength(1);
 
     expect(result.meta.tiers?.small).toEqual({
       provider: "openai",
       model: "small-model",
-      checksRun: ["alt-text-quality"],
+      checksRun: ["custom-image-review"],
     });
     expect(result.meta.tiers?.large?.provider).toBe("mistral");
     expect(result.meta.tiers?.large?.model).toBe("large-model");
@@ -782,10 +1212,10 @@ describe("runSemanticAudit (model tiers)", () => {
         providerOverride: makeStubProvider(twoTierResponse),
         tierProviderOverrides: { small: blindStub },
       },
-      { provider: { name: "nebius", apiKey: "stub" } }
+      { provider: { name: "nebius", apiKey: "stub" }, customChecks: [smallTierCheck] }
     );
 
-    await expect(promise).rejects.toThrow(/alt-text-quality/);
+    await expect(promise).rejects.toThrow(/custom-image-review/);
     await expect(promise).rejects.toThrow(/small/);
     await expect(promise).rejects.toThrow(/openai\/gpt-oss-120b/);
     expect(blindStub.prompts).toEqual([]);
@@ -844,7 +1274,7 @@ describe("runSemanticAudit (model tiers)", () => {
       };
       expect(schema).toBeDefined();
       const enumIds = schema.properties.issues.items.properties.checkType.enum;
-      const tier = request.text.includes('"alt-text-quality"') ? "small" : "large";
+      const tier = request.text.includes('"custom-image-review"') ? "small" : "large";
       expect(enumIds).toEqual([...(fromSchema.meta.tiers?.[tier]?.checksRun ?? [])]);
     }
   });
@@ -956,7 +1386,7 @@ describe("runSemanticAudit (model tiers)", () => {
         pagePrepared: true,
         tierProviderOverrides: { large: seeingStub, small: blindStub },
       },
-      { provider: { name: "nebius", apiKey: "stub" } }
+      { provider: { name: "nebius", apiKey: "stub" }, customChecks: [smallTierCheck] }
     );
 
     await expect(promise).rejects.toThrow(/small/);
@@ -1015,7 +1445,7 @@ describe("runSemanticAudit (model tiers)", () => {
     const smallResponse = JSON.stringify({
       issues: [
         {
-          checkType: "alt-text-quality",
+          checkType: "custom-image-review",
           severity: "warning",
           message: "alt text is just the filename",
           location: "img.hero",
@@ -1037,8 +1467,9 @@ describe("runSemanticAudit (model tiers)", () => {
       },
       {
         provider: { name: "mistral", apiKey: "stub", model: "mistral-large-4" },
+        customChecks: [smallTierCheck],
         tiers: { small: { name: "openai", apiKey: "stub", model: "gpt-4o-mini" } },
-        checks: ["alt-text-quality"],
+        checks: ["custom-image-review"],
       }
     );
 
@@ -1047,7 +1478,7 @@ describe("runSemanticAudit (model tiers)", () => {
     expect(result.meta.model).toBe("small-model");
     expect(result.meta.detectedLanguage).toBe("de");
     expect(result.meta.overallAssessment).toBe("Small tier assessment");
-    expect(result.issues.map((i) => i.id)).toEqual(["semantic:alt-text-quality"]);
+    expect(result.issues.map((i) => i.id)).toEqual(["semantic:custom-image-review"]);
   });
 
   it("sends the screenshot only to the tier whose checks need it", async () => {
@@ -1068,8 +1499,9 @@ describe("runSemanticAudit (model tiers)", () => {
       },
       {
         provider: { name: "nebius", apiKey: "stub" },
-        // lang-attribute is the one large-tier built-in that needs no image.
-        checks: ["lang-attribute", "alt-text-quality"],
+        customChecks: [smallTierCheck],
+        // lang-attribute is the one built-in that needs no screenshot.
+        checks: ["lang-attribute", "custom-image-review"],
       }
     );
 
@@ -1096,7 +1528,7 @@ describe("runSemanticAudit (model tiers)", () => {
     const smallResponse = JSON.stringify({
       issues: [
         {
-          checkType: "alt-text-quality",
+          checkType: "custom-image-review",
           severity: "warning",
           message: "alt text is just the filename",
           location: "img.hero",
@@ -1128,8 +1560,9 @@ describe("runSemanticAudit (model tiers)", () => {
       },
       {
         provider: { name: "mistral", apiKey: "stub", model: "mistral-large-4" },
+        customChecks: [smallTierCheck],
         tiers: { small: { name: "openai", apiKey: "stub", model: "gpt-4o-mini" } },
-        checks: ["aria-mismatch", "alt-text-quality"],
+        checks: ["aria-mismatch", "custom-image-review"],
       }
     );
 
@@ -1137,7 +1570,7 @@ describe("runSemanticAudit (model tiers)", () => {
     expect(smallStub.prompts).toHaveLength(1);
     expect(result.issues.map((i) => i.id)).toEqual([
       "semantic:aria-mismatch",
-      "semantic:alt-text-quality",
+      "semantic:custom-image-review",
     ]);
     expect(result.meta.provider).toBe("mistral");
     expect(result.meta.model).toBe("large-model");

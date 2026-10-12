@@ -5,7 +5,6 @@ import {
   buildConfigFromAnswers,
   DEFAULT_MODELS,
   hasExistingSemanticConfig,
-  MISTRAL_SMALL_MODEL,
   pickDefaultProvider,
   PROVIDER_OPTIONS,
   runInit,
@@ -70,7 +69,7 @@ describe("pickDefaultProvider", () => {
 describe("PROVIDER_OPTIONS", () => {
   it("offers Mistral first", () => {
     expect(PROVIDER_OPTIONS[0].value).toBe("mistral");
-    expect(PROVIDER_OPTIONS[0].hint).toContain("alt text");
+    expect(PROVIDER_OPTIONS[0].hint).toContain("mistral-large-4");
   });
 
   it("keeps the previously offered providers", () => {
@@ -114,23 +113,7 @@ describe("buildConfigFromAnswers", () => {
     expect(next.semantic?.checks).toBeUndefined();
   });
 
-  it("writes the small tier when the small-model question was answered yes", () => {
-    const next = buildConfigFromAnswers(
-      {},
-      {
-        provider: "mistral",
-        model: "mistral-large-4",
-        smallTierModel: MISTRAL_SMALL_MODEL,
-        timeout: 120_000,
-      }
-    );
-
-    expect(next.semantic?.tiers).toEqual({ small: { model: "mistral-small-2603" } });
-    // Provider omitted means "same provider as the default".
-    expect(next.semantic?.tiers?.small?.provider).toBeUndefined();
-  });
-
-  it("omits tiers when the small-model question was declined", () => {
+  it("writes no tiers — the wizard configures one model for every tier", () => {
     const next = buildConfigFromAnswers(
       {},
       { provider: "mistral", model: "mistral-large-4", timeout: 120_000 }
@@ -196,9 +179,8 @@ describe("DEFAULT_MODELS", () => {
     expect(DEFAULT_MODELS.anthropic).toBeTruthy();
   });
 
-  it("suggests Mistral Large for the default tier and Small for the cheap one", () => {
+  it("suggests Mistral Large for every tier", () => {
     expect(DEFAULT_MODELS.mistral).toBe("mistral-large-4");
-    expect(MISTRAL_SMALL_MODEL).toBe("mistral-small-2603");
   });
 });
 

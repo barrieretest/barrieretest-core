@@ -196,8 +196,8 @@ describe("check list", () => {
     expect(result.success).toBe(true);
     expect(result.message).toContain("[global]   button-verbs  Button Verbs  (small)");
     expect(result.message).toContain("[global]   heading-order  Heading Order  (large)");
-    // alt-text-quality is the only built-in on the small tier.
-    expect(result.message).toContain("[built-in] alt-text-quality  Alt Text Quality  (small)");
+    // No built-in runs on the small tier; only the custom check opts in.
+    expect(result.message).toContain("[built-in] alt-text-quality  Alt Text Quality  (large)");
     expect(result.message).toContain("[built-in] page-title  Page Title Quality  (large)");
   });
 

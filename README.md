@@ -155,11 +155,12 @@ API keys are read from the environment only — never from a config file or a fl
 
 Every check declares a model tier. `small` is for cheap per-element judgements,
 `large` for the holistic page review and the default for checks that do not say.
-`alt-text-quality` is the only built-in on the small tier; custom checks opt in
-with `"tier": "small"`.
+No built-in check runs on the small tier by default — all of them are on
+`large`, because the small models tried so far were not reliable enough for
+their judgements. Custom checks opt in with `"tier": "small"`.
 
 A tier you do not configure uses the default provider and model, so one model
-for everything stays the default behaviour. Put the cheap checks on a cheap
+for everything stays the default behaviour. Point the small tier at a cheap
 model per run:
 
 ```bash
@@ -183,6 +184,10 @@ Or in config, including two different providers:
   }
 }
 ```
+
+With only the built-in checks selected, both examples still run every check on
+the large tier: the small model is called once a custom check declares
+`"tier": "small"`.
 
 A tier entry without `provider` means "same provider as the default", and then
 inherits the default model and base URL too. A tier that switches provider
@@ -595,7 +600,7 @@ Custom checks can override built-ins by reusing the same `id`. This applies only
 
 | Provider | Suggested model | Notes |
 |---|---|---|
-| `mistral` | `mistral-large-4` (small tier: `mistral-small-2603`) | Default suggestion in the `init` wizard; `MISTRAL_API_KEY`. `mistral-large-4` is a reasoning model; reasoning is off by default, set `reasoningEffort: "high"` and a larger `maxTokens` to enable it. With a JSON schema, a response the model cuts off mid-JSON raises an error naming `maxTokens` and the budget that was sent; on the text path it still surfaces as a parse error |
+| `mistral` | `mistral-large-4` | Default suggestion in the `init` wizard; `MISTRAL_API_KEY`. `mistral-large-4` is a reasoning model; reasoning is off by default, set `reasoningEffort: "high"` and a larger `maxTokens` to enable it. With a JSON schema, a response the model cuts off mid-JSON raises an error naming `maxTokens` and the budget that was sent; on the text path it still surfaces as a parse error. `mistral-small-2603` is an option for custom small-tier checks |
 | `openai` | `gpt-4o` | Pass a vision-capable model |
 | `anthropic` | `claude-sonnet-4-5` | Pass a vision-capable Claude model |
 | `openai-compatible` | — | Any chat-completions endpoint. Needs `baseUrl` and `model`; capabilities default to text-only, so set `capabilities: { vision: true, jsonSchema: true }` when the model has more |

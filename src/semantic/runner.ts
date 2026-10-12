@@ -5,8 +5,9 @@
  *   1. Resolve the requested checks (built-ins ∪ custom) and group them by
  *      model tier ("small" for cheap per-element checks, "large" otherwise).
  *   2. Extract only the HTML context categories the selected checks need.
- *   3. Sanitize the context, capture one screenshot for all tiers.
- *   4. Per tier: build a prompt listing that tier's checks and send one
+ *   3. Capture one screenshot for all tiers.
+ *   4. Per tier: format and sanitize only the context sections that tier's
+ *      checks need, build a prompt listing that tier's checks, and send one
  *      request, natively schema-constrained when the model supports it.
  *   5. Parse each response, map findings to `Issue[]`, merge, return result.
  *
@@ -83,6 +84,28 @@ export interface SemanticRunContext {
 }
 
 /**
+ * Findings below this normalized confidence are dropped: models use a
+ * near-zero confidence for entries they have themselves concluded are not
+ * failures, and those reached the report as false positives.
+ */
+const MIN_FINDING_CONFIDENCE = 0.1;
+
+/**
+ * Confidence comes back as 0-100 (`RawSemanticFinding.confidence`, and the
+ * prompt asks for that range); normalize to 0-1 and clamp so the documented
+ * `SemanticIssueMeta.confidence` contract holds even when the model returns
+ * out-of-range values. The scale is never guessed from the magnitude: read as
+ * "already normalized", a `confidence` of 1 — one percent, the value a model
+ * uses for an entry it has itself dismissed — became full confidence and
+ * passed the guard below. A finding without a confidence is treated as
+ * moderately confident.
+ */
+function normalizeConfidence(finding: RawSemanticFinding): number {
+  const rawConfidence = typeof finding.confidence === "number" ? finding.confidence : 50;
+  return Math.min(1, Math.max(0, rawConfidence / 100));
+}
+
+/**
  * Default mapping from a raw finding into the standard `Issue` shape.
  */
 function defaultFindingToIssue(
@@ -90,12 +113,7 @@ function defaultFindingToIssue(
   check: SemanticCheck | undefined
 ): Issue {
   const checkId = check?.id ?? finding.checkType;
-  const rawConfidence = typeof finding.confidence === "number" ? finding.confidence : 50;
-  // Confidence comes back as 0-100; normalize to 0-1 and clamp so the
-  // documented `SemanticIssueMeta.confidence` contract holds even when the
-  // model returns out-of-range values.
-  const normalized = rawConfidence > 1 ? rawConfidence / 100 : rawConfidence;
-  const normalizedConfidence = Math.min(1, Math.max(0, normalized));
+  const normalizedConfidence = normalizeConfidence(finding);
 
   return {
     id: `semantic:${checkId}`,
@@ -143,6 +161,81 @@ export function validateFindingsAgainstChecks(
     }
   }
   return { valid, dropped };
+}
+
+/**
+ * Split findings into the ones confident enough to report and the count of
+ * those the model rated below `MIN_FINDING_CONFIDENCE`.
+ */
+function filterByConfidence(findings: RawSemanticFinding[]): {
+  confident: RawSemanticFinding[];
+  droppedCount: number;
+} {
+  const confident = findings.filter(
+    (finding) => normalizeConfidence(finding) >= MIN_FINDING_CONFIDENCE
+  );
+  return { confident, droppedCount: findings.length - confident.length };
+}
+
+/** Severity ranking used when two findings for the same element are merged. */
+const SEVERITY_RANK: Record<RawSemanticFinding["severity"], number> = {
+  notice: 0,
+  warning: 1,
+  error: 2,
+};
+
+/**
+ * Key two findings as the same element: same check, same location ignoring
+ * surrounding whitespace. Nothing else is normalized: a location is a CSS
+ * selector, where case (`#Logo` vs `#logo`) and inner whitespace (`.a .b` vs
+ * `.a.b`) address different elements, so collapsing either merged the
+ * findings for two elements into one issue.
+ */
+function elementKey(finding: RawSemanticFinding): string {
+  return `${finding.checkType}\u0000${finding.location.trim()}`;
+}
+
+/**
+ * Merge findings that report the same element for the same check. Models
+ * split one element's failure into one entry per reason; the report should
+ * carry one issue per element, so the later messages are appended to the
+ * first and the strongest severity wins. A finding without a location cannot
+ * be attributed to an element and is never merged.
+ */
+function dedupeByElement(findings: RawSemanticFinding[]): {
+  merged: RawSemanticFinding[];
+  mergedCount: number;
+} {
+  const byElement = new Map<string, RawSemanticFinding>();
+  const merged: RawSemanticFinding[] = [];
+  let mergedCount = 0;
+
+  for (const finding of findings) {
+    if (!finding.location.trim()) {
+      merged.push(finding);
+      continue;
+    }
+
+    const key = elementKey(finding);
+    const first = byElement.get(key);
+    if (!first) {
+      const copy = { ...finding };
+      byElement.set(key, copy);
+      merged.push(copy);
+      continue;
+    }
+
+    if (SEVERITY_RANK[finding.severity] > SEVERITY_RANK[first.severity]) {
+      first.severity = finding.severity;
+    }
+    const addition = finding.message.trim();
+    if (addition && !first.message.includes(addition)) {
+      first.message = `${first.message.trim()} ${addition}`.trim();
+    }
+    mergedCount++;
+  }
+
+  return { merged, mergedCount };
 }
 
 function unionContextSections(checks: SemanticCheck[]): SemanticContextSection[] {
@@ -241,6 +334,7 @@ interface PreparedTier {
   /** The shared screenshot, but only when this tier's checks need it. */
   screenshot: Uint8Array | undefined;
   url: string;
+  /** The shared extraction, narrowed to the sections this tier's checks need. */
   context: SanitizedPromptContext;
   timeout: number | undefined;
 }
@@ -380,9 +474,6 @@ export async function runSemanticAudit(
   const rawContext: ExtractedContext = await extractHtmlContext(page, sections, options.context);
   await onProgress?.({ percent: 30, message: "Extracting page context" });
 
-  const formattedContext = formatExtractedContext(rawContext);
-  const sanitized = sanitizePromptContext(formattedContext);
-
   const screenshot = await ensureScreenshot(page, cachedScreenshot, checksNeedScreenshot(checks));
 
   const groups = groupChecksByTier(checks);
@@ -400,6 +491,13 @@ export async function runSemanticAudit(
     const tierConfig = options.tiers?.[tier] ?? providerConfig;
     const groupChecks = groups.get(tier) ?? [];
 
+    // One extraction serves every tier, but each tier only sees the sections
+    // its own checks need: a tier handed the union found the elements it was
+    // asked about again in another tier's section and reported them there.
+    const tierContext = sanitizePromptContext(
+      formatExtractedContext(rawContext, unionContextSections(groupChecks))
+    );
+
     const entry: PreparedTier = {
       tier,
       checks: groupChecks,
@@ -407,7 +505,7 @@ export async function runSemanticAudit(
       provider: resolveTierProvider(runContext, tier, tierConfig, options.timeout),
       screenshot: checksNeedScreenshot(groupChecks) ? screenshot : undefined,
       url,
-      context: sanitized,
+      context: tierContext,
       timeout: options.timeout,
     };
     assertTierCanSeeScreenshot(entry);
@@ -439,7 +537,22 @@ export async function runSemanticAudit(
       );
     }
 
-    for (const finding of validFindings) {
+    const { confident, droppedCount } = filterByConfidence(validFindings);
+    if (droppedCount > 0) {
+      console.warn(
+        `Semantic runner dropped ${droppedCount} finding(s) the model rated below ` +
+          `${Math.round(MIN_FINDING_CONFIDENCE * 100)}% confidence`
+      );
+    }
+
+    const { merged, mergedCount } = dedupeByElement(confident);
+    if (mergedCount > 0) {
+      console.warn(
+        `Semantic runner merged ${mergedCount} duplicate finding(s) for the same element`
+      );
+    }
+
+    for (const finding of merged) {
       issues.push(mapFindingToIssue(finding, result.checks));
     }
 

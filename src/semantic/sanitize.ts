@@ -79,9 +79,18 @@ export function sanitizePromptContext(raw: string): SanitizedPromptContext {
   }
 
   // Strip null bytes and control characters that commonly show up in
-  // obfuscated injections.
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping control chars is the point
-  sanitized = sanitized.replace(/[\u0000-\u001F\u007F]/g, " ").trim();
+  // obfuscated injections. Line breaks survive: the context is a structured
+  // block with one element per line, and collapsing them ran the IMAGES and
+  // FORM ELEMENTS entries together into a single paragraph. Runs of spaces
+  // are left alone too: the lines carry verified CSS selectors, and an
+  // attribute value with consecutive spaces must reach the model unchanged.
+  sanitized = sanitized
+    .replace(/\r\n?/g, "\n")
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping control chars is the point
+    .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, " ")
+    .replace(/[ \t]*\n[ \t]*/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 
   return {
     sanitized,
