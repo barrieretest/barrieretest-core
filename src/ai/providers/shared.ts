@@ -164,6 +164,7 @@ export function createChatCompletionsProvider(options: ChatProviderOptions): AIP
     imageDetail,
     timeoutMs: config.timeout ?? DEFAULT_TIMEOUT_MS,
     reasoningEffort: config.reasoningEffort,
+    supportsPromptCacheKey: kind === "mistral" || kind === "openai",
   });
 
   return createAIProvider({ name, model, capabilities, maxTokens, send });

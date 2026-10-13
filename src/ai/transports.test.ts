@@ -316,6 +316,56 @@ describe("chat-completions transport", () => {
     expect(requestBody(calls[1]).reasoning_effort).toBe("medium");
   });
 
+  it("sends prompt_cache_key on mistral and openai and parses cached input tokens", async () => {
+    stubFetch([
+      chatResponse("ok", {
+        usage: {
+          prompt_tokens: 1600,
+          completion_tokens: 20,
+          prompt_tokens_details: { cached_tokens: 1536 },
+        },
+      }),
+    ]);
+
+    const mistral = createProvider("mistral", { apiKey: "test-key", model: "mistral-small-2603" });
+    const response = await mistral.complete!({
+      text: "hi",
+      cacheKey: "barrieretest-semantic-large-0a1b2c3d",
+    });
+
+    expect(requestBody(calls[0]).prompt_cache_key).toBe("barrieretest-semantic-large-0a1b2c3d");
+    expect(response.usage).toEqual({
+      inputTokens: 1600,
+      outputTokens: 20,
+      cachedInputTokens: 1536,
+    });
+
+    const openai = createProvider("openai", { apiKey: "test-key" });
+    await openai.complete!({ text: "hi", cacheKey: "barrieretest-semantic-small-0a1b2c3d" });
+
+    expect(requestBody(calls[1]).prompt_cache_key).toBe("barrieretest-semantic-small-0a1b2c3d");
+  });
+
+  it("omits prompt_cache_key for an arbitrary compatible server and when unset", async () => {
+    stubFetch([chatResponse("ok")]);
+
+    const compatible = createProvider("openai-compatible", {
+      apiKey: "test-key",
+      baseUrl: NEBIUS_URL,
+      model: "openai/gpt-oss-120b",
+    });
+    await compatible.complete!({ text: "hi", cacheKey: "barrieretest-semantic-large-0a1b2c3d" });
+    expect(requestBody(calls[0])).not.toHaveProperty("prompt_cache_key");
+
+    const nebius = createProvider("nebius", { apiKey: "test-key" });
+    await nebius.complete!({ text: "hi", cacheKey: "barrieretest-semantic-large-0a1b2c3d" });
+    expect(requestBody(calls[1])).not.toHaveProperty("prompt_cache_key");
+
+    const mistral = createProvider("mistral", { apiKey: "test-key", model: "mistral-small-2603" });
+    await mistral.complete!({ text: "hi" });
+    expect(requestBody(calls[2])).not.toHaveProperty("prompt_cache_key");
+  });
+
   it("reports truncation when the cut-off answer does not parse as JSON", async () => {
     stubFetch([
       chatChunksResponse(
@@ -709,6 +759,83 @@ describe("anthropic messages transport", () => {
     expect(response.text).toBe(JSON.stringify({ findings: ["b"] }));
     expect(response.finishReason).toBe("tool_use");
     expect(response.usage).toEqual({ inputTokens: 7, outputTokens: 3 });
+  });
+
+  it("ignores the cache key and counts cache reads into the input total", async () => {
+    stubFetch([
+      () =>
+        new Response(
+          JSON.stringify({
+            model: "claude-sonnet-4-20250514",
+            content: [{ type: "text", text: "plain answer" }],
+            usage: { input_tokens: 200, output_tokens: 12, cache_read_input_tokens: 1400 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        ),
+    ]);
+
+    const provider = createProvider("anthropic", { apiKey: "test-key" });
+    const response = await provider.complete!({
+      text: "hi",
+      cacheKey: "barrieretest-semantic-large-0a1b2c3d",
+    });
+
+    // Anthropic caches via `cache_control`, which this transport does not set.
+    expect(requestBody(calls[0])).not.toHaveProperty("prompt_cache_key");
+    // Anthropic reports cache reads beside `input_tokens`; `inputTokens` is
+    // documented as the total that `cachedInputTokens` is part of.
+    expect(response.usage).toEqual({
+      inputTokens: 1600,
+      outputTokens: 12,
+      cachedInputTokens: 1400,
+    });
+  });
+
+  it("adds cache writes to the input total as well", async () => {
+    stubFetch([
+      () =>
+        new Response(
+          JSON.stringify({
+            model: "claude-sonnet-4-20250514",
+            content: [{ type: "text", text: "plain answer" }],
+            usage: {
+              input_tokens: 200,
+              output_tokens: 12,
+              cache_read_input_tokens: 900,
+              cache_creation_input_tokens: 500,
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        ),
+    ]);
+
+    const provider = createProvider("anthropic", { apiKey: "test-key" });
+    const response = await provider.complete!({ text: "hi" });
+
+    expect(response.usage).toEqual({
+      inputTokens: 1600,
+      outputTokens: 12,
+      cachedInputTokens: 900,
+    });
+  });
+
+  it("reports zeros and no cached count when usage carries no token fields", async () => {
+    stubFetch([
+      () =>
+        new Response(
+          JSON.stringify({
+            model: "claude-sonnet-4-20250514",
+            content: [{ type: "text", text: "plain answer" }],
+            usage: {},
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        ),
+    ]);
+
+    const provider = createProvider("anthropic", { apiKey: "test-key" });
+    const response = await provider.complete!({ text: "hi" });
+
+    expect(response.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
   });
 
   it("reports truncation when the forced tool call was cut off", async () => {

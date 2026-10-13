@@ -74,6 +74,13 @@ export interface ModelRequest {
   maxTokens?: number;
   /** Per-request timeout in milliseconds. Defaults to the provider's `timeout`. */
   timeout?: number;
+  /**
+   * Routing hint for the provider's prefix cache, sent as `prompt_cache_key`
+   * where the provider accepts it. Raises the hit rate, never guarantees a
+   * hit. Must not carry anything sensitive: it travels with the request and
+   * identifies the prompt prefix, not the page.
+   */
+  cacheKey?: string;
   /** Caller abort signal, honoured alongside the timeout. */
   signal?: AbortSignal;
 }
@@ -93,7 +100,15 @@ export interface ModelResponse {
   model: string;
   /** Why the model stopped, as the provider reported it, e.g. "stop" or "length". */
   finishReason?: string;
-  usage?: { inputTokens: number; outputTokens: number };
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    /**
+     * Input tokens the provider served from its prefix cache, when it reports
+     * them. Part of `inputTokens`, not additional to it.
+     */
+    cachedInputTokens?: number;
+  };
 }
 
 /**

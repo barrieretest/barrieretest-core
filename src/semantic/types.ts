@@ -142,6 +142,16 @@ export interface SemanticTierMeta {
   provider: string;
   model: string;
   checksRun: string[];
+  /**
+   * Token counts as the provider reported them, when it reported any.
+   * `cachedInputTokens` are the input tokens served from the provider's
+   * prefix cache — part of `inputTokens`, billed at a fraction of the price.
+   */
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens?: number;
+  };
 }
 
 /**

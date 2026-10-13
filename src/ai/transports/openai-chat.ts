@@ -31,6 +31,12 @@ export interface OpenAIChatTransportConfig {
   timeoutMs: number;
   /** Reasoning level to send verbatim; unset lets the capability table decide. */
   reasoningEffort?: string;
+  /**
+   * Whether `ModelRequest.cacheKey` may be sent as `prompt_cache_key`. Only
+   * Mistral and OpenAI document the field; an arbitrary OpenAI-compatible
+   * server may reject an unknown one.
+   */
+  supportsPromptCacheKey?: boolean;
 }
 
 interface ChatMessage {
@@ -68,6 +74,9 @@ interface ChatResponse {
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+    };
   };
 }
 
@@ -77,8 +86,17 @@ interface ChatResponse {
 export function createOpenAIChatTransport(
   config: OpenAIChatTransportConfig
 ): (request: ModelRequest) => Promise<ModelResponse> {
-  const { label, baseUrl, headers, model, maxTokens, temperature, capabilities, imageDetail } =
-    config;
+  const {
+    label,
+    baseUrl,
+    headers,
+    model,
+    maxTokens,
+    temperature,
+    capabilities,
+    imageDetail,
+    supportsPromptCacheKey,
+  } = config;
 
   // The semantic pass is a one-shot structured extraction: reasoning
   // multiplies cost and latency and can exhaust the token budget before the
@@ -122,6 +140,9 @@ export function createOpenAIChatTransport(
         max_tokens: sentMaxTokens,
         temperature,
         ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+        ...(supportsPromptCacheKey && request.cacheKey
+          ? { prompt_cache_key: request.cacheKey }
+          : {}),
         ...(useSchema
           ? {
               response_format: {
@@ -166,6 +187,9 @@ export function createOpenAIChatTransport(
             usage: {
               inputTokens: data.usage.prompt_tokens ?? 0,
               outputTokens: data.usage.completion_tokens ?? 0,
+              ...(typeof data.usage.prompt_tokens_details?.cached_tokens === "number"
+                ? { cachedInputTokens: data.usage.prompt_tokens_details.cached_tokens }
+                : {}),
             },
           }
         : {}),

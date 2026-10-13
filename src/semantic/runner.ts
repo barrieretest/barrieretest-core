@@ -28,7 +28,11 @@ import {
   parseSemanticObject,
   parseSemanticResponse,
 } from "./parse.js";
-import { buildSemanticPrompt, SEMANTIC_SYSTEM_PROMPT } from "./prompt.js";
+import {
+  buildSemanticPrompt,
+  buildSemanticPromptPrefix,
+  SEMANTIC_SYSTEM_PROMPT,
+} from "./prompt.js";
 import { type SanitizedPromptContext, sanitizePromptContext } from "./sanitize.js";
 import { buildSemanticResponseSchema } from "./schema.js";
 import {
@@ -320,6 +324,8 @@ interface TierRunResult {
   parsed: ParsedSemanticResponse;
   provider: string;
   model: string;
+  /** Only the `complete()` path reports usage; `analyzeSemantic()` does not. */
+  usage?: SemanticTierMeta["usage"];
 }
 
 /**
@@ -360,6 +366,30 @@ function assertTierCanSeeScreenshot(entry: PreparedTier): void {
 }
 
 /**
+ * FNV-1a over the constant part of the request. Not a security hash: it only
+ * has to change when the prompt text changes, so a cache key never outlives
+ * the prefix it stands for.
+ */
+function fnv1a(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Stable routing hint for the provider's prefix cache. Derived from the
+ * constant part of the request only — system prompt plus check-dependent
+ * prefix — so two pages audited with the same check set share a key and
+ * nothing page-specific or sensitive leaves with it.
+ */
+function tierCacheKey(tier: SemanticModelTier, promptPrefix: string): string {
+  return `barrieretest-semantic-${tier}-${fnv1a(`${SEMANTIC_SYSTEM_PROMPT}${promptPrefix}`)}`;
+}
+
+/**
  * Parse a tier's text answer. A provider that returns truncated text instead
  * of throwing leaves a bare JSON syntax error as the only symptom, so name
  * the budget that caused it.
@@ -397,27 +427,34 @@ async function runTier(entry: PreparedTier): Promise<TierRunResult> {
     formattedContext: context.sanitized,
   });
 
-  if (provider.complete && capabilities.jsonSchema) {
+  // `complete()` carries the cache key, the maxTokens floor, the timeout and
+  // the usage report, all of which apply whether or not the model can be
+  // schema-constrained; only `responseSchema` depends on that capability.
+  if (provider.complete) {
     const sentMaxTokens = Math.max(config.maxTokens ?? DEFAULT_MAX_TOKENS, SEMANTIC_MIN_MAX_TOKENS);
     const response = await provider.complete({
       system: SEMANTIC_SYSTEM_PROMPT,
       text: prompt,
       images: screenshot ? [{ png: screenshot }] : undefined,
-      responseSchema: buildSemanticResponseSchema(checks.map((c) => c.id)),
+      ...(capabilities.jsonSchema
+        ? { responseSchema: buildSemanticResponseSchema(checks.map((c) => c.id)) }
+        : {}),
       maxTokens: sentMaxTokens,
+      cacheKey: tierCacheKey(tier, buildSemanticPromptPrefix(checks)),
       timeout,
     });
 
     return {
       tier,
       checks,
-      // A model that ignored the schema still returns usable text.
+      // No schema sent, or a model that ignored one: the answer is text.
       parsed:
         response.json !== undefined
           ? parseSemanticObject(response.json)
           : parseTierText(tier, response, sentMaxTokens),
       provider: config.name,
       model: response.model,
+      ...(response.usage ? { usage: response.usage } : {}),
     };
   }
 
@@ -560,6 +597,7 @@ export async function runSemanticAudit(
       provider: result.provider,
       model: result.model,
       checksRun: result.checks.map((c) => c.id),
+      ...(result.usage ? { usage: result.usage } : {}),
     };
   }
 

@@ -600,7 +600,7 @@ Custom checks can override built-ins by reusing the same `id`. This applies only
 
 | Provider | Suggested model | Notes |
 |---|---|---|
-| `mistral` | `mistral-large-4` | Default suggestion in the `init` wizard; `MISTRAL_API_KEY`. `mistral-large-4` is a reasoning model; reasoning is off by default, set `reasoningEffort: "high"` and a larger `maxTokens` to enable it. With a JSON schema, a response the model cuts off mid-JSON raises an error naming `maxTokens` and the budget that was sent; on the text path it still surfaces as a parse error. `mistral-small-2603` is an option for custom small-tier checks |
+| `mistral` | `mistral-large-4` | Default suggestion in the `init` wizard; `MISTRAL_API_KEY`. `mistral-large-4` is a reasoning model; reasoning is off by default, set `reasoningEffort: "high"` and a larger `maxTokens` to enable it. A response the model cuts off mid-JSON raises an error naming `maxTokens` and the budget that was sent, with or without a JSON schema (only providers that expose nothing but the legacy `analyzeSemantic()` still surface a parse error). `mistral-small-2603` is an option for custom small-tier checks |
 | `openai` | `gpt-4o` | Pass a vision-capable model |
 | `anthropic` | `claude-sonnet-4-5` | Pass a vision-capable Claude model |
 | `openai-compatible` | — | Any chat-completions endpoint. Needs `baseUrl` and `model`; capabilities default to text-only, so set `capabilities: { vision: true, jsonSchema: true }` when the model has more |
@@ -611,6 +611,36 @@ move faster than releases, so `capabilities` in the provider config always wins.
 An unknown model id on `mistral`, `openai`, or `anthropic` is assumed to do
 vision and structured output; on `openai-compatible` it is assumed to do
 neither.
+
+#### Prompt caching
+
+Mistral and OpenAI cache prompts automatically, matching on the literal prefix
+of the request and billing a cached input token at a fraction of the input
+price. The semantic prompt is ordered for it: guardrails, check instructions,
+and the response contract come first, and the URL, hardening summary, and page
+context follow under `Page under review:`. Auditing many pages with the same
+check set therefore repeats a prefix of about 1,900 tokens with all built-in
+checks selected.
+
+Each tier also sends `prompt_cache_key` — `barrieretest-semantic-<tier>-<hash
+of the constant prompt>` — as a routing hint that raises the hit rate. It
+carries nothing page-specific, and editing any prompt text changes the hash.
+The field is sent only to `mistral` and `openai`; `openai-compatible` and
+`nebius` may be any server, and Anthropic caches through `cache_control`
+instead, which this client does not set.
+
+As measured in October 2026, Mistral serves no cache hit for a request that
+contains an image, in any position and with or without a schema, while the
+same request without one hits on the second call. Every built-in check except
+`lang-attribute` sends the screenshot, so a default run on Mistral sees no
+caching on the tier that carries it; text-only tiers on Mistral do benefit,
+and OpenAI's cache covers image requests too.
+
+Cache hits show up in the result: `meta.tiers.<tier>.usage` on a standalone
+`semanticAudit()` result, `semanticMeta.tiers.<tier>.usage` on an `audit()`
+result. Both report `inputTokens`, `outputTokens`, and `cachedInputTokens`
+whenever the provider reports them, with the cached count being the part of
+`inputTokens` served from the cache.
 
 ## Cookie banner dismissal
 

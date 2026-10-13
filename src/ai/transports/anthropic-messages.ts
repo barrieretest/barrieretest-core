@@ -57,6 +57,8 @@ interface AnthropicResponse {
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
   };
 }
 
@@ -113,11 +115,23 @@ export function createAnthropicTransport(
 
     const data = JSON.parse(responseText) as AnthropicResponse;
     const finish = data.stop_reason ? { finishReason: data.stop_reason } : {};
+    // `request.cacheKey` has no counterpart here: Anthropic caches on explicit
+    // `cache_control` breakpoints, which this transport does not set.
     const usage = data.usage
       ? {
           usage: {
-            inputTokens: data.usage.input_tokens ?? 0,
+            // Anthropic reports cache reads and cache writes beside
+            // `input_tokens`, not inside it, while `ModelResponse.usage`
+            // documents `inputTokens` as the total that `cachedInputTokens`
+            // is part of.
+            inputTokens:
+              (data.usage.input_tokens ?? 0) +
+              (data.usage.cache_read_input_tokens ?? 0) +
+              (data.usage.cache_creation_input_tokens ?? 0),
             outputTokens: data.usage.output_tokens ?? 0,
+            ...(typeof data.usage.cache_read_input_tokens === "number"
+              ? { cachedInputTokens: data.usage.cache_read_input_tokens }
+              : {}),
           },
         }
       : {};
