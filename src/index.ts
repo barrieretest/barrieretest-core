@@ -94,6 +94,8 @@ export type {
   SemanticTierMeta,
 } from "./semantic/index.js";
 export type {
+  AnnotationRect,
+  AnnotationState,
   AuditEngine,
   AuditOptions,
   AuditResult,
@@ -101,8 +103,10 @@ export type {
   BrowserPage,
   DetailLevel,
   Issue,
+  IssueAnnotation,
   IssueSeverity,
   ScoreInterpretation,
+  ScreenshotMeta,
   SeverityLevel,
   TransformedIssue,
 } from "./types.js";

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Screenshot coordinate map.** `Issue.annotation` reports where an issue's element sits on the page screenshot: the resolved `selector`, a `state` (`"resolved"`, `"ambiguous"`, `"hidden"`, `"page"` for a rule that targets `html` or `body`, `"unresolved"`), a `rect` in whole CSS pixels in document space, a 1-based `mark` shared by all issues on the same element, and `anchored: true` for an element inside a `fixed` or `sticky` ancestor. Engine findings and semantic findings go through the same path, since both arrive as an `Issue.selector`; a semantic location the model wrote as prose comes out `unresolved` and stays in `issues`.
+- `AuditResult.screenshotMeta` with the geometry of the capture — CSS pixel size, `deviceScaleFactor`, viewport, document scroll size and scroll offset at measurement time — so a consumer can place rects on the image without knowing how it was taken.
+- `AuditOptions.annotate` (default `true`). Effective with `captureScreenshot`, the axe engine, and a captured screenshot; one browser round trip measures every selector after baseline processing, read-only. For a URL target with the axe engine, `audit()` now owns the Puppeteer session when annotation is effective, as it already did for `semantic`. `engine: 'pa11y'` and standalone `semanticAudit()` are not annotated. Annotation never fails an audit: a screenshot whose size cannot be read means no annotations, a failed or timed-out measurement leaves every issue `unresolved`, each with one warning starting with `Annotation`. Baseline files and the last-run cache never contain annotations.
+
 ## [0.8.0]
 
 ### Added

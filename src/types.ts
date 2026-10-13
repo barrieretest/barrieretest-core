@@ -42,6 +42,45 @@ export interface SemanticIssueMeta {
 }
 
 /**
+ * Rectangle of an annotated element, in CSS pixels in document space, origin
+ * at the top-left of the full-page screenshot. Whole pixels, rounded outward
+ * from the measured box and clipped to the captured area.
+ */
+export interface AnnotationRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * How well an `Issue.selector` resolved against the measured DOM.
+ * - "resolved": matched exactly one element with a usable rect inside the capture
+ * - "ambiguous": matched more than one element; rect and mark belong to the first match
+ * - "hidden": matched, but the (first) element is not visibly rendered in the capture
+ * - "page": the issue is about the page itself (the selector resolved to `html`
+ *   or `body`, as page-level axe rules do), so there is nothing to box
+ * - "unresolved": selector null/empty, invalid, no match, or measurement failed
+ */
+export type AnnotationState = "resolved" | "ambiguous" | "hidden" | "page" | "unresolved";
+
+/**
+ * Where an issue sits on the page screenshot (see `AuditResult.screenshotMeta`).
+ * Attached by `audit()` when annotation is effective.
+ */
+export interface IssueAnnotation {
+  /** The selector that was resolved (`Issue.selector` at annotation time). */
+  selector: string | null;
+  state: AnnotationState;
+  /** Only for "resolved" and "ambiguous". Clipped to the captured area. */
+  rect?: AnnotationRect;
+  /** Only for "resolved" and "ambiguous". 1-based; issues on the same element share one number. */
+  mark?: number;
+  /** Present (true) when the element or an ancestor is `position: fixed` or `sticky`. */
+  anchored?: true;
+}
+
+/**
  * A single accessibility issue
  */
 export interface Issue {
@@ -67,6 +106,8 @@ export interface Issue {
   ai?: AIAnalysis;
   /** Semantic-check metadata (when produced by `semanticAudit`) */
   semantic?: SemanticIssueMeta;
+  /** Position on the page screenshot (when annotation ran) */
+  annotation?: IssueAnnotation;
 }
 
 /**
@@ -120,6 +161,17 @@ export interface AuditOptions {
    * @default true
    */
   captureScreenshot?: boolean;
+
+  /**
+   * Whether to annotate issues with their position on the screenshot
+   * (`Issue.annotation`) and report the capture geometry
+   * (`AuditResult.screenshotMeta`).
+   *
+   * Effective only when `captureScreenshot` is true, the engine is `'axe'`,
+   * and a screenshot was actually captured. Costs one browser round trip.
+   * @default true
+   */
+  annotate?: boolean;
 
   /**
    * Progress callback for tracking audit status
@@ -215,6 +267,27 @@ export interface AuditOptions {
 }
 
 /**
+ * Geometry of the page screenshot on an `AuditResult`, so a consumer can
+ * place `IssueAnnotation` rects without knowing how the capture was taken.
+ */
+export interface ScreenshotMeta {
+  /** CSS px size of the captured image (PNG pixel size / `deviceScaleFactor`). */
+  width: number;
+  height: number;
+  deviceScaleFactor: number;
+  viewport: { width: number; height: number };
+  fullPage: true;
+  /**
+   * Document scroll size at measurement time, CSS px. Differs from
+   * `width`/`height` when the page grew after the capture or the capture
+   * was truncated.
+   */
+  document: { width: number; height: number };
+  /** Scroll offset at measurement time. Non-zero means rects of anchored elements are unreliable. */
+  scroll: { x: number; y: number };
+}
+
+/**
  * Result of an accessibility audit
  */
 export interface AuditResult {
@@ -238,6 +311,8 @@ export interface AuditResult {
   baseline?: BaselineInfo;
   /** Semantic-pass metadata (if `semantic` option was set) */
   semanticMeta?: SemanticMeta;
+  /** Geometry of `screenshot`, for placing `Issue.annotation` rects (if annotation ran) */
+  screenshotMeta?: ScreenshotMeta;
 }
 
 export type { BrowserPage } from "./browser.js";

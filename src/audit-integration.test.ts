@@ -10,8 +10,12 @@
  * Puppeteer against an inline page.
  */
 
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import puppeteer from "puppeteer";
+import { measureSelectors, readPngSize } from "./annotate/index.js";
 import type { BrowserPage } from "./browser.js";
 import { extractHtmlContext } from "./semantic/context.js";
 import type { Issue } from "./types.js";
@@ -33,6 +37,10 @@ let semanticCalls: SemanticCall[];
 let nextEngineIssues: Issue[];
 let nextSemanticIssues: Issue[];
 let nextSemanticThrows: Error | null;
+/** Screenshot the engine mock hands back; the annotation tests set a real one. */
+let nextEngineScreenshot: Uint8Array | undefined;
+/** One entry per `localizeIssues` call, so the eligibility tests can count them. */
+let localizeCalls: { issueIds: string[] }[];
 let consoleWarnSpy: { calls: unknown[][]; restore: () => void };
 
 const ENGINE_URL = "https://example.test/page";
@@ -52,7 +60,7 @@ mock.module("./engines/axe.js", () => ({
       issues: [...nextEngineIssues],
       documentTitle: "Stub Doc",
       pageUrl: url,
-      screenshot: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      screenshot: nextEngineScreenshot ?? new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
     };
   },
   transformAxeViolation: () => [],
@@ -79,6 +87,15 @@ mock.module("./semantic/runner.js", () => ({
   },
   // Re-export the helper used by other call sites that import it from runner.
   validateFindingsAgainstChecks: () => ({ valid: [], dropped: [] }),
+}));
+
+// Stub localization: it scrolls elements into view and reads the filesystem,
+// so the eligibility tests only need to know whether audit() called it.
+mock.module("./localization/index.js", () => ({
+  localizeIssues: async (_page: unknown, issues: Issue[]) => {
+    localizeCalls.push({ issueIds: issues.map((issue) => issue.id) });
+    return issues;
+  },
 }));
 
 // Stub puppeteer-launch so audit() doesn't try to launch a real browser
@@ -134,6 +151,8 @@ beforeEach(() => {
   nextEngineIssues = [];
   nextSemanticIssues = [];
   nextSemanticThrows = null;
+  nextEngineScreenshot = undefined;
+  localizeCalls = [];
 
   const original = console.warn;
   const calls: unknown[][] = [];
@@ -650,5 +669,410 @@ describe("extractHtmlContext selectors and names (real browser)", () => {
     expect(formElements).toContain(
       `<input> type=text id=${"a".repeat(60)}… name=${"b".repeat(60)}… | label: (none)`
     );
+  });
+});
+
+// ----- localization eligibility -----
+
+describe("audit() localization eligibility", () => {
+  /** A page object target: the caller's page, which localization may use. */
+  const callerPage = (): BrowserPage => ({
+    url: () => ENGINE_URL,
+    title: async () => "Stub Doc",
+    goto: async () => undefined,
+    screenshot: async () => new Uint8Array(),
+    evaluate: (async () => ({})) as unknown as BrowserPage["evaluate"],
+  });
+
+  it("does not localize a URL target when only annotation keeps the page open", async () => {
+    nextEngineIssues = [makeIssue({ id: "engine-a" })];
+
+    // Annotation is on by default, so audit() owns a page here — but that
+    // must not start localization, which scrolls elements into view.
+    const result = await audit(ENGINE_URL, { detail: "fix-ready" });
+
+    expect(localizeCalls).toHaveLength(0);
+    expect(result.issues.map((issue) => issue.id)).toEqual(["engine-a"]);
+  });
+
+  it("still localizes a URL target when the semantic pass owns the page", async () => {
+    nextEngineIssues = [makeIssue({ id: "engine-a" })];
+
+    await audit(ENGINE_URL, {
+      detail: "fix-ready",
+      semantic: { provider: { name: "nebius", apiKey: "stub" } },
+    });
+
+    expect(localizeCalls).toHaveLength(1);
+    expect(localizeCalls[0].issueIds).toEqual(["engine-a"]);
+  });
+
+  it("still localizes a page-object target", async () => {
+    nextEngineIssues = [makeIssue({ id: "engine-a" })];
+
+    await audit(callerPage(), { detail: "fix-ready" });
+
+    expect(localizeCalls).toHaveLength(1);
+  });
+
+  it("does not localize below detail fix-ready", async () => {
+    nextEngineIssues = [makeIssue({ id: "engine-a" })];
+
+    await audit(callerPage(), { detail: "actionable" });
+
+    expect(localizeCalls).toHaveLength(0);
+  });
+});
+
+// ----- issue annotations -----
+
+/**
+ * Fixture whose layout covers every annotation state: a visible image with
+ * two issues on it, a sticky header, a `display: none` block, a
+ * screen-reader-only paragraph clipped to a pixel, a block pushed off the
+ * canvas, a selector that matches three list items, and enough height to make
+ * the full-page capture taller than the viewport.
+ */
+const ANNOTATION_PAGE = `<!doctype html>
+<html lang="de">
+<head>
+  <title>Annotationen – Beispiel</title>
+  <style>
+    body { margin: 0; font: 16px/1.4 system-ui, sans-serif; }
+    #bar { position: sticky; top: 0; height: 60px; background: #123456; color: #fff; }
+    #hero { display: block; margin: 40px; width: 400px; height: 200px; background: #cde; }
+    #cta { display: block; margin: 20px 40px; width: 240px; height: 48px; }
+    #sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    #gone { display: none; width: 300px; height: 100px; }
+    #offcanvas { position: absolute; left: -4000px; top: 300px; width: 300px; height: 50px; }
+    #tall { height: 1600px; }
+    nav li { width: 200px; height: 32px; }
+  </style>
+</head>
+<body>
+  <header id="bar">Kopfzeile</header>
+  <main>
+    <img id="hero" src="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3C%2Fsvg%3E" />
+    <button id="cta" type="button">Jetzt prüfen</button>
+    <p id="sr">Nur für Screenreader</p>
+    <div id="gone">Ausgeblendet</div>
+    <div id="offcanvas">Außerhalb des Bildbereichs</div>
+    <nav><ul><li><a href="/a">A</a></li><li><a href="/b">B</a></li><li><a href="/c">C</a></li></ul></nav>
+    <div id="tall">Langer Inhalt</div>
+  </main>
+</body></html>`;
+
+describe("audit() annotations (real browser)", () => {
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>>;
+  let realPage: Awaited<ReturnType<typeof browser.newPage>>;
+  let fixtureShot: Uint8Array;
+  let metrics: {
+    devicePixelRatio: number;
+    documentHeight: number;
+    hero: { x: number; y: number; width: number; height: number };
+    bar: { x: number; y: number; width: number; height: number };
+  };
+  let result: Awaited<ReturnType<typeof audit>>;
+
+  /**
+   * The real page behind the generic `BrowserPage` surface `audit()` uses.
+   * `overrides` let a test break one method (a failing `evaluate`) or count
+   * the calls annotation makes.
+   */
+  const asBrowserPage = (overrides: Partial<BrowserPage> = {}): BrowserPage => ({
+    url: () => realPage.url(),
+    title: () => realPage.title(),
+    goto: (url: string) => realPage.goto(url),
+    screenshot: (options) =>
+      realPage.screenshot(
+        options as Parameters<typeof realPage.screenshot>[0]
+      ) as Promise<Uint8Array>,
+    evaluate: ((fn: never, arg: never) => realPage.evaluate(fn, arg)) as BrowserPage["evaluate"],
+    ...overrides,
+  });
+
+  /**
+   * Engine findings covering the states: shared element, hidden, ambiguous,
+   * page-level (the `html` and `body` targets of rules such as
+   * `page-has-heading-one`), no selector.
+   */
+  const engineIssues = (): Issue[] => [
+    makeIssue({ id: "page-has-heading-one", selector: "html" }),
+    makeIssue({ id: "landmark-one-main", selector: "body" }),
+    makeIssue({ id: "image-alt", selector: "#hero" }),
+    makeIssue({ id: "image-redundant-alt", selector: "main #hero" }),
+    makeIssue({ id: "hidden-block", selector: "#gone" }),
+    makeIssue({ id: "sr-only-text", selector: "#sr" }),
+    makeIssue({ id: "off-canvas", selector: "#offcanvas" }),
+    makeIssue({ id: "sticky-header", selector: "#bar" }),
+    makeIssue({ id: "list-items", selector: "nav li" }),
+    makeIssue({ id: "page-level", selector: null }),
+  ];
+
+  /** One prose location the model invented, one selector that resolves. */
+  const semanticIssues = (): Issue[] => [
+    makeSemanticIssue({
+      id: "semantic:page-title",
+      selector: "the button below the hero image",
+    }),
+    makeSemanticIssue({ id: "semantic:form-label-clarity", selector: "#cta" }),
+  ];
+
+  const annotationFor = (id: string) => result.issues.find((issue) => issue.id === id)?.annotation;
+
+  beforeAll(async () => {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    realPage = await browser.newPage();
+    await realPage.setViewport({ width: 1280, height: 720 });
+    await realPage.setContent(ANNOTATION_PAGE);
+
+    fixtureShot = await realPage.screenshot({ type: "png", fullPage: true });
+    metrics = await realPage.evaluate(() => {
+      const box = (selector: string) => {
+        const rect = (document.querySelector(selector) as Element).getBoundingClientRect();
+        return {
+          x: rect.left + window.scrollX,
+          y: rect.top + window.scrollY,
+          width: rect.width,
+          height: rect.height,
+        };
+      };
+      return {
+        devicePixelRatio: window.devicePixelRatio,
+        documentHeight: document.documentElement.scrollHeight,
+        hero: box("#hero"),
+        bar: box("#bar"),
+      };
+    });
+
+    nextEngineIssues = engineIssues();
+    nextSemanticIssues = semanticIssues();
+    nextEngineScreenshot = fixtureShot;
+
+    result = await audit(asBrowserPage(), {
+      semantic: { provider: { name: "nebius", apiKey: "stub" } },
+    });
+  }, 60_000);
+
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it("resolves a visible element to a mark and the measured rect", () => {
+    const annotation = annotationFor("image-alt");
+
+    expect(annotation?.state).toBe("resolved");
+    expect(annotation?.selector).toBe("#hero");
+    expect(annotation?.mark).toBe(1);
+    expect(annotation?.rect?.x).toBeCloseTo(metrics.hero.x, 0);
+    expect(annotation?.rect?.y).toBeCloseTo(metrics.hero.y, 0);
+    expect(annotation?.rect?.width).toBeCloseTo(metrics.hero.width, 0);
+    expect(annotation?.rect?.height).toBeCloseTo(metrics.hero.height, 0);
+  });
+
+  it("leaves an issue without a selector unresolved", () => {
+    const annotation = annotationFor("page-level");
+
+    expect(annotation).toEqual({ selector: null, state: "unresolved" });
+  });
+
+  it("keeps a semantic finding whose location is prose, unresolved", () => {
+    const annotation = annotationFor("semantic:page-title");
+
+    expect(annotation?.state).toBe("unresolved");
+    expect(annotation?.rect).toBeUndefined();
+    expect(result.issues.map((issue) => issue.id)).toContain("semantic:page-title");
+  });
+
+  it("annotates a semantic finding whose location is a real selector", () => {
+    expect(annotationFor("semantic:form-label-clarity")?.state).toBe("resolved");
+    expect(annotationFor("semantic:form-label-clarity")?.mark).toBeDefined();
+  });
+
+  it("calls a display:none, a screen-reader-only and an off-canvas element hidden", () => {
+    for (const id of ["hidden-block", "sr-only-text", "off-canvas"]) {
+      expect(annotationFor(id)?.state).toBe("hidden");
+      expect(annotationFor(id)?.rect).toBeUndefined();
+      expect(annotationFor(id)?.mark).toBeUndefined();
+    }
+  });
+
+  it("calls an html- or body-targeted issue page-level, with no rect and no mark", () => {
+    for (const id of ["page-has-heading-one", "landmark-one-main"]) {
+      const annotation = annotationFor(id);
+
+      expect(annotation?.state).toBe("page");
+      expect(annotation?.rect).toBeUndefined();
+      expect(annotation?.mark).toBeUndefined();
+      expect(annotation?.anchored).toBeUndefined();
+    }
+  });
+
+  it("marks a selector with several matches ambiguous, on its first match", () => {
+    const annotation = annotationFor("list-items");
+
+    expect(annotation?.state).toBe("ambiguous");
+    expect(annotation?.rect?.height).toBe(32);
+    expect(annotation?.mark).toBeDefined();
+  });
+
+  it("gives two issues on one element a shared mark, contiguous from 1", () => {
+    expect(annotationFor("image-alt")?.mark).toBe(1);
+    expect(annotationFor("image-redundant-alt")?.mark).toBe(1);
+
+    const marks = result.issues
+      .map((issue) => issue.annotation?.mark)
+      .filter((mark): mark is number => mark !== undefined);
+    const distinct = [...new Set(marks)].sort((a, b) => a - b);
+
+    expect(distinct).toEqual([1, 2, 3, 4]);
+  });
+
+  it("reports the capture geometry in CSS pixels", () => {
+    const png = readPngSize(result.screenshot as Uint8Array);
+
+    expect(result.screenshotMeta?.deviceScaleFactor).toBe(metrics.devicePixelRatio);
+    expect(result.screenshotMeta?.width).toBe(
+      (png as { width: number }).width / metrics.devicePixelRatio
+    );
+    expect(result.screenshotMeta?.height).toBe(
+      (png as { height: number }).height / metrics.devicePixelRatio
+    );
+    expect(result.screenshotMeta?.width).toBe(1280);
+    expect(result.screenshotMeta?.height).toBe(metrics.documentHeight);
+    expect(result.screenshotMeta?.viewport).toEqual({ width: 1280, height: 720 });
+    expect(result.screenshotMeta?.fullPage).toBe(true);
+    expect(result.screenshotMeta?.document.height).toBe(metrics.documentHeight);
+    expect(result.screenshotMeta?.scroll).toEqual({ x: 0, y: 0 });
+    // The fixture is taller than the viewport, so the capture is too.
+    expect(metrics.documentHeight).toBeGreaterThan(720);
+  });
+
+  it("flags a sticky header as anchored at its scroll-0 position", () => {
+    const annotation = annotationFor("sticky-header");
+
+    expect(annotation?.anchored).toBe(true);
+    expect(annotation?.rect).toEqual({
+      x: metrics.bar.x,
+      y: metrics.bar.y,
+      width: metrics.bar.width,
+      height: metrics.bar.height,
+    });
+    expect(annotation?.rect?.y).toBe(0);
+  });
+
+  it("adds no annotation, no geometry and no round trip with annotate: false", async () => {
+    nextEngineIssues = engineIssues();
+    nextEngineScreenshot = fixtureShot;
+    let evaluateCalls = 0;
+
+    const plain = await audit(
+      asBrowserPage({
+        evaluate: ((fn: never, arg: never) => {
+          evaluateCalls += 1;
+          return realPage.evaluate(fn, arg);
+        }) as BrowserPage["evaluate"],
+      }),
+      { annotate: false }
+    );
+
+    expect(evaluateCalls).toBe(0);
+    expect(plain.screenshotMeta).toBeUndefined();
+    expect(plain.issues.every((issue) => issue.annotation === undefined)).toBe(true);
+  });
+
+  it("keeps annotations out of the baseline file and the last-run cache", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "barrieretest-annotate-"));
+    const baselinePath = join(dir, "baseline.json");
+
+    try {
+      nextEngineIssues = engineIssues();
+      nextEngineScreenshot = fixtureShot;
+
+      const annotated = await audit(asBrowserPage(), {
+        baseline: baselinePath,
+        updateBaseline: true,
+      });
+
+      expect(annotated.issues.some((issue) => issue.annotation?.state === "resolved")).toBe(true);
+      expect(readFileSync(baselinePath, "utf-8")).not.toContain("annotation");
+      expect(
+        readFileSync(join(process.cwd(), ".barrieretest", "cache", "last-run.json"), "utf-8")
+      ).not.toContain("annotation");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("degrades to all-unresolved with a warning when the measurement fails", async () => {
+    nextEngineIssues = engineIssues();
+    nextEngineScreenshot = fixtureShot;
+
+    const failed = await audit(
+      asBrowserPage({
+        evaluate: (() => {
+          throw new Error("Execution context was destroyed");
+        }) as unknown as BrowserPage["evaluate"],
+      })
+    );
+
+    expect(failed.issues).toHaveLength(engineIssues().length);
+    expect(failed.issues.every((issue) => issue.annotation?.state === "unresolved")).toBe(true);
+    expect(failed.screenshotMeta).toBeUndefined();
+    // Otherwise a normal result: the score comes from the issues, not from
+    // whether they could be placed on the screenshot.
+    expect(failed.documentTitle).toBe("Stub Doc");
+    expect(failed.score).toBeGreaterThan(0);
+    expect(
+      consoleWarnSpy.calls.some((args) => String(args[0] ?? "").startsWith("Annotation"))
+    ).toBe(true);
+  });
+
+  it("does not annotate when the screenshot is not captured", async () => {
+    nextEngineIssues = engineIssues();
+    nextEngineScreenshot = fixtureShot;
+    let evaluateCalls = 0;
+
+    const plain = await audit(
+      asBrowserPage({
+        evaluate: ((fn: never, arg: never) => {
+          evaluateCalls += 1;
+          return realPage.evaluate(fn, arg);
+        }) as BrowserPage["evaluate"],
+      }),
+      { captureScreenshot: false }
+    );
+
+    expect(evaluateCalls).toBe(0);
+    expect(plain.screenshotMeta).toBeUndefined();
+    expect(plain.issues.every((issue) => issue.annotation === undefined)).toBe(true);
+  });
+
+  it("lets an element override an inherited visibility: hidden without checkVisibility", async () => {
+    const fallbackPage = await browser.newPage();
+    try {
+      await fallbackPage.setContent(`<!doctype html><html><body>
+        <div style="visibility: hidden"><span id="shown" style="visibility: visible">sichtbar</span></div>
+        <div style="visibility: hidden"><span id="inherited">unsichtbar</span></div>
+        <div style="opacity: 0"><span id="faded" style="visibility: visible">transparent</span></div>
+      </body></html>`);
+      await fallbackPage.evaluate(() => {
+        // Force the computed-style fallback used by engines without checkVisibility.
+        delete (Element.prototype as { checkVisibility?: unknown }).checkVisibility;
+      });
+
+      const measurement = await measureSelectors(fallbackPage as unknown as BrowserPage, [
+        "#shown",
+        "#inherited",
+        "#faded",
+      ]);
+
+      expect(measurement.selectors.map((entry) => entry.rendered)).toEqual([true, false, false]);
+    } finally {
+      await fallbackPage.close();
+    }
   });
 });

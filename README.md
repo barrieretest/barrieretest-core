@@ -372,6 +372,7 @@ const pa11yResult = await audit('https://example.com', {
 | `baseline` | `string` | — | Baseline file path |
 | `updateBaseline` | `boolean` | — | Update baseline with results |
 | `captureScreenshot` | `boolean` | `true` | Capture a page screenshot |
+| `annotate` | `boolean` | `true` | Map issues onto the screenshot (see [Annotations](#annotations)) |
 | `onProgress` | `function` | — | Progress callback |
 
 Notes:
@@ -395,8 +396,63 @@ Notes:
   screenshot?: Uint8Array
   timestamp: string
   baseline?: BaselineInfo
+  screenshotMeta?: ScreenshotMeta
 }
 ```
+
+### Annotations
+
+With `annotate` on (the default), every issue carries where its element sits on the page screenshot, and the result carries the geometry of that capture. One browser round trip measures all selectors; a viewer can draw numbered markers from it without knowing how the screenshot was taken.
+
+```typescript
+const result = await audit('https://example.com')
+
+for (const issue of result.issues) {
+  const { state, rect, mark } = issue.annotation ?? {}
+  if (state === 'resolved' && rect) {
+    console.log(`#${mark} at ${rect.x},${rect.y} (${rect.width}×${rect.height})`)
+  }
+}
+```
+
+```typescript
+issue.annotation = {
+  selector: string | null   // the selector that was resolved
+  state: 'resolved' | 'ambiguous' | 'hidden' | 'page' | 'unresolved'
+  rect?: { x, y, width, height }  // CSS px, document space, whole pixels
+  mark?: number             // 1-based marker number
+  anchored?: true           // the element or an ancestor is fixed or sticky
+}
+
+result.screenshotMeta = {
+  width: number             // CSS px size of the image
+  height: number
+  deviceScaleFactor: number // image pixels per CSS pixel
+  viewport: { width, height }
+  fullPage: true
+  document: { width, height }     // scroll size at measurement time
+  scroll: { x, y }                // scroll offset at measurement time
+}
+```
+
+States:
+
+- `resolved` — the selector matched exactly one element with a usable rect inside the capture
+- `ambiguous` — it matched several; `rect` and `mark` describe the first match
+- `hidden` — it matched, but the element is not visibly rendered in the capture (`display: none`, `visibility: hidden`, `opacity: 0`, clipped to a pixel, or outside the captured area). No `rect`, no `mark`
+- `page` — the issue is about the page itself: the selector resolved to `html` or `body`, as page-level axe rules such as `page-has-heading-one`, `landmark-one-main`, `html-has-lang` and `document-title` do. A box around the whole screenshot would say nothing, so there is no `rect` and no `mark`
+- `unresolved` — no selector, an invalid one (a semantic finding whose location is prose lands here), no match, or the measurement failed. No `rect`, no `mark`
+
+Marks are numbered in issue order, one number per element: two issues on the same element share a mark, so a viewer can group them under one marker. Coordinates are CSS pixels in document space, origin at the top-left of the full-page screenshot; multiply by `deviceScaleFactor` for image pixels.
+
+Limitations:
+
+- `engine: 'pa11y'` produces no annotations and no `screenshotMeta`: that engine manages its own browser, so there is no page left to measure
+- standalone `semanticAudit()` does not annotate; its screenshot is viewport-only
+- axe targets inside an iframe or a shadow root arrive as one flattened selector that cannot match, so they are `unresolved`
+- annotation never fails an audit, and the two failure modes differ: a screenshot whose size cannot be read leaves `annotation` undefined on every issue and omits `screenshotMeta`; a measurement that fails or times out leaves every issue `unresolved` and omits `screenshotMeta`. Either way one warning starting with `Annotation` is logged and the rest of the result is normal
+- `detail: 'fix-ready'` localization scrolls elements into view, so when it runs `screenshotMeta.scroll` can be non-zero and the rects of `anchored` elements may not match where they appear in the capture
+- baseline files and the last-run cache never contain annotations
 
 ## Browser pages
 

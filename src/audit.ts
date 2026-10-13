@@ -1,4 +1,5 @@
 import { enhanceWithAI } from "./ai/index.js";
+import { annotateIssues } from "./annotate/index.js";
 import { processAuditWithBaseline } from "./baseline/integration.js";
 import {
   type BrowserPage,
@@ -19,7 +20,14 @@ import {
 } from "./scoring.js";
 import { runSemanticAudit } from "./semantic/runner.js";
 import type { SemanticMeta } from "./semantic/types.js";
-import type { AuditOptions, AuditResult, AuditTarget, Issue, IssueSeverity } from "./types.js";
+import type {
+  AuditOptions,
+  AuditResult,
+  AuditTarget,
+  Issue,
+  IssueSeverity,
+  ScreenshotMeta,
+} from "./types.js";
 
 const severityOrder: IssueSeverity[] = ["minor", "moderate", "serious", "critical"];
 
@@ -72,6 +80,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     headless = true,
     timeout,
     captureScreenshot = true,
+    annotate = true,
     onProgress,
     detail = "actionable",
     minSeverity,
@@ -83,12 +92,18 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     semantic: semanticOptions,
   } = options;
 
+  // Annotation needs the page the engine pass measured, the full-page
+  // screenshot that pass captured, and selectors axe produced, so it only
+  // applies to the axe engine with a screenshot in hand.
+  const annotationEffective = annotate && captureScreenshot && engine === "axe";
+
   let url: string;
   let page: BrowserPage | undefined;
-  // When `semantic` is requested with a URL target, audit() owns the browser
-  // so the engine and semantic passes can share a single page (no second
-  // browser launch). The session is created inside the try/finally below
-  // so any failure before the engine pass still releases it.
+  // When `semantic` or annotation is requested with a URL target, audit()
+  // owns the browser so the engine pass, the semantic pass and the annotation
+  // measurement share a single page (no second browser launch). The session is
+  // created inside the try/finally below so any failure before the engine pass
+  // still releases it.
   //
   // Note: we deliberately do NOT navigate or dismiss cookie banners here.
   // The engine pass (axe / pa11y) does both right after we hand it the page,
@@ -106,7 +121,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
   }
 
   try {
-    if (isUrl(target) && semanticOptions && engine === "axe") {
+    if (isUrl(target) && (semanticOptions || annotationEffective) && engine === "axe") {
       ownedSession = await launchPuppeteerSession({ headless, viewport });
       page = ownedSession.page;
     }
@@ -182,9 +197,15 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
 
     let engineIssues: Issue[] = filterIssues(engineResult.issues, { minSeverity, ignore });
 
-    const shouldLocalize = detail === "fix-ready" && page && localizationOptions?.enabled !== false;
+    // Annotation keeps the page of a URL target open as well, but it must not
+    // change whether localization runs: localization scrolls elements into
+    // view, so it stays limited to the pages it had before — a caller's page
+    // object, or the session the semantic pass makes audit() own.
+    const localizationPage = isUrl(target) && !semanticOptions ? undefined : page;
+    const shouldLocalize =
+      detail === "fix-ready" && localizationPage && localizationOptions?.enabled !== false;
 
-    if (shouldLocalize && page) {
+    if (shouldLocalize && localizationPage) {
       try {
         await onProgress?.({ percent: 70, message: "Localizing issues" });
       } catch {
@@ -198,7 +219,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
         enabledStrategies: localizationOptions?.enabledStrategies,
       };
 
-      engineIssues = await localizeIssues(page, engineIssues, localizationOpts);
+      engineIssues = await localizeIssues(localizationPage, engineIssues, localizationOpts);
     }
 
     if (aiOptions) {
@@ -278,6 +299,20 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
       updateBaseline,
     });
 
+    // Annotation runs last, on copies of the final issues: the score must not
+    // depend on it, and the baseline files and the last-run cache written just
+    // above must never contain annotations.
+    let resultIssues: Issue[] = filteredIssues;
+    let screenshotMeta: ScreenshotMeta | undefined;
+
+    if (annotationEffective && page && engineResult.screenshot) {
+      const annotated = await annotateIssues(page, filteredIssues, engineResult.screenshot, {
+        timeout,
+      });
+      resultIssues = annotated.issues;
+      screenshotMeta = annotated.screenshotMeta;
+    }
+
     const score = calculateScore(filteredIssues);
     const severityLevel = getSeverityLevel(score);
     const scoreInterpretation = getScoreInterpretation(score);
@@ -294,11 +329,12 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
       score,
       severityLevel,
       scoreInterpretation,
-      issues: filteredIssues,
+      issues: resultIssues,
       screenshot: captureScreenshot ? engineResult.screenshot : undefined,
       timestamp: new Date().toISOString(),
       baseline: baselineResult.baseline,
       semanticMeta,
+      screenshotMeta,
     };
   } finally {
     if (ownedSession) {
