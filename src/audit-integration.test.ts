@@ -17,6 +17,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 import puppeteer from "puppeteer";
 import { measureSelectors, readPngSize } from "./annotate/index.js";
 import type { BrowserPage } from "./browser.js";
+import { dismissCookieBanner } from "./cookie-banner.js";
 import { renderHtmlReport } from "./html-report/index.js";
 import { loadLazyContent } from "./lazy-content.js";
 import { extractHtmlContext } from "./semantic/context.js";
@@ -338,6 +339,118 @@ const CONTEXT_PAGE = `<!doctype html>
     <nav class="site-nav is-sticky" style="display:flex" aria-label="Hauptnavigation"><a href="/a">A</a></nav>
   </main>
 </body></html>`;
+
+describe("dismissCookieBanner (real browser)", () => {
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>>;
+
+  beforeAll(async () => {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  /**
+   * A banner whose buttons record which one was clicked and then remove the
+   * banner, as a consent tool would. Buttons appear in the given order; on
+   * graz.at the "only necessary" button comes first, so a loose text match
+   * would click it.
+   */
+  const banner = (windowClass: string, buttons: { id: string; cls: string; text: string }[]) =>
+    `<!doctype html>
+<html lang="de"><head><title>Cookie fixture</title></head><body>
+  <main><h1>Seite</h1></main>
+  <div class="${windowClass}" role="dialog">
+    ${buttons.map((b) => `<a role="button" id="${b.id}" class="${b.cls}">${b.text}</a>`).join("\n    ")}
+  </div>
+  <script>
+    for (const button of document.querySelectorAll("[role=dialog] a")) {
+      button.addEventListener("click", () => {
+        window.clicked = button.id;
+        document.querySelector("[role=dialog]").remove();
+      });
+    }
+  </script>
+</body></html>`;
+
+  async function dismissOn(html: string) {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(html);
+      const dismissed = await dismissCookieBanner(page as unknown as BrowserPage);
+      const clicked = await page.evaluate(
+        () => (window as unknown as { clicked?: string }).clicked ?? null
+      );
+      return { dismissed, clicked };
+    } finally {
+      await page.close();
+    }
+  }
+
+  // Texts no accept pattern knows, so only the cookieconsent selectors can
+  // find these buttons.
+  const deny = { id: "deny", cls: "cc-btn cc-deny", text: "Ablehnen" };
+
+  it("accepts an Osano cookieconsent banner by its allow button", async () => {
+    // Classes as on graz.at (Datareporter on top of cookieconsent).
+    const result = await dismissOn(
+      banner("cc-window cc-banner", [
+        deny,
+        { id: "allow", cls: "cc-btn cc-allow", text: "Zustimmung erteilen" },
+      ])
+    );
+
+    expect(result).toEqual({ dismissed: true, clicked: "allow" });
+  }, 30_000);
+
+  it("closes an informational cookieconsent banner by its dismiss button", async () => {
+    const result = await dismissOn(
+      banner("cc-window cc-banner", [
+        { id: "dismiss", cls: "cc-btn cc-dismiss", text: "Verstanden, weiter" },
+      ])
+    );
+
+    expect(result).toEqual({ dismissed: true, clicked: "dismiss" });
+  }, 30_000);
+
+  it("prefers allow over dismiss when a cookieconsent banner has both", async () => {
+    const result = await dismissOn(
+      banner("cc-window cc-banner", [
+        { id: "dismiss", cls: "cc-btn cc-dismiss", text: "Später" },
+        { id: "allow", cls: "cc-btn cc-allow", text: "Zustimmung erteilen" },
+      ])
+    );
+
+    expect(result).toEqual({ dismissed: true, clicked: "allow" });
+  }, 30_000);
+
+  it("matches German 'Alle Cookies erlauben' and not the necessary-only button", async () => {
+    // No known consent-tool classes: only the text strategy can find it.
+    const result = await dismissOn(
+      banner("consent", [
+        { id: "deny", cls: "", text: "Nur erforderliche Cookies erlauben" },
+        { id: "allow", cls: "", text: "Alle Cookies erlauben" },
+      ])
+    );
+
+    expect(result).toEqual({ dismissed: true, clicked: "allow" });
+  }, 30_000);
+
+  it("matches German 'Alle erlauben'", async () => {
+    const result = await dismissOn(
+      banner("consent", [
+        { id: "deny", cls: "", text: "Nur notwendige" },
+        { id: "allow", cls: "", text: "Alle erlauben" },
+      ])
+    );
+
+    expect(result).toEqual({ dismissed: true, clicked: "allow" });
+  }, 30_000);
+});
 
 describe("extractHtmlContext (real browser)", () => {
   let browser: Awaited<ReturnType<typeof puppeteer.launch>>;

@@ -73,6 +73,10 @@ const KNOWN_CMP_SELECTORS = [
   // Civic Cookie Control
   "#ccc-notify-accept",
   "#ccc-close",
+  // Osano cookieconsent (open source, also behind Datareporter banners such
+  // as graz.at): "allow" on opt-in/opt-out banners, "dismiss" on info ones
+  ".cc-window .cc-allow",
+  ".cc-window .cc-dismiss",
   // Generic patterns commonly used by custom implementations
   "#cookie-accept",
   "#cookies-accept",
@@ -109,6 +113,10 @@ const ACCEPT_BUTTON_TEXTS = [
   "allen zustimmen",
   "einverstanden",
   "alle zulassen",
+  // Only with "alle": "nur erforderliche cookies erlauben" contains
+  // "cookies erlauben" and often comes first in the DOM.
+  "alle cookies erlauben",
+  "alle erlauben",
   "ich stimme zu",
 ];
 
