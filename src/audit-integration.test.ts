@@ -1845,6 +1845,10 @@ describe("lazy content (real audit, real browser)", () => {
   <style>
     body { margin: 0; font: 16px/1.5 system-ui, sans-serif; }
     .spacer { height: 3000px; }
+    /* Chrome loads lazy images up to about 2500 px ahead of the viewport on
+       slow connection estimates; the image sits well beyond that even after
+       a test scrolls to 400 px, so only a scroll-through loads it. */
+    .spacer--far { height: 6000px; }
     #lazy { display: block; width: 400px; height: 300px; }
     #reveal { height: 200px; background: #eee; opacity: 0; }
     #reveal.shown { opacity: 1; }
@@ -1853,7 +1857,7 @@ describe("lazy content (real audit, real browser)", () => {
 <body>
   <main>
     <h1>Lazy content fixture</h1>
-    <div class="spacer"></div>
+    <div class="spacer spacer--far"></div>
     <img id="lazy" src="picture.svg" loading="lazy" alt="A blue rectangle" />
     <div class="spacer"></div>
     <div id="reveal">Revealed when it intersects</div>
