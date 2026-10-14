@@ -9,6 +9,13 @@
  * axe, the semantic context, the screenshot and the annotations all see the
  * same loaded page at scroll position 0.
  *
+ * It also overrides the `auto` case of `content-visibility` on the page,
+ * because Chrome skips rendering content that is marked `auto` and sits
+ * outside the viewport, and a beyond-viewport full-page capture does not
+ * count as on screen: such content is loaded but paints blank. Content that
+ * is deliberately unrendered with `content-visibility: hidden` keeps its
+ * state, so the audit does not see collapsed content as if it were open.
+ *
  * The whole step is best-effort: every failure is swallowed with one warning
  * and the audit continues with whatever loaded.
  */
@@ -61,6 +68,20 @@ export type LazyContentSummary = {
   reachedEnd: boolean;
   /** Images still not `complete` when the wait ended. */
   pendingImages: number;
+  /**
+   * True when the `content-visibility: visible` override is in place on the
+   * page after the step: either added by this run or already there from
+   * an earlier one. False when the step gave up before reaching it or the
+   * stylesheet could not be built (that case also logs one warning).
+   */
+  renderAll: boolean;
+  /**
+   * Elements this run excluded from the override because their computed
+   * `content-visibility` was `hidden`. Zero when the override was already
+   * there, when the browser does not know the property, or when the step
+   * gave up before reaching it.
+   */
+  keptHidden: number;
 };
 
 const DEFAULT_CAPS: LazyContentCaps = {
@@ -156,7 +177,8 @@ async function scrollBackToTop(page: BrowserPage): Promise<void> {
 
 /**
  * Scroll the page through once so lazy content loads, wait briefly for
- * pending images, and return to the top.
+ * pending images, override the `auto` case of `content-visibility` on the
+ * page and return to the top.
  *
  * Only call this for a page the audit itself navigated — a caller-supplied
  * page is left at the scroll position its owner chose.
@@ -180,7 +202,7 @@ export async function loadLazyContent(
   try {
     // One round trip: the loop, the image wait and the scroll back all run
     // inside this single evaluate.
-    return await withTimeout(
+    const result = await withTimeout(
       page.evaluate(async (run: LazyContentRunArgs) => {
         const flags = window as unknown as Record<string, boolean>;
         flags[run.cancelKey] = false;
@@ -274,6 +296,90 @@ export async function loadLazyContent(
 
           const pendingImages = pending().length;
 
+          // Content marked `content-visibility: auto` is loaded but paints
+          // blank outside the viewport, and a full-page capture does not
+          // count as on screen. The override stays for the rest of the
+          // audit, so axe, the screenshot and the annotations are guaranteed
+          // one layout (content the scroll never reached would otherwise
+          // keep its placeholder `contain-intrinsic-size`). Guarded like the
+          // scrolls, so a late continuation cannot mutate a page the audit
+          // has moved on to.
+          //
+          // The override is a constructed stylesheet in
+          // `document.adoptedStyleSheets`, not a `<style>` element: a page
+          // whose Content-Security-Policy restricts `style-src` silently
+          // blocks an inserted `<style>` (its `sheet` stays null), while a
+          // sheet built by script is not subject to that directive. It also
+          // adds no element to the DOM. A fixed `window` key records that it
+          // is in place, so it goes in at most once per page.
+          let renderAll = false;
+          let renderAllError: string | undefined;
+          let keptHidden = 0;
+          const renderAllKey = "__barrieretestRenderAll";
+          const pageFlags = window as unknown as Record<string, unknown>;
+          if (mayScroll()) {
+            if (pageFlags[renderAllKey] === true) {
+              renderAll = true;
+            } else {
+              // Only the `auto` case is overridden. Content that is
+              // deliberately unrendered with `content-visibility: hidden`
+              // stays that way, or the audit would capture and check
+              // collapsed content as if it were open: `hidden="until-found"`
+              // sections are excluded by the attribute selector, author
+              // styles by a marker set below, before the override makes their
+              // computed value `visible` and unreadable.
+              //
+              // The scan is read-only — computed style only, no layout reads
+              // — and checks the step's state as it goes, because a walk over
+              // every element takes a while on a large document. Expiring
+              // mid-walk therefore costs no writes at all.
+              const keepHidden: Element[] = [];
+              let abandoned = false;
+              if ("contentVisibility" in document.documentElement.style) {
+                let seen = 0;
+                for (const element of document.querySelectorAll("*")) {
+                  if (seen % 200 === 0 && !mayScroll()) {
+                    abandoned = true;
+                    break;
+                  }
+                  seen += 1;
+                  if (getComputedStyle(element).contentVisibility === "hidden") {
+                    keepHidden.push(element);
+                  }
+                }
+              }
+
+              // Every write in one synchronous block, and only while the step
+              // is still active: a late continuation must not mutate a page
+              // the audit has moved on to, and the markers have to be in
+              // place before the override makes the hidden elements
+              // indistinguishable.
+              if (!abandoned && mayScroll()) {
+                try {
+                  const sheet = new CSSStyleSheet();
+                  sheet.replaceSync(
+                    ":not([hidden]):not([data-barrieretest-keep-hidden]) { content-visibility: visible !important; }"
+                  );
+                  if (sheet.cssRules.length !== 1) {
+                    throw new Error("the override rule was not parsed");
+                  }
+                  // Markers first, in the same synchronous block: nothing
+                  // renders in between, and no marker is left behind when the
+                  // sheet cannot be built.
+                  for (const element of keepHidden) {
+                    element.setAttribute("data-barrieretest-keep-hidden", "");
+                  }
+                  document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+                  pageFlags[renderAllKey] = true;
+                  keptHidden = keepHidden.length;
+                  renderAll = true;
+                } catch (error) {
+                  renderAllError = error instanceof Error ? error.message : String(error);
+                }
+              }
+            }
+          }
+
           // Ending at the top is an invariant, so this runs even once the
           // budget is spent — but not when Node cancelled us, because it
           // scrolls back to the top itself in that case.
@@ -283,7 +389,7 @@ export async function loadLazyContent(
             await nextFrame();
           }
 
-          return { steps, reachedEnd, pendingImages };
+          return { steps, reachedEnd, pendingImages, renderAll, keptHidden, renderAllError };
         } finally {
           settled = true;
           delete flags[run.cancelKey];
@@ -292,6 +398,13 @@ export async function loadLazyContent(
       nodeTimeoutMs,
       `Lazy content loading timed out after ${nodeTimeoutMs}ms`
     );
+    const { renderAllError, ...summary } = result;
+    if (renderAllError !== undefined) {
+      console.warn(
+        `Lazy content could not force rendering of content-visibility: auto content: ${renderAllError}`
+      );
+    }
+    return summary;
   } catch (error) {
     console.warn(
       `Lazy content loading failed: ${error instanceof Error ? error.message : "Unknown error"}`
@@ -302,6 +415,6 @@ export async function loadLazyContent(
       await cancelInPage(page, cancelKey);
     }
     await scrollBackToTop(page);
-    return { steps: 0, reachedEnd: false, pendingImages: 0 };
+    return { steps: 0, reachedEnd: false, pendingImages: 0, renderAll: false, keptHidden: 0 };
   }
 }

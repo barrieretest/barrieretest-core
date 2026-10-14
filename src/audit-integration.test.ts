@@ -1755,6 +1755,85 @@ describe("lazy content (real audit, real browser)", () => {
   </script>
 </body></html>`;
 
+  /**
+   * A second fixture for the `content-visibility: auto` case: the image loads
+   * eagerly but Chrome skips rendering the subtree outside the viewport, so
+   * without the override it paints blank in the full-page capture. The
+   * `contain-intrinsic-size` matches the image box, so the placeholder and
+   * the rendered content have the same height.
+   *
+   * Next to it, the two ways content is deliberately unrendered, each with a
+   * coloured block the capture would show if the override reached it: the
+   * browser's own `hidden="until-found"` and an author style. Their intrinsic
+   * size matches their content too, so every position below them is the same
+   * whether they render or not.
+   */
+  const CV_FIXTURE = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Content-visibility fixture</title>
+  <style>
+    body { margin: 0; background: #fff; font: 16px/1.5 system-ui, sans-serif; }
+    .spacer { height: 3000px; }
+    #skipped { content-visibility: auto; contain-intrinsic-size: 400px 300px; }
+    #picture { display: block; width: 400px; height: 300px; }
+    #author-hidden { content-visibility: hidden; contain-intrinsic-size: 400px 300px; }
+    #until-found { contain-intrinsic-size: 400px 300px; }
+    /* Full width, so the box centre is inside the coloured area. */
+    .panel { height: 300px; color: #fff; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Content-visibility fixture</h1>
+    <div class="spacer"></div>
+    <div id="skipped">
+      <img id="picture" src="picture.svg" alt="A blue rectangle" />
+    </div>
+    <div id="author-hidden">
+      <div class="panel" style="background: #cc3333">Collapsed by an author style</div>
+    </div>
+    <div id="until-found" hidden="until-found">
+      <div class="panel" style="background: #33cc33">Collapsed until found</div>
+    </div>
+  </main>
+</body></html>`;
+
+  /**
+   * A third fixture for the layout the override leaves behind: a
+   * `content-visibility: auto` section whose `contain-intrinsic-size`
+   * placeholder is 500 px shorter than its content, so everything below it
+   * sits in a different place depending on whether the subtree renders.
+   * Below it, an image without `alt` — a real axe finding on an element with
+   * a distinctive colour, so its annotation rect can be checked against the
+   * capture.
+   */
+  const LAYOUT_FIXTURE = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Layout fixture</title>
+  <style>
+    body { margin: 0; background: #fff; font: 16px/1.5 system-ui, sans-serif; }
+    /* Measured with this viewport: an \`auto\` subtree 1200 px below the fold
+       still renders, one 3000 px down is skipped — so this far it is. */
+    .spacer { height: 3000px; }
+    #grows { content-visibility: auto; contain-intrinsic-size: 400px 100px; }
+    #grows .inner { height: 600px; background: #eee; }
+    #target { display: block; width: 400px; height: 300px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Layout fixture</h1>
+    <div class="spacer"></div>
+    <div id="grows"><div class="inner">Tall content behind a short placeholder</div></div>
+    <div class="spacer"></div>
+    <img id="target" src="picture.svg" />
+  </main>
+</body></html>`;
+
   /** What the fixture looks like right now, read from the live page. */
   const readState = (page: Awaited<ReturnType<typeof browser.newPage>>) =>
     page.evaluate(() => {
@@ -1772,6 +1851,9 @@ describe("lazy content (real audit, real browser)", () => {
   let browser: Awaited<ReturnType<typeof puppeteer.launch>>;
   let fixtureDir: string;
   let fixtureUrl: string;
+  let cvFixtureUrl: string;
+  let cspFixtureUrl: string;
+  let layoutFixtureUrl: string;
 
   beforeAll(async () => {
     mock.module("./engines/axe.js", () => realAxe);
@@ -1782,6 +1864,24 @@ describe("lazy content (real audit, real browser)", () => {
     const fixturePath = join(fixtureDir, "fixture.html");
     writeFileSync(fixturePath, FIXTURE);
     fixtureUrl = `file://${fixturePath}`;
+    const cvFixturePath = join(fixtureDir, "cv-fixture.html");
+    writeFileSync(cvFixturePath, CV_FIXTURE);
+    cvFixtureUrl = `file://${cvFixturePath}`;
+    // The same page behind a policy that blocks every stylesheet inserted
+    // after it. A meta policy does not apply to the fixture's own <style>,
+    // which comes first, so only the audit's override is at stake.
+    const cspFixturePath = join(fixtureDir, "csp-fixture.html");
+    writeFileSync(
+      cspFixturePath,
+      CV_FIXTURE.replace(
+        "</style>",
+        `</style>\n  <meta http-equiv="Content-Security-Policy" content="style-src 'none'" />`
+      )
+    );
+    cspFixtureUrl = `file://${cspFixturePath}`;
+    const layoutFixturePath = join(fixtureDir, "layout-fixture.html");
+    writeFileSync(layoutFixturePath, LAYOUT_FIXTURE);
+    layoutFixtureUrl = `file://${layoutFixturePath}`;
 
     browser = await puppeteer.launch({
       headless: true,
@@ -1852,6 +1952,13 @@ describe("lazy content (real audit, real browser)", () => {
       expect(state.scrollY).toBe(400);
       expect(state.imageComplete).toBe(false);
       expect(state.revealOpacity).toBe("0");
+      // A page we did not navigate is not mutated either: no render-all
+      // override, so it keeps the `content-visibility` limitation.
+      const overrides = await page.evaluate(() => ({
+        flag: (window as unknown as Record<string, unknown>).__barrieretestRenderAll,
+        sheets: document.adoptedStyleSheets.length,
+      }));
+      expect(overrides).toEqual({ flag: undefined, sheets: 0 });
     } finally {
       await page.close();
     }
@@ -1938,6 +2045,206 @@ describe("lazy content (real audit, real browser)", () => {
     // #36c is the fixture image; anything else means a blank box.
     expect(await atCenter(loaded.screenshot)).toEqual({ r: 0x33, g: 0x66, b: 0xcc });
     expect(await atCenter(unloaded.screenshot)).not.toEqual({ r: 0x33, g: 0x66, b: 0xcc });
+  }, 120_000);
+
+  it("renders content-visibility: auto content in the screenshot audit() returns", async () => {
+    // Measured with the subtree forced to render, which is the layout the
+    // audit captures; the placeholder has the same height, so the position
+    // holds for the unloaded capture too.
+    const probe = await browser.newPage();
+    let center: { x: number; y: number };
+    try {
+      await probe.setViewport({ width: 1280, height: 720 });
+      await probe.goto(cvFixtureUrl, { waitUntil: "networkidle2" });
+      center = await probe.evaluate(() => {
+        (document.getElementById("skipped") as HTMLElement).style.contentVisibility = "visible";
+        const rect = (
+          document.getElementById("picture") as HTMLImageElement
+        ).getBoundingClientRect();
+        return {
+          x: rect.x + window.scrollX + rect.width / 2,
+          y: rect.y + window.scrollY + rect.height / 2,
+        };
+      });
+    } finally {
+      await probe.close();
+    }
+
+    const rendered = await audit(cvFixtureUrl);
+    const skipped = await audit(cvFixtureUrl, { loadLazyContent: false });
+
+    const scale = rendered.screenshotMeta?.deviceScaleFactor ?? 1;
+    const atCenter = (png: Uint8Array | undefined) => {
+      if (!png) throw new Error("Audit returned no screenshot");
+      return samplePixel(png, Math.round(center.x * scale), Math.round(center.y * scale));
+    };
+
+    // #36c is the fixture image; anything else means skipped rendering.
+    expect(await atCenter(rendered.screenshot)).toEqual({ r: 0x33, g: 0x66, b: 0xcc });
+    expect(await atCenter(skipped.screenshot)).not.toEqual({ r: 0x33, g: 0x66, b: 0xcc });
+  }, 120_000);
+
+  it("renders content-visibility: auto content behind a style-src policy", async () => {
+    // An inserted <style> would be dropped silently here (its sheet stays
+    // null); the override is a constructed sheet, which the policy does not
+    // govern.
+    const probe = await browser.newPage();
+    let center: { x: number; y: number };
+    try {
+      await probe.setViewport({ width: 1280, height: 720 });
+      await probe.goto(cspFixtureUrl, { waitUntil: "networkidle2" });
+      center = await probe.evaluate(() => {
+        const rect = (
+          document.getElementById("picture") as HTMLImageElement
+        ).getBoundingClientRect();
+        return {
+          x: rect.x + window.scrollX + rect.width / 2,
+          y: rect.y + window.scrollY + rect.height / 2,
+        };
+      });
+    } finally {
+      await probe.close();
+    }
+
+    const rendered = await audit(cspFixtureUrl);
+    const scale = rendered.screenshotMeta?.deviceScaleFactor ?? 1;
+    if (!rendered.screenshot) throw new Error("Audit returned no screenshot");
+    const pixel = await samplePixel(
+      rendered.screenshot,
+      Math.round(center.x * scale),
+      Math.round(center.y * scale)
+    );
+
+    expect(pixel).toEqual({ r: 0x33, g: 0x66, b: 0xcc });
+  }, 120_000);
+
+  it("leaves content-visibility: hidden content unrendered", async () => {
+    // The boxes keep their intrinsic size whether or not their content
+    // renders, so one measurement describes both captures.
+    const probe = await browser.newPage();
+    let centers: { author: { x: number; y: number }; untilFound: { x: number; y: number } };
+    try {
+      await probe.setViewport({ width: 1280, height: 720 });
+      await probe.goto(cvFixtureUrl, { waitUntil: "networkidle2" });
+      centers = await probe.evaluate(() => {
+        const centerOf = (id: string) => {
+          const rect = (document.getElementById(id) as HTMLElement).getBoundingClientRect();
+          return {
+            x: rect.x + window.scrollX + rect.width / 2,
+            y: rect.y + window.scrollY + rect.height / 2,
+          };
+        };
+        return { author: centerOf("author-hidden"), untilFound: centerOf("until-found") };
+      });
+    } finally {
+      await probe.close();
+    }
+
+    const rendered = await audit(cvFixtureUrl);
+    const scale = rendered.screenshotMeta?.deviceScaleFactor ?? 1;
+    const at = (point: { x: number; y: number }) => {
+      if (!rendered.screenshot) throw new Error("Audit returned no screenshot");
+      return samplePixel(
+        rendered.screenshot,
+        Math.round(point.x * scale),
+        Math.round(point.y * scale)
+      );
+    };
+
+    // Only the boxes themselves paint, so their area shows the page
+    // background; the coloured panel inside each of them would mean the
+    // override reached it (verified: a `*` selector paints both).
+    expect(await at(centers.author)).toEqual({ r: 0xff, g: 0xff, b: 0xff });
+    expect(await at(centers.untilFound)).toEqual({ r: 0xff, g: 0xff, b: 0xff });
+
+    // The DOM state the rest of the audit sees, on a page of our own: the
+    // audit closes the page it navigated itself.
+    const page = await browser.newPage();
+    try {
+      await page.setViewport({ width: 1280, height: 720 });
+      await page.goto(cvFixtureUrl, { waitUntil: "networkidle2" });
+      const summary = await loadLazyContent(page);
+      expect(summary.renderAll).toBe(true);
+      // Both boxes: the walk reads computed values, so it marks the
+      // `hidden="until-found"` box too, which the selector excludes anyway.
+      expect(summary.keptHidden).toBe(2);
+
+      const state = await page.evaluate(() => {
+        const cv = (id: string) =>
+          getComputedStyle(document.getElementById(id) as HTMLElement).contentVisibility;
+        const panelShown = (id: string) =>
+          (
+            (document.getElementById(id) as HTMLElement).firstElementChild as HTMLElement
+          ).checkVisibility();
+        return {
+          skipped: cv("skipped"),
+          author: cv("author-hidden"),
+          untilFound: cv("until-found"),
+          authorPanelShown: panelShown("author-hidden"),
+          untilFoundPanelShown: panelShown("until-found"),
+        };
+      });
+
+      expect(state.skipped).toBe("visible");
+      expect(state.author).toBe("hidden");
+      expect(state.untilFound).toBe("hidden");
+      expect(state.authorPanelShown).toBe(false);
+      expect(state.untilFoundPanelShown).toBe(false);
+    } finally {
+      await page.close();
+    }
+  }, 120_000);
+
+  it("annotates on the same layout the screenshot shows", async () => {
+    // Where the image sits once the skipped subtree renders, which is the
+    // layout the whole audit works on with the override in place.
+    const probe = await browser.newPage();
+    let expected: { x: number; y: number; width: number; height: number };
+    try {
+      await probe.setViewport({ width: 1280, height: 720 });
+      await probe.goto(layoutFixtureUrl, { waitUntil: "networkidle2" });
+      expected = await probe.evaluate(() => {
+        (document.getElementById("grows") as HTMLElement).style.contentVisibility = "visible";
+        const rect = (document.getElementById("target") as HTMLElement).getBoundingClientRect();
+        return {
+          x: rect.x + window.scrollX,
+          y: rect.y + window.scrollY,
+          width: rect.width,
+          height: rect.height,
+        };
+      });
+    } finally {
+      await probe.close();
+    }
+
+    const result = await audit(layoutFixtureUrl);
+
+    const issue = result.issues.find((candidate) => candidate.selector?.includes("#target"));
+    const rect = issue?.annotation?.rect;
+    if (!rect) throw new Error("The image without alt was not annotated");
+    expect(issue?.annotation?.state).toBe("resolved");
+
+    // The rect describes the grown layout, not the 100 px placeholder: the
+    // override went in before anything measured. Annotation rounds rects
+    // outward to whole pixels, hence the floor/ceil.
+    expect(rect.x).toBe(Math.floor(expected.x));
+    expect(rect.y).toBe(Math.floor(expected.y));
+    expect(rect.x + rect.width).toBe(Math.ceil(expected.x + expected.width));
+    expect(rect.y + rect.height).toBe(Math.ceil(expected.y + expected.height));
+
+    // And the capture agrees: #36c is the image, white would mean the
+    // screenshot was taken on a layout 500 px shorter than the measured one.
+    const scale = result.screenshotMeta?.deviceScaleFactor ?? 1;
+    if (!result.screenshot) throw new Error("Audit returned no screenshot");
+    const center = await samplePixel(
+      result.screenshot,
+      Math.round((rect.x + rect.width / 2) * scale),
+      Math.round((rect.y + rect.height / 2) * scale)
+    );
+    expect(center).toEqual({ r: 0x33, g: 0x66, b: 0xcc });
+
+    // Nothing grew between the capture and the measurement either.
+    expect(result.screenshotMeta?.height).toBe(result.screenshotMeta?.document.height);
   }, 120_000);
 
   it("stays inside its budget and stops scrolling when frames never fire", async () => {

@@ -745,6 +745,8 @@ whenever the provider reports them, with the cached count being the part of
 
 With `loadLazyContent` on (the default), a page the audit navigated is scrolled through once after the cookie banner is dismissed and before anything is measured, so images with `loading="lazy"`, script-based lazy loaders and reveal-on-scroll effects below the first viewport have loaded. One viewport per step, at most 20 000 CSS px or 40 steps, a short settle per step, then up to 2 s for images that are still loading, all inside an overall budget of about 6 s. The page ends back at scroll position 0, so axe, the semantic context, the screenshot and the annotations all see the same loaded page. The step never fails an audit: an error or timeout costs one warning starting with `Lazy content` and the audit continues with whatever loaded.
 
+The step also adds one constructed stylesheet to `document.adoptedStyleSheets` (at most once per page; unlike a `<style>` element it is not blocked by a page's `style-src` Content-Security-Policy, and it adds no element to the DOM) that forces `content-visibility: visible !important`, and leaves it there for the rest of the audit: content marked `content-visibility: auto` is loaded but paints blank outside the viewport, so it would be empty in the full-page capture, and a capture-only override would give the screenshot a different layout than the one axe and the annotations measured. Only the `auto` case is overridden. Content that is deliberately unrendered with `content-visibility: hidden` stays hidden, so a collapsed section is not audited as if it were open: `hidden="until-found"` elements are excluded by the selector, and elements whose computed `content-visibility` is `hidden` are found in one pass before the stylesheet goes in and excluded by a marker attribute `data-barrieretest-keep-hidden` (`keptHidden` in the summary counts them). An element a site switches to `content-visibility: hidden` only after that pass — in a scroll handler on the way back to the top, say — keeps no marker and is rendered by the override; marking the `auto` elements instead would put the attribute on rendered elements, where it would show up in their axe snippets. This is the step's only DOM mutation, and it happens only on pages the audit navigated.
+
 The step runs whenever the audit itself navigates: the axe engine navigates only when the page is not already at the target URL, the pa11y engine always navigates, and a standalone `semanticAudit(url)` launches its own page. So a page you pass in that is already at the target URL is not scrolled with the axe engine — it keeps the scroll position you left it at — while `engine: 'pa11y'` navigates it and then scrolls it.
 
 Because more content is loaded, an audit can now report issues on elements that stayed blank before, which can shift existing baselines. Set `loadLazyContent: false` to skip the step. Scroll-triggered pop-ups can end up in the capture, content that loads later than the image wait stays unloaded, and a page with scroll hijacking may not reach its end within the caps.
@@ -752,7 +754,7 @@ Because more content is loaded, an audit can now report issues on elements that 
 ```typescript
 import { loadLazyContent } from '@barrieretest/core'
 
-const { steps, reachedEnd, pendingImages } = await loadLazyContent(page)
+const { steps, reachedEnd, pendingImages, renderAll, keptHidden } = await loadLazyContent(page)
 ```
 
 ## Cookie banner dismissal
