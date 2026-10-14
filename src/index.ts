@@ -35,6 +35,8 @@ export type {
   Pa11yRunResult,
 } from "./engines/pa11y.js";
 export { runPa11y } from "./engines/pa11y.js";
+export type { HtmlReportLocale, HtmlReportOptions } from "./html-report/index.js";
+export { HTML_REPORT_LOCALES, renderHtmlReport } from "./html-report/index.js";
 export type {
   LocalizationConfidence,
   LocalizationOptions,

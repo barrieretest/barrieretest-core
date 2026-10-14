@@ -1,6 +1,11 @@
 import { audit } from "../audit.js";
 import { CACHE_DIR, getLastRun } from "../baseline/cache.js";
 import { readBaseline, updateBaseline, writeBaseline } from "../baseline/write.js";
+import {
+  type HtmlReportLocale,
+  HTML_REPORT_LOCALES,
+  renderHtmlReport,
+} from "../html-report/index.js";
 import { formatActionable, formatFixReady, formatMinimal } from "../report.js";
 import type { SemanticMeta, SemanticModelTier } from "../semantic/types.js";
 import type { AuditEngine, AuditOptions, DetailLevel, Issue, IssueSeverity } from "../types.js";
@@ -52,6 +57,8 @@ export interface ParsedArgs {
   ignore?: string[];
   baseline?: string;
   json?: boolean;
+  html?: string;
+  htmlLocale?: HtmlReportLocale;
   semantic?: boolean;
   semanticProvider?: string;
   semanticModel?: string;
@@ -185,6 +192,22 @@ function parseAuditFlags(args: string[], startIndex: number, result: ParsedArgs)
       i++;
     } else if (arg === "--json") {
       result.json = true;
+    } else if (arg === "--html") {
+      // No resolver validates this one later, so an empty file name is
+      // rejected here rather than writing to a path of "".
+      const file = requireFlagValue(arg, nextArg);
+      if (file.trim() === "") throw new Error(`Flag ${arg} requires a value`);
+      result.html = file;
+      i++;
+    } else if (arg === "--html-locale") {
+      const locale = requireFlagValue(arg, nextArg);
+      if (!HTML_REPORT_LOCALES.includes(locale as HtmlReportLocale)) {
+        throw new Error(
+          `Invalid ${arg} '${locale}'. Must be one of: ${HTML_REPORT_LOCALES.join(", ")}`
+        );
+      }
+      result.htmlLocale = locale as HtmlReportLocale;
+      i++;
     } else if (arg === "-o" || arg === "--output") {
       result.output = nextArg;
       i++;
@@ -470,6 +493,8 @@ Audit options:
   -b, --baseline <file>         Compare against baseline
   --json                        Output JSON
   -o, --output <file>           Write JSON results to file
+  --html <file>                 Write a static HTML report (screenshot with markers)
+  --html-locale <lang>          Report label language: en | de (default: en)
   --headless <bool>             Run headless (default: true)
 
 Semantic AI options (opt-in; any --semantic-* flag enables semantic mode):
@@ -559,6 +584,13 @@ async function runAudit(args: ParsedArgs, deps: RunAuditDeps): Promise<CliResult
 
   const result = await audit(args.url, options);
 
+  if (args.html) {
+    const { writeFileSync, mkdirSync } = await import("node:fs");
+    const { dirname } = await import("node:path");
+    mkdirSync(dirname(args.html), { recursive: true });
+    writeFileSync(args.html, renderHtmlReport(result, { locale: args.htmlLocale }));
+  }
+
   if (args.json || args.output) {
     const json = JSON.stringify(result, null, 2);
     if (args.output) {
@@ -582,6 +614,10 @@ async function runAudit(args: ParsedArgs, deps: RunAuditDeps): Promise<CliResult
     addIssueLines(lines, result.issues, detail);
     lines.push("");
     lines.push(`  ${result.issues.length} issue${result.issues.length === 1 ? "" : "s"} found`);
+  }
+
+  if (args.html) {
+    lines.push(`  HTML report: ${args.html}`);
   }
 
   if (result.baseline) {

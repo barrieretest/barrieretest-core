@@ -67,6 +67,7 @@ npx barrieretest https://example.com --json
 npx barrieretest https://example.com -d minimal
 npx barrieretest https://example.com -s serious
 npx barrieretest https://example.com -o results.json
+npx barrieretest https://example.com --html report.html
 npx barrieretest https://example.com --engine pa11y
 ```
 
@@ -453,6 +454,46 @@ Limitations:
 - annotation never fails an audit, and the two failure modes differ: a screenshot whose size cannot be read leaves `annotation` undefined on every issue and omits `screenshotMeta`; a measurement that fails or times out leaves every issue `unresolved` and omits `screenshotMeta`. Either way one warning starting with `Annotation` is logged and the rest of the result is normal
 - `detail: 'fix-ready'` localization scrolls elements into view, so when it runs `screenshotMeta.scroll` can be non-zero and the rects of `anchored` elements may not match where they appear in the capture
 - baseline files and the last-run cache never contain annotations
+
+## HTML report
+
+`renderHtmlReport(result)` turns an audit result into one self-contained HTML file: the full-page screenshot with a numbered marker on every located element, and beside it the issue list grouped by marker. It opens offline, can be attached to an email or a CI run, and can be handed to a client as it is.
+
+```typescript
+import { writeFileSync } from 'node:fs'
+import { audit, renderHtmlReport } from '@barrieretest/core'
+
+const result = await audit('https://example.com')
+writeFileSync('report.html', renderHtmlReport(result))
+writeFileSync('bericht.html', renderHtmlReport(result, { locale: 'de' }))
+```
+
+From the CLI:
+
+```bash
+npx barrieretest https://example.com --html report.html
+npx barrieretest https://example.com --html report.html --html-locale de
+```
+
+`--html` creates parent directories like `-o` and combines with `--json` and `-o`. `--html-locale` takes `en` (default) or `de`.
+
+The report contains:
+
+- a header with the audited URL, the page title, the audit timestamp, the score with its interpretation, the counts per severity, and the semantic provider and model per tier when a semantic pass ran
+- a findings-by-rule table under the counts: one row per rule id with its title, severity and number of occurrences, worst severity and most frequent rule first — the executive summary for a page where one rule accounts for hundreds of issues
+- the screenshot with one marker per located element: a two-tone ring around the element's rect and a numbered badge, placed in percentages of `screenshotMeta`, so markers stay on their elements at any rendered size. From 1024 px the screenshot panel is sticky, at most one viewport tall and scrolls on its own, so it stays in view while the list scrolls; following a marker link scrolls it to that marker
+- the issue list: one group per marker, then page-level issues, then issues that could not be placed, each with its state in words. Every issue shows severity, rule id, source, description, help, help link, failure summary, the first node's HTML snippet (truncated to 500 characters), and for semantic findings confidence and suggestion. The element's selector stands once in its marker group's heading; page-level and not-located cards carry it themselves
+- a print stylesheet, so the browser's print or Save as PDF produces a legible document
+
+`locale` changes the report's own labels and, with `de`, the score interpretation (a German title and description per severity level, since the library writes that text in English); issue texts stay as the engine or the model wrote them.
+
+The renderer is a pure function: no browser, no file system, no network, and the same result always produces the same string (the timestamp shown is the result's). Options and behaviour:
+
+- **No JavaScript.** Navigation between markers and list entries is links and `:target` only.
+- **Nothing is loaded.** The screenshot is inlined as a `data:` URL and the CSS sits in a `<style>` element; the document carries `Content-Security-Policy: default-src 'none'; img-src data:; style-src 'unsafe-inline'`. Because that policy blocks scripts, auditing a generated report with `audit()` needs a page with `page.setBypassCSP(true)` — axe-core is injected as a script.
+- **Everything from the page is escaped.** Descriptions, selectors, snippets, suggestions, the document title and the URL are HTML-escaped; only `http:` and `https:` URLs become links, and only a positive integer `annotation.mark` with a usable `rect` becomes a marker (anything else is listed as not located), since marks end up in element ids and link targets.
+- **Degrades.** Without `screenshotMeta` (pa11y, `annotate: false`) the screenshot renders without markers and the list ungrouped; without a screenshot only the list renders.
+- On a dense page the marker badges overlap, and the inlined screenshot makes reports of long pages several megabytes.
 
 ## Browser pages
 

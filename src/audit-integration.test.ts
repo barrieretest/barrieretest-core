@@ -10,13 +10,14 @@
  * Puppeteer against an inline page.
  */
 
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import puppeteer from "puppeteer";
 import { measureSelectors, readPngSize } from "./annotate/index.js";
 import type { BrowserPage } from "./browser.js";
+import { renderHtmlReport } from "./html-report/index.js";
 import { extractHtmlContext } from "./semantic/context.js";
 import type { Issue } from "./types.js";
 
@@ -45,7 +46,20 @@ let consoleWarnSpy: { calls: unknown[][]; restore: () => void };
 
 const ENGINE_URL = "https://example.test/page";
 
-mock.module("./engines/axe.js", () => ({
+/**
+ * The real engine, captured as values before the stub replaces the module —
+ * mocking rebinds the module's own exports, including the transform
+ * `runAxeCore` calls internally. The report's end-to-end test puts both back
+ * for its own run, so one test in this file drives the whole pipeline
+ * without a mocked engine.
+ */
+const realAxeModule = await import("./engines/axe.js");
+const realAxe = {
+  runAxeCore: realAxeModule.runAxeCore,
+  transformAxeViolation: realAxeModule.transformAxeViolation,
+};
+
+const axeStubModule = {
   runAxeCore: async (
     url: string,
     options: { page?: unknown }
@@ -64,7 +78,9 @@ mock.module("./engines/axe.js", () => ({
     };
   },
   transformAxeViolation: () => [],
-}));
+};
+
+mock.module("./engines/axe.js", () => axeStubModule);
 
 mock.module("./semantic/runner.js", () => ({
   runSemanticAudit: async (runContext: { url: string; pagePrepared?: boolean }) => {
@@ -1074,5 +1090,593 @@ describe("audit() annotations (real browser)", () => {
     } finally {
       await fallbackPage.close();
     }
+  });
+});
+
+/**
+ * The HTML report is the reference consumer of the coordinate map: if it can
+ * place every marker from `Issue.annotation` and `screenshotMeta` alone, any
+ * viewer can. These tests render a report from a real annotated audit, load
+ * it in the browser and measure what the markers actually cover.
+ *
+ * The report's own Content-Security-Policy (`default-src 'none'`) blocks
+ * script injection, which is exactly the point of it — so the axe pass over
+ * the report runs on a page with `setBypassCSP(true)`.
+ */
+describe("renderHtmlReport (real browser)", () => {
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>>;
+  let fixturePage: Awaited<ReturnType<typeof browser.newPage>>;
+  let reportPage: Awaited<ReturnType<typeof browser.newPage>>;
+  let result: Awaited<ReturnType<typeof audit>>;
+  let reportDir: string;
+  let reportPath: string;
+
+  beforeAll(async () => {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    fixturePage = await browser.newPage();
+    await fixturePage.setViewport({ width: 1280, height: 720 });
+    await fixturePage.setContent(ANNOTATION_PAGE);
+
+    nextEngineIssues = [
+      makeIssue({ id: "page-has-heading-one", selector: "html" }),
+      makeIssue({ id: "image-alt", impact: "critical", selector: "#hero" }),
+      makeIssue({ id: "image-redundant-alt", selector: "main #hero" }),
+      makeIssue({ id: "button-name", impact: "serious", selector: "#cta" }),
+      makeIssue({ id: "list-items", selector: "nav li" }),
+      makeIssue({ id: "hidden-block", impact: "minor", selector: "#gone" }),
+      makeIssue({ id: "no-selector", selector: null }),
+      makeSemanticIssue({
+        id: "semantic:alt-text-quality",
+        selector: "#bar",
+        semantic: { checkType: "alt-text-quality", confidence: 0.74, suggestion: "Benenne es." },
+      }),
+    ];
+    nextEngineScreenshot = await fixturePage.screenshot({ type: "png", fullPage: true });
+
+    result = await audit({
+      url: () => fixturePage.url(),
+      title: () => fixturePage.title(),
+      goto: (url: string) => fixturePage.goto(url),
+      screenshot: (options) =>
+        fixturePage.screenshot(
+          options as Parameters<typeof fixturePage.screenshot>[0]
+        ) as Promise<Uint8Array>,
+      evaluate: ((fn: never, arg: never) =>
+        fixturePage.evaluate(fn, arg)) as BrowserPage["evaluate"],
+    });
+
+    reportDir = mkdtempSync(join(tmpdir(), "barrieretest-html-report-"));
+    reportPath = join(reportDir, "report.html");
+    writeFileSync(reportPath, renderHtmlReport(result));
+
+    reportPage = await browser.newPage();
+    await reportPage.setBypassCSP(true);
+    await reportPage.goto(`file://${reportPath}`);
+  }, 60_000);
+
+  afterAll(async () => {
+    await browser?.close();
+    if (reportDir) rmSync(reportDir, { recursive: true, force: true });
+  });
+
+  /**
+   * A report document in its own page, so a test can render from a crafted
+   * result without disturbing the shared one.
+   */
+  const openReport = async (html: string, viewport: { width: number; height: number }) => {
+    const page = await browser.newPage();
+    await page.setViewport(viewport);
+    await page.setContent(html, { waitUntil: "load" });
+    return page;
+  };
+
+  /** The real audit's result with the issues a single test needs. */
+  const resultWith = (issues: Issue[]) => ({ ...result, issues });
+
+  /** Every marker's rendered box against its rect scaled to the rendered image. */
+  const measureGeometry = (page: Awaited<ReturnType<typeof browser.newPage>>) =>
+    page.evaluate(() => {
+      const image = document.querySelector(".shot__frame img") as HTMLImageElement;
+      const imageRect = image.getBoundingClientRect();
+      return {
+        image: {
+          left: imageRect.left + window.scrollX,
+          top: imageRect.top + window.scrollY,
+          width: imageRect.width,
+          height: imageRect.height,
+        },
+        markers: [...document.querySelectorAll(".marker")].map((element) => {
+          const rect = element.getBoundingClientRect();
+          return {
+            id: element.id,
+            left: rect.left + window.scrollX,
+            top: rect.top + window.scrollY,
+            width: rect.width,
+            height: rect.height,
+          };
+        }),
+      };
+    });
+
+  const measureMarkers = async (containerWidth: number) => {
+    await reportPage.setViewport({ width: containerWidth, height: 900 });
+    return measureGeometry(reportPage);
+  };
+
+  for (const containerWidth of [1280, 640]) {
+    it(`places every marker on its element at ${containerWidth} CSS px`, async () => {
+      const meta = result.screenshotMeta;
+      if (!meta) throw new Error("expected screenshotMeta");
+      const { image, markers } = await measureMarkers(containerWidth);
+      const scale = image.width / meta.width;
+
+      expect(markers.length).toBeGreaterThan(0);
+      for (const marker of markers) {
+        const mark = Number(marker.id.replace("marker-", ""));
+        const rect = result.issues.find((issue) => issue.annotation?.mark === mark)?.annotation
+          ?.rect;
+        if (!rect) throw new Error(`no rect for ${marker.id}`);
+
+        expect(Math.abs(marker.left - image.left - rect.x * scale)).toBeLessThanOrEqual(1);
+        expect(Math.abs(marker.top - image.top - rect.y * scale)).toBeLessThanOrEqual(1);
+        expect(Math.abs(marker.width - rect.width * scale)).toBeLessThanOrEqual(1);
+        expect(Math.abs(marker.height - rect.height * scale)).toBeLessThanOrEqual(1);
+      }
+    });
+  }
+
+  it("moves focus to the group when a marker is followed, and back again", async () => {
+    await reportPage.setViewport({ width: 1280, height: 900 });
+
+    await reportPage.click("#marker-1");
+    expect(await reportPage.evaluate(() => document.activeElement?.id)).toBe("group-1");
+
+    await reportPage.click('a[href="#marker-1"]');
+    expect(await reportPage.evaluate(() => document.activeElement?.id)).toBe("marker-1");
+  });
+
+  it("has a group for every marker and a marker link for every group", async () => {
+    const pairs = await reportPage.evaluate(() => ({
+      markers: [...document.querySelectorAll(".marker")].map((element) => element.id),
+      groups: [...document.querySelectorAll(".group__title[id]")].map((element) => element.id),
+      backLinks: [...document.querySelectorAll(".group__link")].map((element) =>
+        element.getAttribute("href")
+      ),
+    }));
+
+    expect(pairs.markers.length).toBe(pairs.groups.length);
+    for (const marker of pairs.markers) {
+      expect(pairs.groups).toContain(marker.replace("marker-", "group-"));
+      expect(pairs.backLinks).toContain(`#${marker}`);
+    }
+  });
+
+  it("passes its own axe audit with zero violations", async () => {
+    await reportPage.setViewport({ width: 1280, height: 900 });
+    const axeModule = (await import("axe-core")) as unknown as {
+      source?: string;
+      default?: { source: string };
+    };
+    const axeSource = axeModule.source ?? axeModule.default?.source;
+    if (!axeSource) throw new Error("Unable to load axe-core source.");
+
+    await reportPage.evaluate((source: string) => {
+      const script = document.createElement("script");
+      script.textContent = source;
+      (document.head ?? document.documentElement).appendChild(script);
+    }, axeSource);
+
+    const violations = await reportPage.evaluate(async () => {
+      const runtime = globalThis as unknown as {
+        axe: { run: (context: Document) => Promise<{ violations: { id: string }[] }> };
+      };
+      const results = await runtime.axe.run(document);
+      return results.violations.map((violation) => violation.id);
+    });
+
+    expect(violations).toEqual([]);
+  });
+
+  it("reflows at 320 CSS px without horizontal scrolling", async () => {
+    await reportPage.setViewport({ width: 320, height: 800 });
+    const overflow = await reportPage.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth
+    );
+
+    expect(overflow).toBeLessThanOrEqual(1);
+  });
+
+  /**
+   * A 4 by 4 px element: the marker box is exactly the rect, with no minimum
+   * size that would make the outline lie about where the element is. The hit
+   * area comes from the marker's pseudo-element instead.
+   */
+  for (const containerWidth of [1280, 640]) {
+    it(`matches a tiny rect exactly at ${containerWidth} CSS px`, async () => {
+      const meta = result.screenshotMeta;
+      if (!meta) throw new Error("expected screenshotMeta");
+      const rect = { x: 300, y: 400, width: 4, height: 4 };
+      const page = await openReport(
+        renderHtmlReport(
+          resultWith([
+            {
+              ...result.issues[0],
+              annotation: { selector: "#dot", state: "resolved", mark: 1, rect },
+            },
+          ])
+        ),
+        { width: containerWidth, height: 900 }
+      );
+
+      try {
+        const { image, markers } = await measureGeometry(page);
+        const scale = image.width / meta.width;
+
+        expect(markers).toHaveLength(1);
+        expect(Math.abs(markers[0].left - image.left - rect.x * scale)).toBeLessThanOrEqual(1);
+        expect(Math.abs(markers[0].top - image.top - rect.y * scale)).toBeLessThanOrEqual(1);
+        expect(Math.abs(markers[0].width - rect.width * scale)).toBeLessThanOrEqual(1);
+        expect(Math.abs(markers[0].height - rect.height * scale)).toBeLessThanOrEqual(1);
+
+        // The hit area is on the pseudo-element, not on the outlined box.
+        const hitArea = await page.evaluate(() => {
+          const style = getComputedStyle(
+            document.querySelector(".marker") as HTMLElement,
+            "::before"
+          );
+          return { width: Number.parseFloat(style.width), height: Number.parseFloat(style.height) };
+        });
+        expect(hitArea.width).toBeGreaterThanOrEqual(24);
+        expect(hitArea.height).toBeGreaterThanOrEqual(24);
+      } finally {
+        await page.close();
+      }
+    });
+  }
+
+  /**
+   * Side by side the screenshot panel is sticky, at most one viewport tall
+   * and scrolls on its own; following "Show marker N" has to bring a marker
+   * near the bottom of a tall capture into the panel's visible box, with no
+   * script involved.
+   */
+  it("scrolls the sticky panel to a marker far down the capture", async () => {
+    const meta = result.screenshotMeta;
+    if (!meta) throw new Error("expected screenshotMeta");
+    const rect = { x: 40, y: meta.height - 140, width: 200, height: 40 };
+    const page = await openReport(
+      renderHtmlReport(
+        resultWith([
+          {
+            ...result.issues[0],
+            annotation: { selector: "#footer-note", state: "resolved", mark: 1, rect },
+          },
+        ])
+      ),
+      { width: 1440, height: 900 }
+    );
+
+    try {
+      const panel = await page.evaluate(() => {
+        const shot = document.querySelector(".shot") as HTMLElement;
+        const style = getComputedStyle(shot);
+        return {
+          position: style.position,
+          overflowY: style.overflowY,
+          tabIndex: shot.tabIndex,
+          labelled: !!document.getElementById(shot.getAttribute("aria-labelledby") ?? ""),
+          scrollable: shot.scrollHeight > shot.clientHeight,
+          height: shot.clientHeight,
+        };
+      });
+
+      expect(panel.position).toBe("sticky");
+      expect(panel.overflowY).toBe("auto");
+      expect(panel.tabIndex).toBe(0);
+      expect(panel.labelled).toBe(true);
+      expect(panel.scrollable).toBe(true);
+      expect(panel.height).toBeLessThanOrEqual(900);
+
+      await page.click('a[href="#marker-1"]');
+
+      const scrolled = await page.evaluate(
+        () => (document.querySelector(".shot") as HTMLElement).scrollTop
+      );
+      expect(scrolled).toBeGreaterThan(0);
+
+      const seen = await page.evaluate(() => {
+        const box = (element: Element) => {
+          const rect = element.getBoundingClientRect();
+          return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right };
+        };
+        return {
+          marker: box(document.querySelector(".marker") as HTMLElement),
+          panel: box(document.querySelector(".shot") as HTMLElement),
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+        };
+      });
+
+      // Inside the panel's visible box …
+      expect(seen.marker.top).toBeGreaterThanOrEqual(seen.panel.top - 1);
+      expect(seen.marker.bottom).toBeLessThanOrEqual(seen.panel.bottom + 1);
+      // … and inside the viewport.
+      expect(seen.marker.top).toBeGreaterThanOrEqual(-1);
+      expect(seen.marker.bottom).toBeLessThanOrEqual(seen.viewport.height + 1);
+      expect(seen.marker.left).toBeGreaterThanOrEqual(-1);
+      expect(seen.marker.right).toBeLessThanOrEqual(seen.viewport.width + 1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("makes the screenshot panel a normal block below 1024 CSS px", async () => {
+    const page = await openReport(renderHtmlReport(result), { width: 900, height: 800 });
+
+    try {
+      const style = await page.evaluate(() => {
+        const shot = document.querySelector(".shot") as HTMLElement;
+        const computed = getComputedStyle(shot);
+        return { position: computed.position, maxHeight: computed.maxHeight };
+      });
+
+      expect(style.position).toBe("static");
+      expect(style.maxHeight).toBe("none");
+    } finally {
+      await page.close();
+    }
+  });
+
+  /**
+   * Result text can be one unbroken token — a minified selector, a long URL,
+   * a data URI in a snippet. All of it has to wrap, in either locale.
+   */
+  const LONG = "x".repeat(200);
+
+  for (const locale of ["en", "de"] as const) {
+    it(`wraps unbroken result text at 320 CSS px (${locale})`, async () => {
+      const page = await openReport(
+        renderHtmlReport(
+          {
+            ...resultWith([
+              {
+                ...result.issues[0],
+                id: LONG,
+                description: LONG,
+                help: LONG,
+                helpUrl: `https://example.com/${LONG}`,
+                failureSummary: LONG,
+                selector: LONG,
+                nodes: [{ html: `<div class="${LONG}"></div>` }],
+                semantic: { checkType: LONG, confidence: 0.5, suggestion: LONG },
+                annotation: {
+                  selector: LONG,
+                  state: "resolved",
+                  mark: 1,
+                  rect: { x: 10, y: 20, width: 300, height: 100 },
+                },
+              },
+            ]),
+            url: `https://example.com/${LONG}`,
+            documentTitle: LONG,
+          },
+          { locale }
+        ),
+        { width: 320, height: 800 }
+      );
+
+      try {
+        const overflow = await page.evaluate(() => {
+          const limit = document.documentElement.clientWidth;
+          const wide = [
+            ...document.querySelectorAll(
+              ".facts dd, .score__title, .score__desc, .summary, .rules th, .rules td, .issue__headline, .issue__desc, .fields dd, .code, pre, .group__meta code"
+            ),
+          ]
+            .filter((element) => element.getBoundingClientRect().right > limit + 1)
+            .map((element) => element.className || element.tagName);
+          return {
+            page: document.documentElement.scrollWidth - limit,
+            wide,
+          };
+        });
+
+        expect(overflow.wide).toEqual([]);
+        expect(overflow.page).toBeLessThanOrEqual(1);
+      } finally {
+        await page.close();
+      }
+    });
+  }
+
+  /**
+   * Criterion 4 in a parsed DOM rather than in the string: load a report
+   * rendered from hostile text and ask the browser what elements exist.
+   */
+  it("renders hostile result text as inert nodes in the parsed DOM", async () => {
+    const payload =
+      '<script>alert(1)</script>"><img src=x onerror=alert(1)><iframe src=x></iframe>';
+    const page = await openReport(
+      renderHtmlReport({
+        ...resultWith(
+          result.issues.map((issue) => ({
+            ...issue,
+            description: payload,
+            help: payload,
+            helpUrl: "javascript:alert(1)",
+            failureSummary: payload,
+            selector: payload,
+            nodes: [{ html: payload }],
+            semantic: { checkType: payload, confidence: 0.5, suggestion: payload },
+          }))
+        ),
+        url: payload,
+        documentTitle: payload,
+      }),
+      { width: 1280, height: 900 }
+    );
+
+    try {
+      const dom = await page.evaluate(() => ({
+        scripts: document.querySelectorAll("script").length,
+        iframes: document.querySelectorAll("iframe").length,
+        strayImages: [...document.querySelectorAll("img")].filter(
+          (image) => !image.closest(".shot__frame")
+        ).length,
+        images: document.querySelectorAll("img").length,
+        eventHandlers: [...document.querySelectorAll("*")]
+          .flatMap((element) => [...element.attributes].map((attribute) => attribute.name))
+          .filter((name) => name.startsWith("on")),
+        badHrefs: [...document.querySelectorAll("a[href]")]
+          .map((anchor) => anchor.getAttribute("href") ?? "")
+          .filter((href) => !/^(#|https?:\/\/)/.test(href)),
+        alerted: typeof (window as unknown as { __alerted?: boolean }).__alerted,
+        text: document.body.textContent ?? "",
+      }));
+
+      expect(dom.scripts).toBe(0);
+      expect(dom.iframes).toBe(0);
+      expect(dom.strayImages).toBe(0);
+      expect(dom.images).toBe(1);
+      expect(dom.eventHandlers).toEqual([]);
+      expect(dom.badHrefs).toEqual([]);
+      // The payload is there — as text.
+      expect(dom.text).toContain("<script>alert(1)</script>");
+      expect(dom.text).toContain("javascript:alert(1)");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("writes the report from the CLI, in the requested locale", async () => {
+    const { parseArgs, runCli } = await import("./cli/index.js");
+    const target = join(reportDir, "nested", "cli-report.html");
+
+    nextEngineIssues = [makeIssue({ id: "image-alt", selector: "#hero" })];
+    nextEngineScreenshot = await fixturePage.screenshot({ type: "png", fullPage: true });
+
+    const cli = await runCli(
+      parseArgs(["https://example.test/page", "--html", target, "--html-locale", "de"])
+    );
+
+    const written = readFileSync(target, "utf8");
+    expect(written.startsWith("<!doctype html>")).toBe(true);
+    expect(written).toContain('<html lang="de">');
+    expect(written).toContain("Bericht zur Barrierefreiheit");
+    expect(cli.message).toContain(`HTML report: ${target}`);
+  }, 30_000);
+});
+
+/**
+ * The whole pipeline once, with no engine mock: real axe-core on a local
+ * `file://` fixture, real annotation, real report. Isolated in its own
+ * describe, which swaps the stub module for the real engine while it runs and
+ * puts the stub back afterwards, so the mocked describes above are untouched.
+ */
+describe("renderHtmlReport end to end (real audit, real browser)", () => {
+  const FIXTURE = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Report pipeline fixture</title>
+  <style>
+    body { margin: 0; font: 16px/1.5 system-ui, sans-serif; }
+    #hero { display: block; margin: 24px; width: 320px; height: 180px; background: #cde; }
+    #cta { display: block; margin: 24px; width: 220px; height: 44px; }
+    #tall { height: 1400px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Report pipeline fixture</h1>
+    <img id="hero" src="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3C%2Fsvg%3E" />
+    <button id="cta" type="button"></button>
+    <div id="tall">Langer Inhalt</div>
+  </main>
+</body></html>`;
+
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>>;
+  let fixtureDir: string;
+  let auditResult: Awaited<ReturnType<typeof audit>>;
+  let reportPage: Awaited<ReturnType<typeof browser.newPage>>;
+
+  beforeAll(async () => {
+    mock.module("./engines/axe.js", () => realAxe);
+
+    fixtureDir = mkdtempSync(join(tmpdir(), "barrieretest-report-e2e-"));
+    const fixturePath = join(fixtureDir, "fixture.html");
+    writeFileSync(fixturePath, FIXTURE);
+
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    const fixturePage = await browser.newPage();
+    await fixturePage.setViewport({ width: 1280, height: 720 });
+    await fixturePage.goto(`file://${fixturePath}`);
+
+    auditResult = await audit(fixturePage);
+
+    reportPage = await browser.newPage();
+    await reportPage.setViewport({ width: 1280, height: 900 });
+    await reportPage.setBypassCSP(true);
+    await reportPage.setContent(renderHtmlReport(auditResult), { waitUntil: "load" });
+  }, 120_000);
+
+  afterAll(async () => {
+    await browser?.close();
+    if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
+    mock.module("./engines/axe.js", () => axeStubModule);
+  });
+
+  it("finds real issues and places a marker for every located one", async () => {
+    expect(auditResult.issues.length).toBeGreaterThan(0);
+    expect(auditResult.screenshotMeta).toBeDefined();
+    // Real axe rule ids, so this cannot pass on the stub's findings.
+    expect(auditResult.issues.map((issue) => issue.id).sort()).toEqual([
+      "button-name",
+      "image-alt",
+    ]);
+    expect(auditResult.documentTitle).toBe("Report pipeline fixture");
+
+    const located = new Set(
+      auditResult.issues
+        .map((issue) => issue.annotation)
+        .filter((annotation) => annotation?.mark !== undefined && annotation?.rect)
+        .map((annotation) => `marker-${annotation?.mark}`)
+    );
+    expect(located.size).toBeGreaterThan(0);
+
+    const markers = await reportPage.evaluate(() =>
+      [...document.querySelectorAll(".marker")].map((element) => element.id)
+    );
+    expect(new Set(markers)).toEqual(located);
+  });
+
+  it("passes its own axe audit with zero violations", async () => {
+    const axeModule = (await import("axe-core")) as unknown as {
+      source?: string;
+      default?: { source: string };
+    };
+    const axeSource = axeModule.source ?? axeModule.default?.source;
+    if (!axeSource) throw new Error("Unable to load axe-core source.");
+
+    await reportPage.evaluate((source: string) => {
+      const script = document.createElement("script");
+      script.textContent = source;
+      (document.head ?? document.documentElement).appendChild(script);
+    }, axeSource);
+
+    const violations = await reportPage.evaluate(async () => {
+      const runtime = globalThis as unknown as {
+        axe: { run: (context: Document) => Promise<{ violations: { id: string }[] }> };
+      };
+      const results = await runtime.axe.run(document);
+      return results.violations.map((violation) => violation.id);
+    });
+
+    expect(violations).toEqual([]);
   });
 });

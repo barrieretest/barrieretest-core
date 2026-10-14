@@ -410,6 +410,40 @@ describe("parseArgs (missing semantic flag values)", () => {
     expect(args.semanticChecks).toEqual([]);
   });
 
+  it("rejects --html without a value, naming the flag", () => {
+    expect(() => parseArgs(["https://example.com", "--html"])).toThrow(
+      "Flag --html requires a value"
+    );
+    expect(() => parseArgs(["https://example.com", "--html", "--json"])).toThrow(
+      "Flag --html requires a value"
+    );
+  });
+
+  it("rejects --html with an empty file name", () => {
+    expect(() => parseArgs(["https://example.com", "--html", ""])).toThrow(
+      "Flag --html requires a value"
+    );
+    expect(() => parseArgs(["https://example.com", "--html", "   "])).toThrow(
+      "Flag --html requires a value"
+    );
+  });
+
+  it("rejects --html-locale without a value and with an unknown value", () => {
+    expect(() => parseArgs(["https://example.com", "--html-locale"])).toThrow(
+      "Flag --html-locale requires a value"
+    );
+    expect(() => parseArgs(["https://example.com", "--html-locale", "fr"])).toThrow(
+      "Invalid --html-locale 'fr'. Must be one of: en, de"
+    );
+  });
+
+  it("parses --html and --html-locale", () => {
+    const args = parseArgs(["https://example.com", "--html", "report.html", "--html-locale", "de"]);
+
+    expect(args.html).toBe("report.html");
+    expect(args.htmlLocale).toBe("de");
+  });
+
   it("leaves the non-semantic flags untouched", () => {
     const args = parseArgs(["https://example.com", "-o", "results.json", "--json"]);
 
