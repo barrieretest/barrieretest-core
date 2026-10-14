@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0]
+
 ### Added
 
 - **Screenshot coordinate map.** `Issue.annotation` reports where an issue's element sits on the page screenshot: the resolved `selector`, a `state` (`"resolved"`, `"ambiguous"`, `"hidden"`, `"page"` for a rule that targets `html` or `body`, `"unresolved"`), a `rect` in whole CSS pixels in document space, a 1-based `mark` shared by all issues on the same element, and `anchored: true` for an element inside a `fixed` or `sticky` ancestor. Engine findings and semantic findings go through the same path, since both arrive as an `Issue.selector`; a semantic location the model wrote as prose comes out `unresolved` and stays in `issues`.
@@ -20,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Marker numbers follow the page, not the issue list.** `Issue.annotation.mark` is numbered by the marked element's `rect` — top edge ascending, then left edge, then first appearance in `issues` for a tie — so marker 1 is the topmost marked element and the numbers read top to bottom on the screenshot. One number per element and contiguity from 1 are unchanged, as is the order of `issues`; a consumer that relied on marks running in issue order (within this unreleased coordinate map) must not.
 - **Audit results can include content that was previously unloaded.** Because the page is now scrolled through before auditing, lazy images and reveal-on-scroll sections are part of the DOM axe sees and of the screenshot, so a page can report issues it did not report before and existing baselines can shift. Set `loadLazyContent: false` for the old behavior.
+
+### Fixed
+
+- **Cookie banners built on the open-source cookieconsent library are dismissed** (known selectors `.cc-window .cc-allow`, then `.cc-window .cc-dismiss`), as are banners whose accept button reads "Alle Cookies erlauben" or "Alle erlauben". Before, such banners (graz.at, for example) stayed in the capture and their own buttons produced findings and markers. Both German phrases name "alle", so a "Nur erforderliche Cookies erlauben" button is not clicked.
 
 ## [0.8.0]
 
