@@ -2,3 +2,4 @@ node_modules/
 dist/
 .barrieretest/
 *.tgz
+package-lock.json
