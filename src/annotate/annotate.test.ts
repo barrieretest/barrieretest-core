@@ -389,16 +389,123 @@ describe("applyAnnotations", () => {
     expect(annotated[2].annotation?.state).toBe("unresolved");
   });
 
-  it("numbers marks in final issue order", () => {
-    const issues = [makeIssue({ selector: ".second" }), makeIssue({ selector: ".first" })];
+  it("numbers marks top-down, whatever order the issues arrive in", () => {
+    const issues = [
+      makeIssue({ id: "bottom", selector: ".bottom" }),
+      makeIssue({ id: "middle", selector: ".middle" }),
+      makeIssue({ id: "top", selector: ".top" }),
+    ];
     const resolved = resolveSelectorAnnotations(
-      [".second", ".first"],
-      makeMeasurement([visibleEntry({ elementIndex: 3 }), visibleEntry({ elementIndex: 1 })]),
+      [".bottom", ".middle", ".top"],
+      makeMeasurement([
+        visibleEntry({ elementIndex: 3, rect: { x: 0, y: 900, width: 200, height: 40 } }),
+        visibleEntry({ elementIndex: 1, rect: { x: 0, y: 400, width: 200, height: 40 } }),
+        visibleEntry({ elementIndex: 2, rect: { x: 0, y: 10, width: 200, height: 40 } }),
+      ]),
+      CAPTURE
+    );
+
+    const annotated = applyAnnotations(issues, resolved);
+
+    expect(annotated.map((issue) => issue.id)).toEqual(["bottom", "middle", "top"]);
+    expect(annotated.map((issue) => issue.annotation?.mark)).toEqual([3, 2, 1]);
+  });
+
+  it("orders elements sharing a top edge by their left edge", () => {
+    const issues = [makeIssue({ selector: ".right" }), makeIssue({ selector: ".left" })];
+    const resolved = resolveSelectorAnnotations(
+      [".right", ".left"],
+      makeMeasurement([
+        visibleEntry({ elementIndex: 0, rect: { x: 600, y: 120, width: 100, height: 40 } }),
+        visibleEntry({ elementIndex: 1, rect: { x: 40, y: 120, width: 100, height: 40 } }),
+      ]),
+      CAPTURE
+    );
+
+    expect(applyAnnotations(issues, resolved).map((issue) => issue.annotation?.mark)).toEqual([
+      2, 1,
+    ]);
+  });
+
+  it("falls back to the first appearance in the issue list for identical rects", () => {
+    const rect = { x: 100, y: 300, width: 80, height: 20 };
+    const issues = [makeIssue({ selector: ".a" }), makeIssue({ selector: ".b" })];
+    const resolved = resolveSelectorAnnotations(
+      [".a", ".b"],
+      makeMeasurement([
+        visibleEntry({ elementIndex: 7, rect }),
+        visibleEntry({ elementIndex: 2, rect }),
+      ]),
       CAPTURE
     );
 
     expect(applyAnnotations(issues, resolved).map((issue) => issue.annotation?.mark)).toEqual([
       1, 2,
+    ]);
+  });
+
+  it("orders by the rounded, clipped rect consumers see, ignoring size", () => {
+    // Raw tops 10.9 and 10.2 both floor to 10; a negative x clips to 0. After
+    // that the left edge decides, and the larger box does not win the tie.
+    const issues = [
+      makeIssue({ selector: ".right" }),
+      makeIssue({ selector: ".left" }),
+      makeIssue({ selector: ".big" }),
+    ];
+    const resolved = resolveSelectorAnnotations(
+      [".right", ".left", ".big"],
+      makeMeasurement([
+        visibleEntry({ elementIndex: 0, rect: { x: 300.4, y: 10.9, width: 40, height: 20 } }),
+        visibleEntry({ elementIndex: 1, rect: { x: -12, y: 10.2, width: 60, height: 20 } }),
+        visibleEntry({ elementIndex: 2, rect: { x: 300, y: 10, width: 400, height: 300 } }),
+      ]),
+      CAPTURE
+    );
+
+    expect(applyAnnotations(issues, resolved).map((issue) => issue.annotation?.mark)).toEqual([
+      2, 1, 3,
+    ]);
+  });
+
+  it("does not let an unmarked element above a marked one consume a number", () => {
+    const issues = [
+      makeIssue({ id: "hidden", selector: ".hidden" }),
+      makeIssue({ id: "page", selector: "html" }),
+      makeIssue({ id: "prose", selector: "the box at the top" }),
+      makeIssue({ id: "visible", selector: ".visible" }),
+    ];
+    const resolved = resolveSelectorAnnotations(
+      [".hidden", "html", "the box at the top", ".visible"],
+      makeMeasurement([
+        visibleEntry({
+          elementIndex: 0,
+          rendered: false,
+          rect: { x: 0, y: 0, width: 200, height: 40 },
+        }),
+        visibleEntry({
+          elementIndex: 1,
+          page: true,
+          rect: { x: 0, y: 0, width: 1280, height: 2000 },
+        }),
+        { matchCount: 0, invalid: true },
+        visibleEntry({ elementIndex: 2, rect: { x: 0, y: 500, width: 200, height: 40 } }),
+      ]),
+      CAPTURE
+    );
+
+    const annotated = applyAnnotations(issues, resolved);
+
+    expect(annotated.map((issue) => issue.annotation?.state)).toEqual([
+      "hidden",
+      "page",
+      "unresolved",
+      "resolved",
+    ]);
+    expect(annotated.map((issue) => issue.annotation?.mark)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      1,
     ]);
   });
 

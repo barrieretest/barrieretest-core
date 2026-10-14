@@ -893,7 +893,8 @@ describe("audit() annotations (real browser)", () => {
 
     expect(annotation?.state).toBe("resolved");
     expect(annotation?.selector).toBe("#hero");
-    expect(annotation?.mark).toBe(1);
+    // Second from the top: the sticky header is above the hero image.
+    expect(annotation?.mark).toBe(2);
     expect(annotation?.rect?.x).toBeCloseTo(metrics.hero.x, 0);
     expect(annotation?.rect?.y).toBeCloseTo(metrics.hero.y, 0);
     expect(annotation?.rect?.width).toBeCloseTo(metrics.hero.width, 0);
@@ -947,8 +948,8 @@ describe("audit() annotations (real browser)", () => {
   });
 
   it("gives two issues on one element a shared mark, contiguous from 1", () => {
-    expect(annotationFor("image-alt")?.mark).toBe(1);
-    expect(annotationFor("image-redundant-alt")?.mark).toBe(1);
+    expect(annotationFor("image-alt")?.mark).toBe(2);
+    expect(annotationFor("image-redundant-alt")?.mark).toBe(2);
 
     const marks = result.issues
       .map((issue) => issue.annotation?.mark)
@@ -956,6 +957,26 @@ describe("audit() annotations (real browser)", () => {
     const distinct = [...new Set(marks)].sort((a, b) => a - b);
 
     expect(distinct).toEqual([1, 2, 3, 4]);
+  });
+
+  it("numbers the marks down the page, not in issue order", () => {
+    // Fixture layout: sticky header, hero image, button, nav list.
+    expect(annotationFor("sticky-header")?.mark).toBe(1);
+    expect(annotationFor("image-alt")?.mark).toBe(2);
+    expect(annotationFor("semantic:form-label-clarity")?.mark).toBe(3);
+    expect(annotationFor("list-items")?.mark).toBe(4);
+
+    const marked = result.issues
+      .filter((issue) => issue.annotation?.mark !== undefined)
+      .map((issue) => ({
+        mark: issue.annotation?.mark as number,
+        y: issue.annotation?.rect?.y as number,
+      }))
+      .sort((a, b) => a.mark - b.mark);
+
+    for (let index = 1; index < marked.length; index += 1) {
+      expect(marked[index].y).toBeGreaterThanOrEqual(marked[index - 1].y);
+    }
   });
 
   it("reports the capture geometry in CSS pixels", () => {

@@ -85,7 +85,7 @@ export interface AuditResult {
 - Page-level means: the first match is `document.documentElement` or `document.body`. Rules such as `page-has-heading-one`, `landmark-one-main`, `html-has-lang` and `document-title` target `html`, some target `body`; a box around the whole capture would say nothing and would consume a mark. A `page` annotation carries no rect and no mark, and `anchored` is irrelevant and omitted. The measurement reports the flag per selector; the decision stays in the pure mapping.
 - Hidden means: not rendered (`display: none` on it or an ancestor, `visibility: hidden`, `opacity: 0`; `Element.checkVisibility` with a fallback when it is missing), or width or height under 2 px (screen-reader-only clipping), or no intersection with the captured area (off-canvas, below a truncated capture). Hidden annotations carry no rect and no mark.
 - Rect: `getBoundingClientRect()` plus scroll offsets, x/y floored and right/bottom ceiled, then clipped to the captured area.
-- Marks are numbered in final issue order (after `minSeverity`/`ignore` filtering) over resolved and ambiguous annotations, one number per distinct element, starting at 1. Same result, same numbering.
+- Marks are numbered over the resolved and ambiguous annotations of the final issues (after `minSeverity`/`ignore` filtering), one number per distinct element, starting at 1, in reading order of the elements' rects: top edge ascending, then left edge ascending, ties by first appearance in the issue list. Same result, same numbering; the order of `issues` itself is unchanged.
 - Frame and shadow DOM targets: axe's nested targets arrive flattened into one selector that cannot match, so they end up `unresolved`. No special handling.
 - Timeout: the evaluate uses the same timeout pattern as `runAxe`. On timeout or a thrown evaluate, every issue gets `state: "unresolved"`, `screenshotMeta` is omitted, one warning.
 - Browser lifecycle: for a URL target with the axe engine, `audit()` already owns the Puppeteer session when `semantic` is set. It now also owns it when annotation is effective, so the page is still open after the engine pass. A page-object target uses the caller's page. With `annotate: false` and no `semantic`, the lifecycle is exactly as today.
@@ -112,7 +112,7 @@ export interface AuditResult {
 2. An issue with `selector: null` yields `state: "unresolved"` and no rect or mark.
 3. A semantic issue whose selector is prose yields `state: "unresolved"` and stays in `issues`.
 4. A `display: none` element, a screen-reader-only (1 px clipped) element and an element translated fully off-page each yield `state: "hidden"`.
-5. Two issues on the same element share one mark; marks are contiguous from 1 in issue order.
+5. Two issues on the same element share one mark; marks are contiguous from 1 in reading order of the marked elements (top edge ascending, then left edge ascending, then first appearance in the issue list).
 6. An axe issue targeting `html` (or `body`) yields `state: "page"` with no rect and no mark, and does not consume a mark number.
 7. `screenshotMeta.width/height` equal the PNG's pixel size divided by `deviceScaleFactor`; `deviceScaleFactor` equals the page's `devicePixelRatio`.
 8. A sticky header measured at scroll 0 has `anchored: true` and a rect that matches where it appears in the screenshot.
@@ -141,3 +141,4 @@ export interface AuditResult {
 4. Only `audit()` annotates; standalone `semanticAudit()` does not.
 5. Backend and viewer pass-through gets its own contract after core lands; it also fixes the hardcoded 1280 by 720 screenshot size in the backend.
 6. Rects are whole CSS pixels, rounded outward, clipped to the capture.
+7. (2026-10-14) Marks follow the page, not the issue list: numbered by the marked element's rect, top edge first, then left edge, ties by first appearance in the issue list. No row tolerance, so the order stays predictable and explainable; the issue order in the result is unchanged.

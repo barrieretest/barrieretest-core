@@ -23,7 +23,7 @@ export interface CaptureSize {
  */
 const MIN_VISIBLE_SIZE_PX = 2;
 
-/** Per-selector outcome, before issue order turns element identity into marks. */
+/** Per-selector outcome, before reading order turns element identity into marks. */
 export interface SelectorAnnotation {
   state: IssueAnnotation["state"];
   rect?: AnnotationRect;
@@ -148,15 +148,44 @@ export function resolveSelectorAnnotations(
 }
 
 /**
- * Attach annotations to copies of the issues, numbering marks in issue order:
- * one number per distinct element, shared by every issue on it, contiguous
- * from 1. Issues the measurement never saw (no selector) come out unresolved.
+ * Number the marked elements in the page's reading order: top edge ascending,
+ * then left edge, then first appearance in the issue list for the rare pair
+ * that shares a corner. The rect is the clipped, rounded one the annotation
+ * carries, so the numbers follow what a consumer draws. Returns a mark per
+ * element index.
+ */
+function numberMarks(
+  issues: Issue[],
+  resolved: Map<string, SelectorAnnotation>
+): Map<number, number> {
+  const marked = new Map<number, { rect: AnnotationRect; first: number }>();
+
+  issues.forEach((issue, index) => {
+    const match = issue.selector === null ? undefined : resolved.get(issue.selector);
+    if (!match?.rect || match.elementIndex === undefined || marked.has(match.elementIndex)) {
+      return;
+    }
+    marked.set(match.elementIndex, { rect: match.rect, first: index });
+  });
+
+  const ordered = [...marked.entries()].sort(
+    ([, a], [, b]) => a.rect.y - b.rect.y || a.rect.x - b.rect.x || a.first - b.first
+  );
+
+  return new Map(ordered.map(([elementIndex], position) => [elementIndex, position + 1]));
+}
+
+/**
+ * Attach annotations to copies of the issues, numbering marks in the page's
+ * reading order: one number per distinct element, shared by every issue on
+ * it, contiguous from 1. The order of `issues` itself is unchanged. Issues
+ * the measurement never saw (no selector) come out unresolved.
  */
 export function applyAnnotations(
   issues: Issue[],
   resolved: Map<string, SelectorAnnotation>
 ): Issue[] {
-  const marks = new Map<number, number>();
+  const marks = numberMarks(issues, resolved);
 
   return issues.map((issue) => {
     const selector = issue.selector;
@@ -172,13 +201,10 @@ export function applyAnnotations(
       annotation.anchored = true;
     }
 
-    if (match.rect && match.elementIndex !== undefined) {
+    const mark = match.elementIndex === undefined ? undefined : marks.get(match.elementIndex);
+
+    if (match.rect && mark !== undefined) {
       annotation.rect = match.rect;
-      let mark = marks.get(match.elementIndex);
-      if (mark === undefined) {
-        mark = marks.size + 1;
-        marks.set(match.elementIndex, mark);
-      }
       annotation.mark = mark;
     }
 

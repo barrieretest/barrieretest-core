@@ -445,7 +445,7 @@ States:
 - `page` — the issue is about the page itself: the selector resolved to `html` or `body`, as page-level axe rules such as `page-has-heading-one`, `landmark-one-main`, `html-has-lang` and `document-title` do. A box around the whole screenshot would say nothing, so there is no `rect` and no `mark`
 - `unresolved` — no selector, an invalid one (a semantic finding whose location is prose lands here), no match, or the measurement failed. No `rect`, no `mark`
 
-Marks are numbered in issue order, one number per element: two issues on the same element share a mark, so a viewer can group them under one marker. Coordinates are CSS pixels in document space, origin at the top-left of the full-page screenshot; multiply by `deviceScaleFactor` for image pixels.
+Marks are numbered in the page's reading order, one number per element: by the element's `rect`, top edge first, then left edge, then first appearance in `issues` for a tie. Two issues on the same element share a mark, so a viewer can group them under one marker, and marker 1 is the topmost marked element rather than the first issue in the list. The order of `issues` itself is unchanged. Coordinates are CSS pixels in document space, origin at the top-left of the full-page screenshot; multiply by `deviceScaleFactor` for image pixels.
 
 Limitations:
 
@@ -483,7 +483,7 @@ The report contains:
 - a header with the audited URL, the page title, the audit timestamp, the score with its interpretation, the counts per severity, and the semantic provider and model per tier when a semantic pass ran
 - a findings-by-rule table under the counts: one row per rule id with its title, severity and number of occurrences, worst severity and most frequent rule first — the executive summary for a page where one rule accounts for hundreds of issues
 - the screenshot with one marker per located element: a two-tone ring around the element's rect and a numbered badge, placed in percentages of `screenshotMeta`, so markers stay on their elements at any rendered size. From 1024 px the screenshot panel is sticky, at most one viewport tall and scrolls on its own, so it stays in view while the list scrolls; following a marker link scrolls it to that marker
-- the issue list: one group per marker, then page-level issues, then issues that could not be placed, each with its state in words. Every issue shows severity, rule id, source, description, help, help link, failure summary, the first node's HTML snippet (truncated to 500 characters), and for semantic findings confidence and suggestion. The element's selector stands once in its marker group's heading; page-level and not-located cards carry it themselves
+- the issue list: one group per marker in marker order, so the groups read down the page like the screenshot, then page-level issues, then issues that could not be placed, each with its state in words. Every issue shows severity, rule id, source, description, help, help link, failure summary, the first node's HTML snippet (truncated to 500 characters), and for semantic findings confidence and suggestion. The element's selector stands once in its marker group's heading; page-level and not-located cards carry it themselves
 - a print stylesheet, so the browser's print or Save as PDF produces a legible document
 
 `locale` changes the report's own labels and, with `de`, the score interpretation (a German title and description per severity level, since the library writes that text in English); issue texts stay as the engine or the model wrote them.

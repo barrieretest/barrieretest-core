@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Marker numbers follow the page, not the issue list.** `Issue.annotation.mark` is numbered by the marked element's `rect` — top edge ascending, then left edge, then first appearance in `issues` for a tie — so marker 1 is the topmost marked element and the numbers read top to bottom on the screenshot. One number per element and contiguity from 1 are unchanged, as is the order of `issues`; a consumer that relied on marks running in issue order (within this unreleased coordinate map) must not.
 - **Audit results can include content that was previously unloaded.** Because the page is now scrolled through before auditing, lazy images and reveal-on-scroll sections are part of the DOM axe sees and of the screenshot, so a page can report issues it did not report before and existing baselines can shift. Set `loadLazyContent: false` for the old behavior.
 
 ## [0.8.0]
