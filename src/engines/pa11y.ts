@@ -1,6 +1,7 @@
 import type { PuppeteerBrowserLike, PuppeteerPageLike } from "../browser.js";
 import { isPuppeteerPage } from "../browser.js";
 import { dismissCookieBanner } from "../cookie-banner.js";
+import { loadLazyContent } from "../lazy-content.js";
 
 export type Pa11yIssue = {
   code: string;
@@ -63,6 +64,9 @@ export type Pa11yRunnerOptions = {
 
   /** Existing Puppeteer page to reuse. */
   page?: PuppeteerPageLike;
+
+  /** Scroll the page once before auditing so lazy content loads. Default true. */
+  loadLazyContent?: boolean;
 };
 
 export type Pa11yRunResult = {
@@ -125,6 +129,7 @@ export async function runPa11y(
     chromeArgs = DEFAULT_CHROME_ARGS,
     onProgress,
     page: existingPage,
+    loadLazyContent: shouldLoadLazyContent = true,
   } = options;
 
   let ownsBrowser = false;
@@ -176,6 +181,12 @@ export async function runPa11y(
 
     await onProgress?.({ percent: 40, message: "Checking for cookie consent banners" });
     await dismissCookieBanner(page);
+
+    // This engine always navigates above, so the page is always ours to scroll.
+    if (shouldLoadLazyContent) {
+      await onProgress?.({ percent: 45, message: "Loading lazy content" });
+      await loadLazyContent(page);
+    }
 
     await onProgress?.({ percent: 50, message: "Running accessibility tests" });
 

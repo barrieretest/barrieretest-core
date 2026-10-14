@@ -33,6 +33,8 @@ export type AxeRunnerOptions = {
   timeout?: number;
   onProgress?: (data: { percent: number; message: string }) => void | Promise<void>;
   page?: BrowserPage;
+  /** Scroll the page once before auditing so lazy content loads. Default true. */
+  loadLazyContent?: boolean;
 };
 
 export type AxeRunResult = {
@@ -360,6 +362,7 @@ export async function runAxeCore(
     timeout,
     onProgress,
     page: existingPage,
+    loadLazyContent: shouldLoadLazyContent = true,
   } = options;
 
   let ownsBrowser = false;
@@ -367,6 +370,7 @@ export async function runAxeCore(
   let page: BrowserPage | null = null;
   let ownedPage: PuppeteerPageLike | null = null;
   let navigationStatus: number | undefined;
+  let navigated = false;
   const consoleLines: string[] = [];
   let diagnosticListeners: { event: string; handler: (...args: unknown[]) => void }[] = [];
 
@@ -400,11 +404,20 @@ export async function runAxeCore(
       } else {
         await page.goto(url);
       }
+      navigated = true;
     }
 
     await onProgress?.({ percent: 40, message: "Checking for cookie consent banners" });
     const { dismissCookieBanner } = await import("../cookie-banner.js");
     await dismissCookieBanner(page);
+
+    // Only a page this call navigated: a caller-supplied page keeps the scroll
+    // position its owner chose.
+    if (navigated && shouldLoadLazyContent) {
+      await onProgress?.({ percent: 45, message: "Loading lazy content" });
+      const { loadLazyContent } = await import("../lazy-content.js");
+      await loadLazyContent(page);
+    }
 
     await onProgress?.({ percent: 50, message: "Injecting axe-core" });
 

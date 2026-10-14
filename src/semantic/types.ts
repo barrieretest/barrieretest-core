@@ -230,6 +230,14 @@ export interface SemanticOptions {
   onProgress?: (data: { percent: number; message: string }) => void | Promise<void>;
   /** Timeout for the AI call (ms). Default 120_000. */
   timeout?: number;
+  /**
+   * Scroll the page through once before the pass, so lazy content below the
+   * first viewport has loaded. Only used when the target is a URL, because
+   * only then does this entry point navigate; a page you pass to
+   * `runSemanticAudit` keeps the scroll position you left it at.
+   * @default true
+   */
+  loadLazyContent?: boolean;
   /** Headless browser launch flag (only used when target is a URL). */
   headless?: boolean;
   /** Viewport for screenshot (only used when target is a URL). */

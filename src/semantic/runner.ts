@@ -629,8 +629,8 @@ export async function runSemanticAudit(
 
 /**
  * Launch a fresh Puppeteer browser, navigate to `url`, dismiss cookie banners,
- * and hand the page to `runSemanticAudit`. Used by the standalone
- * `semanticAudit(url, options)` entry point.
+ * load lazy content, and hand the page to `runSemanticAudit`. Used by the
+ * standalone `semanticAudit(url, options)` entry point.
  *
  * Most production usage should go through `audit({ semantic: ... })`, which
  * shares a single browser between the engine pass and the semantic pass.
@@ -647,13 +647,28 @@ export async function runSemanticAuditOnUrl(
   try {
     await navigateTo(session.page, url, { timeout: options.timeout });
 
-    // Cookie-banner dismissal happens inside runSemanticAudit when
-    // pagePrepared is false (which is the default for this entry point).
+    // This path navigated itself, so it prepares the page here instead of
+    // leaving banner dismissal to `runSemanticAudit`: lazy content has to be
+    // loaded after the banner is gone (a banner can lock body scrolling) and
+    // before the context extraction and the screenshot.
+    try {
+      const { dismissCookieBanner } = await import("../cookie-banner.js");
+      await dismissCookieBanner(session.page);
+    } catch {
+      // Banner dismissal is best-effort; never fail the run because of it.
+    }
+
+    if (options.loadLazyContent !== false) {
+      const { loadLazyContent } = await import("../lazy-content.js");
+      await loadLazyContent(session.page);
+    }
+
     return await runSemanticAudit(
       {
         url,
         page: session.page,
         ownsBrowser: true,
+        pagePrepared: true,
       },
       options
     );

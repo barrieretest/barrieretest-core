@@ -37,6 +37,8 @@ export type {
 export { runPa11y } from "./engines/pa11y.js";
 export type { HtmlReportLocale, HtmlReportOptions } from "./html-report/index.js";
 export { HTML_REPORT_LOCALES, renderHtmlReport } from "./html-report/index.js";
+export type { LazyContentOptions, LazyContentSummary } from "./lazy-content.js";
+export { loadLazyContent } from "./lazy-content.js";
 export type {
   LocalizationConfidence,
   LocalizationOptions,

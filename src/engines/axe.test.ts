@@ -250,3 +250,72 @@ describe("runAxeCore axe-load failure path", () => {
     expect(listenerCounts.removed).toBe(listenerCounts.added);
   });
 });
+
+describe("runAxeCore lazy-content step", () => {
+  /**
+   * Fake page that answers axe's own evaluate calls and records whether the
+   * lazy-content step ran (its in-page function is the only one that waits
+   * for animation frames).
+   */
+  function makeFakePage(startUrl: string): { page: BrowserPage; evaluateSources: string[] } {
+    const evaluateSources: string[] = [];
+    let currentUrl = startUrl;
+    const page = {
+      url: () => currentUrl,
+      title: async () => "Fake",
+      goto: async (target: string) => {
+        currentUrl = target;
+        return undefined;
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: test stub mirrors the overloaded evaluate signature
+      evaluate: async (fn: any) => {
+        const source = String(fn);
+        evaluateSources.push(source);
+        if (source.includes("axeRuntime")) {
+          return { violations: [] };
+        }
+        if (source.includes("requestAnimationFrame")) {
+          return { steps: 2, reachedEnd: true, pendingImages: 0 };
+        }
+        return undefined;
+      },
+      screenshot: async () => new Uint8Array(),
+    } as unknown as BrowserPage;
+
+    return { page, evaluateSources };
+  }
+
+  const lazyCalls = (sources: string[]) =>
+    sources.filter((source) => source.includes("requestAnimationFrame")).length;
+
+  test("loads lazy content on a page it navigated itself", async () => {
+    const { page, evaluateSources } = makeFakePage("about:blank");
+
+    const messages: string[] = [];
+    await runAxeCore("https://example.test/", {
+      page,
+      onProgress: ({ message }) => {
+        messages.push(message);
+      },
+    });
+
+    expect(lazyCalls(evaluateSources)).toBe(1);
+    expect(messages).toContain("Loading lazy content");
+  });
+
+  test("skips the step when loadLazyContent is false", async () => {
+    const { page, evaluateSources } = makeFakePage("about:blank");
+
+    await runAxeCore("https://example.test/", { page, loadLazyContent: false });
+
+    expect(lazyCalls(evaluateSources)).toBe(0);
+  });
+
+  test("leaves a caller-supplied page already at the target URL unscrolled", async () => {
+    const { page, evaluateSources } = makeFakePage("https://example.test/");
+
+    await runAxeCore("https://example.test/", { page });
+
+    expect(lazyCalls(evaluateSources)).toBe(0);
+  });
+});

@@ -174,6 +174,25 @@ export interface AuditOptions {
   annotate?: boolean;
 
   /**
+   * Whether to scroll the page through once before anything is measured, so
+   * images with `loading="lazy"`, script-based lazy loaders and
+   * reveal-on-scroll effects below the first viewport have loaded. Bounded by
+   * hard caps on distance, steps and time, and it never fails an audit; the
+   * page ends back at scroll position 0.
+   *
+   * Runs whenever the audit itself navigates: the axe engine navigates only
+   * when the page is not already at the target URL, the pa11y engine always
+   * navigates. So a browser page you pass in keeps the scroll position you
+   * left it at only when it is already at the target URL and the engine is
+   * `axe`; with `engine: 'pa11y'` it is navigated and then scrolled.
+   *
+   * Turning it off restores the earlier behavior, where content below the
+   * fold was audited and captured unloaded.
+   * @default true
+   */
+  loadLazyContent?: boolean;
+
+  /**
    * Progress callback for tracking audit status
    */
   onProgress?: (data: { percent: number; message: string }) => void | Promise<void>;

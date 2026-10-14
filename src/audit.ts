@@ -81,6 +81,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     timeout,
     captureScreenshot = true,
     annotate = true,
+    loadLazyContent = true,
     onProgress,
     detail = "actionable",
     minSeverity,
@@ -142,6 +143,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
         timeout,
         onProgress,
         page,
+        loadLazyContent,
       });
     } else {
       // pa11y engine — dynamic import so pa11y/puppeteer are optional
@@ -170,6 +172,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
         timeout,
         onProgress,
         page,
+        loadLazyContent,
       });
 
       const filteredIssues = pa11yResult.issues.filter((issue) => !shouldFilterPa11yIssue(issue));

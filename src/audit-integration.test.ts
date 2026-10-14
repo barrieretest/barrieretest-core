@@ -18,6 +18,7 @@ import puppeteer from "puppeteer";
 import { measureSelectors, readPngSize } from "./annotate/index.js";
 import type { BrowserPage } from "./browser.js";
 import { renderHtmlReport } from "./html-report/index.js";
+import { loadLazyContent } from "./lazy-content.js";
 import { extractHtmlContext } from "./semantic/context.js";
 import type { Issue } from "./types.js";
 
@@ -114,9 +115,17 @@ mock.module("./localization/index.js", () => ({
   },
 }));
 
+/** The real launcher, captured before the stub replaces the module. */
+const realPuppeteerLaunchModule = await import("./puppeteer-launch.js");
+const realPuppeteerLaunch = {
+  launchPuppeteerSession: realPuppeteerLaunchModule.launchPuppeteerSession,
+  closeSession: realPuppeteerLaunchModule.closeSession,
+  navigateTo: realPuppeteerLaunchModule.navigateTo,
+};
+
 // Stub puppeteer-launch so audit() doesn't try to launch a real browser
 // when handed a URL with `semantic` set.
-mock.module("./puppeteer-launch.js", () => ({
+const puppeteerLaunchStubModule = {
   launchPuppeteerSession: async () => ({
     browser: { close: async () => undefined },
     page: {
@@ -130,7 +139,9 @@ mock.module("./puppeteer-launch.js", () => ({
   }),
   closeSession: async () => undefined,
   navigateTo: async () => undefined,
-}));
+};
+
+mock.module("./puppeteer-launch.js", () => puppeteerLaunchStubModule);
 
 const { audit } = await import("./audit.js");
 
@@ -1679,4 +1690,307 @@ describe("renderHtmlReport end to end (real audit, real browser)", () => {
 
     expect(violations).toEqual([]);
   });
+});
+
+/**
+ * The lazy-content step against a local fixture, with the real engine and a
+ * real browser: a `loading="lazy"` image and an IntersectionObserver reveal,
+ * both several viewports below the fold. Served from a temp directory over
+ * `file://` — a `data:` URL loads eagerly and would not exercise any of this.
+ */
+describe("lazy content (real audit, real browser)", () => {
+  const PICTURE = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300">
+  <rect width="400" height="300" fill="#36c" />
+</svg>`;
+
+  const FIXTURE = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Lazy content fixture</title>
+  <style>
+    body { margin: 0; font: 16px/1.5 system-ui, sans-serif; }
+    .spacer { height: 3000px; }
+    #lazy { display: block; width: 400px; height: 300px; }
+    #reveal { height: 200px; background: #eee; opacity: 0; }
+    #reveal.shown { opacity: 1; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Lazy content fixture</h1>
+    <div class="spacer"></div>
+    <img id="lazy" src="picture.svg" loading="lazy" alt="A blue rectangle" />
+    <div class="spacer"></div>
+    <div id="reveal">Revealed when it intersects</div>
+  </main>
+  <script>
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) entry.target.classList.add("shown");
+      }
+    });
+    observer.observe(document.getElementById("reveal"));
+  </script>
+</body></html>`;
+
+  /** What the fixture looks like right now, read from the live page. */
+  const readState = (page: Awaited<ReturnType<typeof browser.newPage>>) =>
+    page.evaluate(() => {
+      const image = document.getElementById("lazy") as HTMLImageElement;
+      const reveal = document.getElementById("reveal") as HTMLElement;
+      return {
+        imageComplete: image.complete,
+        imageWidth: image.naturalWidth,
+        revealOpacity: getComputedStyle(reveal).opacity,
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+      };
+    });
+
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>>;
+  let fixtureDir: string;
+  let fixtureUrl: string;
+
+  beforeAll(async () => {
+    mock.module("./engines/axe.js", () => realAxe);
+    mock.module("./puppeteer-launch.js", () => realPuppeteerLaunch);
+
+    fixtureDir = mkdtempSync(join(tmpdir(), "barrieretest-lazy-"));
+    writeFileSync(join(fixtureDir, "picture.svg"), PICTURE);
+    const fixturePath = join(fixtureDir, "fixture.html");
+    writeFileSync(fixturePath, FIXTURE);
+    fixtureUrl = `file://${fixturePath}`;
+
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    await browser?.close();
+    if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
+    mock.module("./engines/axe.js", () => axeStubModule);
+    mock.module("./puppeteer-launch.js", () => puppeteerLaunchStubModule);
+  });
+
+  it("loads the lazy image and the revealed element, and ends at the top", async () => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+
+    try {
+      // The engine navigates itself here, which is what arms the step.
+      const result = await realAxe.runAxeCore(fixtureUrl, { page });
+      expect(result.documentTitle).toBe("Lazy content fixture");
+
+      const state = await readState(page);
+      expect(state.imageComplete).toBe(true);
+      expect(state.imageWidth).toBeGreaterThan(0);
+      expect(state.revealOpacity).toBe("1");
+      expect(state.scrollX).toBe(0);
+      expect(state.scrollY).toBe(0);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("leaves the page unloaded when loadLazyContent is false", async () => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+
+    try {
+      await realAxe.runAxeCore(fixtureUrl, { page, loadLazyContent: false });
+
+      const state = await readState(page);
+      expect(state.imageComplete).toBe(false);
+      expect(state.imageWidth).toBe(0);
+      expect(state.revealOpacity).toBe("0");
+      expect(state.scrollY).toBe(0);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("does not scroll a caller-supplied page that is already at the target URL", async () => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+
+    try {
+      await page.goto(fixtureUrl, { waitUntil: "networkidle2" });
+      // A non-zero start proves the page is left where its owner put it, not
+      // merely that nothing scrolled past the fold.
+      await page.evaluate(() => {
+        window.scrollTo({ top: 400, left: 0, behavior: "instant" });
+      });
+
+      const result = await audit(page);
+      expect(result.documentTitle).toBe("Lazy content fixture");
+
+      const state = await readState(page);
+      expect(state.scrollY).toBe(400);
+      expect(state.imageComplete).toBe(false);
+      expect(state.revealOpacity).toBe("0");
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("reports scroll 0 in screenshotMeta for a URL audit", async () => {
+    const result = await audit(fixtureUrl);
+
+    expect(result.documentTitle).toBe("Lazy content fixture");
+    expect(result.screenshotMeta?.scroll).toEqual({ x: 0, y: 0 });
+  }, 60_000);
+
+  /**
+   * Decodes a PNG the audit returned, in the browser we already have, and
+   * reads one pixel: the most direct evidence that the lazy image really is
+   * in the capture rather than only in the DOM afterwards.
+   */
+  async function samplePixel(
+    png: Uint8Array,
+    x: number,
+    y: number
+  ): Promise<{ r: number; g: number; b: number }> {
+    const dataUrl = `data:image/png;base64,${Buffer.from(png).toString("base64")}`;
+    const sampler = await browser.newPage();
+
+    try {
+      return await sampler.evaluate(
+        async (input: { dataUrl: string; x: number; y: number }) => {
+          const image = new Image();
+          await new Promise((resolve, reject) => {
+            image.onload = () => resolve(undefined);
+            image.onerror = () => reject(new Error("Screenshot did not decode"));
+            image.src = input.dataUrl;
+          });
+
+          const canvas = document.createElement("canvas");
+          canvas.width = image.naturalWidth;
+          canvas.height = image.naturalHeight;
+          const context = canvas.getContext("2d");
+          if (!context) {
+            throw new Error("No 2d context");
+          }
+          context.drawImage(image, 0, 0);
+
+          const [r, g, b] = context.getImageData(input.x, input.y, 1, 1).data;
+          return { r, g, b };
+        },
+        { dataUrl, x, y }
+      );
+    } finally {
+      await sampler.close();
+    }
+  }
+
+  it("renders the lazy image in the screenshot audit() returns", async () => {
+    // The image has a fixed CSS size, so its document position is the same
+    // whether or not the file ever loaded; measure it on a separate page,
+    // since audit() owns and closes its own.
+    const probe = await browser.newPage();
+    let center: { x: number; y: number };
+    try {
+      await probe.setViewport({ width: 1280, height: 720 });
+      await probe.goto(fixtureUrl, { waitUntil: "networkidle2" });
+      center = await probe.evaluate(() => {
+        const rect = (document.getElementById("lazy") as HTMLImageElement).getBoundingClientRect();
+        return {
+          x: rect.x + window.scrollX + rect.width / 2,
+          y: rect.y + window.scrollY + rect.height / 2,
+        };
+      });
+    } finally {
+      await probe.close();
+    }
+
+    const loaded = await audit(fixtureUrl);
+    const unloaded = await audit(fixtureUrl, { loadLazyContent: false });
+
+    const scale = loaded.screenshotMeta?.deviceScaleFactor ?? 1;
+    const atCenter = (png: Uint8Array | undefined) => {
+      if (!png) throw new Error("Audit returned no screenshot");
+      return samplePixel(png, Math.round(center.x * scale), Math.round(center.y * scale));
+    };
+
+    // #36c is the fixture image; anything else means a blank box.
+    expect(await atCenter(loaded.screenshot)).toEqual({ r: 0x33, g: 0x66, b: 0xcc });
+    expect(await atCenter(unloaded.screenshot)).not.toEqual({ r: 0x33, g: 0x66, b: 0xcc });
+  }, 120_000);
+
+  it("stays inside its budget and stops scrolling when frames never fire", async () => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+
+    try {
+      await page.goto(fixtureUrl, { waitUntil: "networkidle2" });
+
+      // Suspended frames are the case this guards: with an unbounded frame
+      // wait the in-page step outlives the Node-side timeout and can scroll
+      // the page while the next audit step is already measuring it.
+      await page.evaluate(() => {
+        const probe = window as unknown as {
+          __scrolls: number[];
+          requestAnimationFrame: (callback: FrameRequestCallback) => number;
+          scrollTo: (options?: ScrollToOptions) => void;
+        };
+        probe.__scrolls = [];
+        probe.requestAnimationFrame = () => 0;
+        const realScrollTo = window.scrollTo.bind(window) as (options?: ScrollToOptions) => void;
+        probe.scrollTo = (options?: ScrollToOptions) => {
+          probe.__scrolls.push(options?.top ?? 0);
+          realScrollTo(options);
+        };
+      });
+
+      const readProbe = () =>
+        page.evaluate(() => ({
+          scrolls: (window as unknown as { __scrolls: number[] }).__scrolls.length,
+          scrollY: window.scrollY,
+          flags: Object.keys(window).filter((key) =>
+            key.startsWith("__barrieretestLazyContentCancel_")
+          ),
+        }));
+
+      const budgetMs = 1_500;
+      const started = Date.now();
+      await loadLazyContent(page, { budgetMs });
+      const elapsed = Date.now() - started;
+
+      // Below the Node-side timeout (budget plus a 1 s grace): the page has
+      // to stop itself, the Node race is only the fallback. With unbounded
+      // frame waits the step runs into that fallback instead.
+      expect(elapsed).toBeLessThan(budgetMs + 1_000);
+
+      const settled = await readProbe();
+      expect(settled.scrollY).toBe(0);
+      // The cancel flag is cleaned up, so the page is left as we found it.
+      expect(settled.flags).toEqual([]);
+
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+      const later = await readProbe();
+      expect(later.scrolls).toBe(settled.scrolls);
+      expect(later.scrollY).toBe(0);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("stops at the scroll cap on a page taller than the cap", async () => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+
+    try {
+      await page.goto(fixtureUrl, { waitUntil: "networkidle2" });
+      const summary = await loadLazyContent(page, { maxScrollPx: 1_440 });
+
+      expect(summary.steps).toBe(2);
+      expect(summary.reachedEnd).toBe(false);
+      expect((await readState(page)).scrollY).toBe(0);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
 });

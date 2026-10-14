@@ -11,7 +11,7 @@ Open-source core for single-page accessibility audits.
 - baseline workflows for CI
 - optional AI analysis for individual issues
 - semantic audits via vision LLMs
-- cookie banner dismissal before audits
+- cookie banner dismissal and lazy-content loading before audits
 
 ## Try it
 
@@ -374,6 +374,7 @@ const pa11yResult = await audit('https://example.com', {
 | `updateBaseline` | `boolean` | — | Update baseline with results |
 | `captureScreenshot` | `boolean` | `true` | Capture a page screenshot |
 | `annotate` | `boolean` | `true` | Map issues onto the screenshot (see [Annotations](#annotations)) |
+| `loadLazyContent` | `boolean` | `true` | Scroll the page once before auditing (see [Lazy content](#lazy-content)) |
 | `onProgress` | `function` | — | Progress callback |
 
 Notes:
@@ -505,6 +506,7 @@ That means:
 - Playwright pages are supported directly
 - the current session state is preserved
 - cookie banner dismissal still runs before the audit
+- lazy-content loading only runs when the audit navigates: with the default axe engine a page already at the target URL keeps the scroll position you left it at, while `engine: 'pa11y'` always navigates and therefore scrolls (see [Lazy content](#lazy-content))
 
 If you use `engine: 'pa11y'`, only Puppeteer pages are supported.
 
@@ -738,6 +740,20 @@ Cache hits show up in the result: `meta.tiers.<tier>.usage` on a standalone
 result. Both report `inputTokens`, `outputTokens`, and `cachedInputTokens`
 whenever the provider reports them, with the cached count being the part of
 `inputTokens` served from the cache.
+
+## Lazy content
+
+With `loadLazyContent` on (the default), a page the audit navigated is scrolled through once after the cookie banner is dismissed and before anything is measured, so images with `loading="lazy"`, script-based lazy loaders and reveal-on-scroll effects below the first viewport have loaded. One viewport per step, at most 20 000 CSS px or 40 steps, a short settle per step, then up to 2 s for images that are still loading, all inside an overall budget of about 6 s. The page ends back at scroll position 0, so axe, the semantic context, the screenshot and the annotations all see the same loaded page. The step never fails an audit: an error or timeout costs one warning starting with `Lazy content` and the audit continues with whatever loaded.
+
+The step runs whenever the audit itself navigates: the axe engine navigates only when the page is not already at the target URL, the pa11y engine always navigates, and a standalone `semanticAudit(url)` launches its own page. So a page you pass in that is already at the target URL is not scrolled with the axe engine — it keeps the scroll position you left it at — while `engine: 'pa11y'` navigates it and then scrolls it.
+
+Because more content is loaded, an audit can now report issues on elements that stayed blank before, which can shift existing baselines. Set `loadLazyContent: false` to skip the step. Scroll-triggered pop-ups can end up in the capture, content that loads later than the image wait stays unloaded, and a page with scroll hijacking may not reach its end within the caps.
+
+```typescript
+import { loadLazyContent } from '@barrieretest/core'
+
+const { steps, reachedEnd, pendingImages } = await loadLazyContent(page)
+```
 
 ## Cookie banner dismissal
 
