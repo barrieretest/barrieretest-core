@@ -3,10 +3,12 @@
  *
  * One `page.evaluate` per condition gathers the union of what the checks
  * active under that condition need: the candidate elements with their rects,
- * text, rendered state and exemptions, plus the two optional groups
- * (`clipping`, `stacking`) and the page-level numbers the capture geometry
- * needs. The walk is read-only apart from nothing at all: no scroll, no
- * focus, no mutation.
+ * text, rendered state and exemptions, plus the optional groups
+ * (`clipping`, `stacking`, `ancestors`, `forcedColors`, `motion`) and the
+ * page-level numbers the capture geometry needs. The axe rules a condition
+ * needs are run by `runConditionAxe` in the same step, next to this one. The
+ * walk is read-only apart from nothing at all: no scroll, no focus, no
+ * mutation.
  *
  * Checks never touch the browser, so everything they decide from has to be
  * in here.
@@ -16,9 +18,12 @@ import { MIN_VISIBLE_SIZE_PX } from "../annotate/index.js";
 import type { BrowserPage } from "../browser.js";
 import type {
   RenderingAncestor,
+  RenderingAnimation,
   RenderingCollect,
   RenderingElement,
   RenderingMeasurement,
+  RenderingMotion,
+  RenderingPaintedElement,
 } from "./types.js";
 
 /** Upper bound for the measurement round trip, independent of the audit timeout. */
@@ -37,6 +42,12 @@ const HTML_LIMIT = 200;
  */
 const MAX_FRAGMENTS = 8;
 
+/** Most elements the forced-colours group carries; a card-heavy page has many borders. */
+export const MAX_PAINTED = 400;
+
+/** Most running animations and self-moving elements the motion group carries. */
+export const MAX_ANIMATIONS = 100;
+
 /** Everything the in-page function needs; it cannot see Node scope. */
 interface MeasureArgs {
   collect: RenderingCollect;
@@ -47,6 +58,10 @@ interface MeasureArgs {
   minVisiblePx: number;
   /** Most line boxes a wrapped element carries individually. */
   maxFragments: number;
+  /** Most elements the forced-colours group carries. */
+  maxPainted: number;
+  /** Most animations and self-moving elements the motion group carries. */
+  maxAnimations: number;
 }
 
 function isSize(value: unknown): value is { width: number; height: number } {
@@ -81,6 +96,46 @@ function isAncestor(value: unknown): value is RenderingAncestor {
   return isSize(ancestor.rect) && isPoint(ancestor.rect);
 }
 
+function isPainted(value: unknown): value is RenderingPaintedElement {
+  if (!value || typeof value !== "object") return false;
+  const painted = value as Record<string, unknown>;
+  if (!Number.isInteger(painted.index) || typeof painted.selector !== "string") return false;
+  if (!isSize(painted.rect) || !isPoint(painted.rect)) return false;
+  return (
+    typeof painted.backgroundImage === "string" &&
+    typeof painted.border === "boolean" &&
+    typeof painted.forcedColorAdjust === "string"
+  );
+}
+
+function isMotion(value: unknown): value is RenderingMotion {
+  if (!value || typeof value !== "object") return false;
+  const motion = value as Record<string, unknown>;
+  if (!Array.isArray(motion.animations) || !Array.isArray(motion.elements)) return false;
+  return (
+    motion.animations.every((animation) => {
+      if (!animation || typeof animation !== "object") return false;
+      const entry = animation as Record<string, unknown>;
+      return (
+        Number.isInteger(entry.index) &&
+        typeof entry.playState === "string" &&
+        Number.isFinite(entry.iterations) &&
+        Number.isFinite(entry.durationMs)
+      );
+    }) &&
+    motion.elements.every((element) => {
+      if (!element || typeof element !== "object") return false;
+      const entry = element as Record<string, unknown>;
+      return (
+        Number.isInteger(entry.index) &&
+        typeof entry.selector === "string" &&
+        isSize(entry.rect) &&
+        isPoint(entry.rect)
+      );
+    })
+  );
+}
+
 /**
  * Validates what came back from the browser. A page object that is not a real
  * browser page (or one that returned something unexpected) must degrade to
@@ -97,6 +152,11 @@ export function isRenderingMeasurement(value: unknown): value is RenderingMeasur
     if (!Array.isArray(measurement.ancestors)) return false;
     if (!measurement.ancestors.every(isAncestor)) return false;
   }
+  if (measurement.painted !== undefined) {
+    if (!Array.isArray(measurement.painted)) return false;
+    if (!measurement.painted.every(isPainted)) return false;
+  }
+  if (measurement.motion !== undefined && !isMotion(measurement.motion)) return false;
   return measurement.elements.every(isElement);
 }
 
@@ -121,6 +181,8 @@ export async function measureRendering(
     htmlLimit: HTML_LIMIT,
     minVisiblePx: MIN_VISIBLE_SIZE_PX,
     maxFragments: MAX_FRAGMENTS,
+    maxPainted: MAX_PAINTED,
+    maxAnimations: MAX_ANIMATIONS,
   };
 
   const run = () =>
@@ -251,6 +313,42 @@ export async function measureRendering(
 
       const clipsOverflow = (value: string): boolean => value === "hidden" || value === "clip";
 
+      /** A border side that paints: some width and a style that draws. */
+      const paintsBorder = (style: CSSStyleDeclaration): boolean => {
+        const sides = [
+          [style.borderTopWidth, style.borderTopStyle],
+          [style.borderRightWidth, style.borderRightStyle],
+          [style.borderBottomWidth, style.borderBottomStyle],
+          [style.borderLeftWidth, style.borderLeftStyle],
+        ];
+        return sides.some(
+          ([width, borderStyle]) =>
+            Number.parseFloat(width) > 0 && borderStyle !== "none" && borderStyle !== "hidden"
+        );
+      };
+
+      /**
+       * Content that keeps rendering when the system forces its own colours:
+       * a real image, an inline SVG, a canvas or a video is still there, so
+       * an element that holds one has not lost its only rendering.
+       */
+      const graphicSelector = 'img, svg, canvas, video, object, picture, input[type="image"]';
+
+      /** Elements the user can operate, so their paint carries a function. */
+      const interactiveSelector =
+        'a[href], button, input, select, textarea, summary, label, [tabindex], [role="button"], [role="link"], [role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"], [role="radio"], [role="option"]';
+
+      const matchesSelector = (element: Element, selector: string): boolean => {
+        try {
+          return element.matches(selector);
+        } catch {
+          return false;
+        }
+      };
+
+      const hasAttributeValue = (element: Element, name: string): boolean =>
+        (element.getAttribute(name) ?? "").trim().length > 0;
+
       const formsStackingContext = (element: Element, style: CSSStyleDeclaration): boolean => {
         if (element === document.documentElement) return true;
         if (style.position === "fixed" || style.position === "sticky") return true;
@@ -367,6 +465,23 @@ export async function measureRendering(
        * ancestor clips that overflow away, and then it is not reachable
        * either.
        */
+      /**
+       * Effective `forced-color-adjust`. The property is inherited, so the
+       * computed value already carries an ancestor's `none`; this is only
+       * memoised so asking for the parent's value costs nothing once the
+       * walk has passed it.
+       */
+      const adjustMemo = new Map<Element, string>();
+      const adjustOf = (element: Element | null, own?: CSSStyleDeclaration): string => {
+        if (!element) return "auto";
+        const cached = adjustMemo.get(element);
+        if (cached !== undefined) return cached;
+        const style = own ?? getComputedStyle(element);
+        const value = style.getPropertyValue("forced-color-adjust") || "auto";
+        adjustMemo.set(element, value);
+        return value;
+      };
+
       const renderedMemo = new Map<Element, boolean>();
       const isRenderedBox = (
         element: Element,
@@ -458,17 +573,87 @@ export async function measureRendering(
        * geometry and a member's identity.
        */
       const ancestorBoxes: { selector: string; rect: ReturnType<typeof rectOf> }[] = [];
+      let ancestorsTruncated = false;
       const ancestorSeen = new Set<Element>();
       const registerAncestors = (element: Element): void => {
         let parent = element.parentElement;
         while (parent && parent !== document.documentElement) {
           // Registered already, and so is everything above it.
           if (ancestorSeen.has(parent)) return;
-          if (ancestorBoxes.length >= input.maxCandidates) return;
+          if (ancestorBoxes.length >= input.maxCandidates) {
+            ancestorsTruncated = true;
+            return;
+          }
           ancestorSeen.add(parent);
           ancestorBoxes.push({ selector: cssPath(parent), rect: rectOf(parent) });
           parent = parent.parentElement;
         }
+      };
+      /**
+       * Elements the forced-colours check judges, held with their element
+       * until the walk is done: their identity continues the candidate
+       * numbering, which is only final at the end.
+       */
+      const paintedEntries: { element: Element; data: Omit<RenderingPaintedElement, "index"> }[] =
+        [];
+      /** Whether the cap dropped an element the group was eligible to carry. */
+      let paintedTruncated = false;
+
+      /**
+       * Collect one element for the forced-colours check, when its paint or
+       * its opt-out is something that check judges. Shared by the walk and
+       * by the two elements the walk never reaches.
+       */
+      const addPainted = (
+        element: Element,
+        style: CSSStyleDeclaration,
+        tag: string,
+        role: string,
+        rect: ReturnType<typeof rectOf>,
+        anchored: boolean,
+        inControl: boolean
+      ): void => {
+        const backgroundImage = style.backgroundImage;
+        const border = paintsBorder(style);
+        // `forced-color-adjust` is inherited, so the computed value is the
+        // effective one; whether this element is where the opt-out starts
+        // is what decides who carries the finding.
+        const forcedColorAdjust = adjustOf(element, style);
+        if (backgroundImage === "none" && !border && forcedColorAdjust !== "none") return;
+        if (!isRenderedBox(element, rect, style)) return;
+        // Past the cap the element is dropped, and the measurement says so
+        // rather than presenting a partial group as the whole one.
+        if (paintedEntries.length >= input.maxPainted) {
+          paintedTruncated = true;
+          return;
+        }
+        paintedEntries.push({
+          element,
+          data: {
+            selector: cssPath(element),
+            html: openingTag(element),
+            tag,
+            role: role === "" ? null : role,
+            rect,
+            anchored,
+            backgroundImage: backgroundImage.slice(0, input.textLimit),
+            border,
+            forcedColorAdjust,
+            setsForcedColorAdjust:
+              forcedColorAdjust === "none" && adjustOf(element.parentElement) !== "none",
+            hasContentText: (element.textContent ?? "").trim().length > 0,
+            hasGraphic:
+              matchesSelector(element, graphicSelector) ||
+              element.querySelector(graphicSelector) !== null,
+            ariaHidden: element.closest('[aria-hidden="true"]') !== null,
+            interactive: matchesSelector(element, interactiveSelector),
+            named:
+              hasAttributeValue(element, "aria-label") ||
+              hasAttributeValue(element, "aria-labelledby") ||
+              hasAttributeValue(element, "title"),
+            inControl,
+          },
+        });
       };
       const candidateIndex = new Map<Element, number>();
       /** Inherited state, filled top-down: querySelectorAll is in document order. */
@@ -480,6 +665,29 @@ export async function measureRendering(
       const childContext = new Map<Element, number>();
       let nextContextId = 0;
       let truncated = false;
+
+      /**
+       * `html` and `body` are not in the walk, which starts inside the
+       * body, and `forced-color-adjust: none` on either of them is one
+       * decision about the whole page: without them the opt-out had no
+       * owner to be reported at, and every descendant that merely inherited
+       * it was suppressed as the ancestor's decision.
+       */
+      if (input.collect.forcedColors) {
+        for (const root of [document.documentElement, document.body]) {
+          if (!root) continue;
+          const style = getComputedStyle(root);
+          addPainted(
+            root,
+            style,
+            root.tagName.toLowerCase(),
+            (root.getAttribute("role") ?? "").trim().toLowerCase(),
+            rectOf(root),
+            style.position === "fixed" || style.position === "sticky",
+            false
+          );
+        }
+      }
 
       const all =
         input.collect.elements && document.body ? document.body.querySelectorAll("*") : [];
@@ -544,6 +752,15 @@ export async function measureRendering(
         // subtree, and nothing else needs it.
         const hasContentText = clips ? (element.textContent ?? "").trim().length > 0 : hasText;
         const overflowsViewport = rect.width > 0 && rect.x + rect.width > client.width + 1;
+
+        /**
+         * The forced-colours group is not about text, so it is gathered
+         * beside the candidates rather than among them: an icon button
+         * carries no text at all, which is the whole point of the check.
+         */
+        if (input.collect.forcedColors) {
+          addPainted(element, style, tag, role, rect, anchored, inRenderedControl);
+        }
 
         if (!hasText && !(clips && hasContentText) && !overflowsViewport) continue;
 
@@ -626,6 +843,203 @@ export async function measureRendering(
         if (input.collect.ancestors && hasText) registerAncestors(element);
       }
 
+      /**
+       * Identity for anything that is not a text candidate. It continues the
+       * candidate numbering and the ancestor numbering, so no two findings
+       * of one condition can share a mark unless they are about the same
+       * element — and one element asked for twice, as a painted element and
+       * as the target of two animations, gets the same number both times:
+       * that is what makes two animations on one spinner one finding.
+       */
+      let nextIdentity = elements.length + ancestorBoxes.length;
+      const identities = new Map<Element, number>();
+      const identityOf = (element: Element): number => {
+        const candidate = candidateIndex.get(element);
+        if (candidate !== undefined) return candidate;
+        const known = identities.get(element);
+        if (known !== undefined) return known;
+        const index = nextIdentity++;
+        identities.set(element, index);
+        return index;
+      };
+
+      /** `position: fixed` or `sticky` on the element or above it. */
+      const anchoredOf = (element: Element): boolean => {
+        let node: Element | null = element;
+        while (node) {
+          const known = inheritedAnchored.get(node);
+          if (known !== undefined) return known;
+          const position = getComputedStyle(node).position;
+          if (position === "fixed" || position === "sticky") return true;
+          node = node.parentElement;
+        }
+        return false;
+      };
+
+      const painted = input.collect.forcedColors
+        ? paintedEntries.map((entry) => ({
+            index: identityOf(entry.element),
+            ...entry.data,
+          }))
+        : undefined;
+
+      let motion: RenderingMotion | undefined;
+      if (input.collect.motion) {
+        const animations: RenderingMotion["animations"] = [];
+        /** Whether a cap dropped motion the group was eligible to carry. */
+        let motionTruncated = false;
+        type EffectWithTarget = AnimationEffect & { target?: Element | null };
+        const running =
+          typeof document.getAnimations === "function" ? document.getAnimations() : [];
+
+        /**
+         * Whether the animated element is on the page with a box to see.
+         * Deliberately not the `rendered` rule: that one asks
+         * `checkVisibility` with `opacityProperty`, and an animation that
+         * pulses to `opacity: 0` is invisible in some of its frames — which
+         * is the motion being reported, not a reason to drop it. Display and
+         * visibility are asked for, so a spinner a widget keeps hidden until
+         * it loads does not count as motion anybody can see.
+         */
+        const movesVisibly = (element: Element, rect: ReturnType<typeof rectOf>): boolean => {
+          if (rect.width < input.minVisiblePx || rect.height < input.minVisiblePx) return false;
+          if (rect.x + rect.width <= 0 || rect.y + rect.height <= 0) return false;
+          if (rect.x >= pageBox.width || rect.y >= pageBox.height) return false;
+          let node: Element | null = element;
+          while (node) {
+            const style = getComputedStyle(node);
+            if (style.display === "none") return false;
+            if (style.visibility === "hidden" || style.visibility === "collapse") return false;
+            node = node.parentElement;
+          }
+          return true;
+        };
+
+        /**
+         * The entries with the element each one animates, so the nesting is
+         * resolved once every animated element is known: `getAnimations()`
+         * is in neither document nor nesting order, and an ancestor that
+         * comes last in the list is still the ancestor.
+         */
+        const collected: {
+          target: Element | null;
+          entry: Omit<RenderingAnimation, "parentIndex">;
+        }[] = [];
+
+        for (const animation of running) {
+          // Only what is still moving under the condition is carried: a
+          // finished or cancelled animation can never be a finding, and the
+          // cap has to be spent on the ones that can.
+          if (animation.playState !== "running") continue;
+
+          const effect = animation.effect as EffectWithTarget | null;
+          const timing = effect ? effect.getComputedTiming() : null;
+          const target = effect?.target ?? null;
+          // Motion nobody can see is not motion the user asked to stop: a
+          // spinner a widget keeps hidden until it loads animates all the
+          // same.
+          if (target && !movesVisibly(target, rectOf(target))) continue;
+          // The cap is asked after the filters, so it is only truncation
+          // when what it drops could have been reported.
+          if (collected.length >= input.maxAnimations) {
+            motionTruncated = true;
+            break;
+          }
+          const duration = typeof timing?.duration === "number" ? timing.duration : 0;
+          const iterations = timing?.iterations;
+          const named = animation as Animation & {
+            animationName?: string;
+            transitionProperty?: string;
+          };
+
+          collected.push({
+            target,
+            entry: {
+              index: target ? identityOf(target) : nextIdentity++,
+              selector: target ? cssPath(target) : null,
+              ...(target
+                ? {
+                    html: openingTag(target),
+                    tag: target.tagName.toLowerCase(),
+                    rect: rectOf(target),
+                    anchored: anchoredOf(target),
+                  }
+                : {}),
+              name: named.animationName ?? named.transitionProperty ?? animation.id ?? "",
+              playState: animation.playState,
+              // JSON cannot carry Infinity, and an infinite animation is
+              // exactly the case the check is about.
+              iterations:
+                typeof iterations === "number" && Number.isFinite(iterations) ? iterations : -1,
+              durationMs: duration,
+            },
+          });
+        }
+
+        const animatedTargets = collected
+          .map((item) => item.target)
+          .filter((target): target is Element => target !== null);
+
+        /**
+         * The identity of the innermost other animated element that contains
+         * this one, or -1.
+         */
+        const nearestAnimatedAncestor = (target: Element): number => {
+          let nearest: Element | null = null;
+          for (const other of animatedTargets) {
+            if (other === target || !other.contains(target)) continue;
+            if (!nearest || nearest.contains(other)) nearest = other;
+          }
+          return nearest ? identityOf(nearest) : -1;
+        };
+
+        for (const { target, entry } of collected) {
+          animations.push({
+            ...entry,
+            parentIndex: target ? nearestAnimatedAncestor(target) : -1,
+          });
+        }
+
+        const elementsInMotion: RenderingMotion["elements"] = [];
+        const addMotionElement = (
+          element: Element,
+          kind: RenderingMotion["elements"][number]["kind"]
+        ): void => {
+          const rect = rectOf(element);
+          // The same rule the animations use: motion nobody can see is not
+          // motion to report.
+          if (!movesVisibly(element, rect)) return;
+          if (elementsInMotion.length >= input.maxAnimations) {
+            motionTruncated = true;
+            return;
+          }
+          elementsInMotion.push({
+            index: identityOf(element),
+            kind,
+            selector: cssPath(element),
+            html: openingTag(element),
+            tag: element.tagName.toLowerCase(),
+            rect,
+            anchored: anchoredOf(element),
+          });
+        };
+
+        for (const video of Array.from(
+          document.querySelectorAll("video[autoplay]:not([controls])")
+        )) {
+          addMotionElement(video, "video-autoplay");
+        }
+        for (const marquee of Array.from(document.querySelectorAll("marquee"))) {
+          addMotionElement(marquee, "marquee");
+        }
+
+        motion = {
+          animations,
+          elements: elementsInMotion,
+          ...(motionTruncated ? { truncated: true } : {}),
+        };
+      }
+
       return {
         elements,
         truncated,
@@ -647,6 +1061,10 @@ export async function measureRendering(
               })),
             }
           : {}),
+        ...(painted ? { painted } : {}),
+        ...(paintedTruncated ? { paintedTruncated: true } : {}),
+        ...(ancestorsTruncated ? { ancestorsTruncated: true } : {}),
+        ...(motion ? { motion } : {}),
       };
     }, args);
 
@@ -667,17 +1085,39 @@ export async function measureRendering(
 }
 
 /**
+ * The first identity nothing in this measurement has taken yet. What the
+ * condition's axe run numbers its nodes from, so a finding of a check that
+ * reads the measurement and one of a check that reads axe can never share a
+ * mark by accident.
+ */
+export function nextMeasurementIdentity(measurement: RenderingMeasurement): number {
+  let next = measurement.elements.length + (measurement.ancestors?.length ?? 0);
+  const seen = [
+    ...(measurement.painted ?? []),
+    ...(measurement.motion?.animations ?? []),
+    ...(measurement.motion?.elements ?? []),
+  ];
+  for (const entry of seen) next = Math.max(next, entry.index + 1);
+  return next;
+}
+
+/**
  * The union of what a set of checks needs gathered. With no check active the
  * element walk is skipped entirely: the condition still gets its capture, and
  * the page-level numbers come along regardless.
  */
 export function unionCollect(collects: RenderingCollect[]): RenderingCollect {
   const union: RenderingCollect = { elements: false };
+  const axeRules = new Set<string>();
   for (const collect of collects) {
     if (collect.elements) union.elements = true;
     if (collect.clipping) union.clipping = true;
     if (collect.stacking) union.stacking = true;
     if (collect.ancestors) union.ancestors = true;
+    if (collect.forcedColors) union.forcedColors = true;
+    if (collect.motion) union.motion = true;
+    for (const rule of collect.axeRules ?? []) axeRules.add(rule);
   }
+  if (axeRules.size > 0) union.axeRules = [...axeRules].sort();
   return union;
 }

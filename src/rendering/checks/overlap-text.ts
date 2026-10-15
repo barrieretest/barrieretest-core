@@ -98,7 +98,7 @@ export const overlapTextCheck: PerConditionCheck = {
 
   appliesTo: (condition) => condition.viewport !== undefined || condition.textSpacing === true,
 
-  evaluate({ condition, measurement }) {
+  evaluate({ condition, measurement, onTruncated }) {
     const findings: RenderingFinding[] = [];
     const helpUrl = condition.textSpacing ? TEXT_SPACING_HELP_URL : REFLOW_HELP_URL;
 
@@ -130,7 +130,10 @@ export const overlapTextCheck: PerConditionCheck = {
 
         const { rect, ratio } = overlap;
 
-        if (findings.length >= MAX_FINDINGS) return findings;
+        if (findings.length >= MAX_FINDINGS) {
+          onTruncated?.();
+          return findings;
+        }
 
         findings.push({
           checkId: "overlap-text",

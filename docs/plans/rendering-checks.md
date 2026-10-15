@@ -160,7 +160,7 @@ The runner is called from `audit()` after the engine pass and before the semanti
 1. A fixture page with a 400 px wide fixed-width element, audited with `rendering: true`, yields `render:reflow-horizontal-scroll` under `viewport:320` with `evidence.scrollWidth > 320` and an annotation rect on that element; the same page audited without `rendering` yields no `render:*` issue and an identical result to today.
 2. A fixture with `overflow: hidden; height: 2em` on a three-line paragraph yields `render:overflow-clipped-text` under `text-spacing` and under `viewport:320`.
 3. A fixture with two absolutely positioned overlapping paragraphs yields `render:overlap-text`; the same fixture with the paragraphs adjacent does not.
-4. A fixture with a 16 by 16 px icon button yields `render:target-size` under `viewport:360`; the engine pass without `rendering` still does not report `target-size`.
+4. (Amended 2026-10-15, after decision 2.) A row of 16 by 16 px icon buttons that is spaced out at 1280 px and cramped at 360 px yields `render:target-size` under `viewport:360` and nothing in the engine pass; the same row cramped at every width is reported by the engine pass as `target-size` and not repeated by the rendering check at any viewport.
 5. A fixture with `@media (prefers-color-scheme: dark) { a { color: #777; background: #666 } }` yields `render:contrast-under-mode` under `media:dark` only.
 6. A fixture with a CSS-only infinite animation and no `prefers-reduced-motion` rule yields `render:motion-not-reduced`; adding a reduced-motion rule that sets `animation: none` removes it.
 7. A `data:` table wider than 320 px does not yield a reflow finding (exemption).

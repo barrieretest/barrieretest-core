@@ -20,6 +20,8 @@ import type { BrowserPage } from "./browser.js";
 import { dismissCookieBanner } from "./cookie-banner.js";
 import { renderHtmlReport } from "./html-report/index.js";
 import { loadLazyContent } from "./lazy-content.js";
+import { MAX_ANIMATIONS, MAX_PAINTED } from "./rendering/measure.js";
+import { settleCondition } from "./rendering/page.js";
 import { extractHtmlContext } from "./semantic/context.js";
 import type { Issue } from "./types.js";
 
@@ -1872,9 +1874,14 @@ describe("renderHtmlReport end to end (real audit, real browser)", () => {
   }, 120_000);
 
   afterAll(async () => {
-    await browser?.close();
-    if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
-    mock.module("./engines/axe.js", () => axeStubModule);
+    try {
+      await browser?.close();
+      if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
+    } finally {
+      // A browser that refuses to close must not leave the real modules
+      // mocked in for whatever runs next in this process.
+      mock.module("./engines/axe.js", () => axeStubModule);
+    }
   });
 
   it("finds real issues and places a marker for every located one", async () => {
@@ -2108,10 +2115,15 @@ describe("lazy content (real audit, real browser)", () => {
   }, 120_000);
 
   afterAll(async () => {
-    await browser?.close();
-    if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
-    mock.module("./engines/axe.js", () => axeStubModule);
-    mock.module("./puppeteer-launch.js", () => puppeteerLaunchStubModule);
+    try {
+      await browser?.close();
+      if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
+    } finally {
+      // A browser that refuses to close must not leave the real modules
+      // mocked in for whatever runs next in this process.
+      mock.module("./engines/axe.js", () => axeStubModule);
+      mock.module("./puppeteer-launch.js", () => puppeteerLaunchStubModule);
+    }
   });
 
   it("loads the lazy image and the revealed element, and ends at the top", async () => {
@@ -2784,6 +2796,350 @@ describe("rendering checks (real audit, real browser)", () => {
   <main><p>Always visible paragraph.</p></main>
 </body></html>`;
 
+  /**
+   * Criterion 4 (amended 2026-10-15): icon buttons of 16 by 16 px in a row.
+   * WCAG 2.5.8 and axe let an undersized target pass when it has enough
+   * space around it, so at the desktop width the row is spaced out and
+   * passes, and on the phone the spacing collapses and it fails: the case
+   * only the rendering check can see. `TARGET_ALWAYS_FIXTURE` is the same
+   * row cramped at every width, which the engine pass reports itself.
+   */
+  const TARGET_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Target fixture</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif }
+  .icon { width: 16px; height: 16px; padding: 0; margin: 0; border: 0; background: #06c }
+  #toolbar { display: flex; gap: 24px }
+  @media (max-width: 600px) { #toolbar { gap: 2px } }
+</style></head>
+<body>
+  <main>
+    <h1>Icon buttons</h1>
+    <div id="toolbar">
+      <button class="icon" id="share" aria-label="Share"></button>
+      <button class="icon" id="print" aria-label="Print"></button>
+      <button class="icon" id="save" aria-label="Save"></button>
+    </div>
+  </main>
+</body></html>`;
+
+  const TARGET_ALWAYS_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Target fixture</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif }
+  .icon { width: 16px; height: 16px; padding: 0; margin: 0; border: 0; background: #06c }
+  #toolbar { display: flex; gap: 2px }
+</style></head>
+<body>
+  <main>
+    <h1>Icon buttons</h1>
+    <div id="toolbar">
+      <button class="icon" id="share" aria-label="Share"></button>
+      <button class="icon" id="print" aria-label="Print"></button>
+      <button class="icon" id="save" aria-label="Save"></button>
+    </div>
+  </main>
+</body></html>`;
+
+  /**
+   * Criterion 5: a link that only fails contrast in dark mode, next to one
+   * that fails in both — the second is the baseline rule, and must not be
+   * reported as something the mode broke.
+   */
+  const DARK_CONTRAST_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Dark contrast fixture</title>
+<style>
+  body { background: #fff; color: #111; font-family: system-ui, sans-serif }
+  a { color: #0b5ed7; text-decoration: underline }
+  #always-bad { color: #eee }
+  @media (prefers-color-scheme: dark) { #dark-only { color: #777; background: #666 } }
+</style></head>
+<body>
+  <main>
+    <h1>Modes and contrast</h1>
+    <p>Some copy with <a id="dark-only" href="https://example.com/one">a link that only fails in dark mode</a> in it.</p>
+    <p>More copy with <a id="always-bad" href="https://example.com/two">a link that fails in both</a> in it.</p>
+  </main>
+</body></html>`;
+
+  /**
+   * Forced colours: the icon button is rendered by its background image
+   * alone and has nothing left under a forced palette; the button with a
+   * label, the one with an inline `svg`, the decorative divider and the
+   * bordered image submit — replaced content, which keeps rendering — do.
+   *
+   * The swatch panel opts out of the forced palette, which is a finding, and
+   * `forced-color-adjust` is inherited: the swatch in it computes to `none`
+   * as well, and the opt-out is reported once, where it was decided.
+   */
+  const FORCED_COLORS_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Forced colours fixture</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif }
+  #icon-only { width: 24px; height: 24px; border: 0; background-color: transparent;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Ccircle cx='12' cy='12' r='8' fill='%23333'/%3E%3C/svg%3E") }
+  #divider { width: 200px; height: 4px; border-top: 1px solid #ccc }
+  #image-submit { width: 24px; height: 24px; border: 1px solid #ccc; background-color: transparent }
+</style></head>
+<body>
+  <main>
+    <h1>Forced colours</h1>
+    <button id="icon-only" type="button" aria-label="Search"></button>
+    <button id="with-text" type="button">Print</button>
+    <button id="with-svg" type="button" aria-label="Save"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect width="16" height="16" fill="currentColor"></rect></svg></button>
+    <div id="divider"></div>
+    <div id="swatches" style="forced-color-adjust: none; border: 1px solid #ccc; width: 60px; padding: 4px">
+      <span id="swatch" style="display: inline-block; width: 20px; height: 20px; border: 1px solid #333"></span>
+    </div>
+    <form action="/search">
+      <input id="image-submit" type="image" alt="Go" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Crect width='24' height='24' fill='%23333'/%3E%3C/svg%3E" />
+    </form>
+  </main>
+</body></html>`;
+
+  /**
+   * A page that cross-fades its colours when the mode flips, the way a
+   * Tailwind `duration-200` class does: mid-fade the link is grey on grey,
+   * settled it is black on white. Measuring the fade is measuring a colour
+   * nobody sees — 25 such findings on one live site before the pass waited
+   * for the transitions.
+   */
+  const TRANSITION_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Transition fixture</title>
+<style>
+  body { background: #fff; color: #111; font-family: system-ui, sans-serif }
+  /* The background flips at once, the link colour needs 600 ms to follow. */
+  #fading { color: #111; text-decoration: underline; transition: color 600ms linear }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111; color: #eee }
+    #fading { color: #eee }
+  }
+</style></head>
+<body>
+  <main>
+    <h1>Colours that fade</h1>
+    <p>Some copy with <a id="fading" href="https://example.com/">a link that fades to a readable colour</a> in it.</p>
+  </main>
+</body></html>`;
+
+  /**
+   * Fifty contrast failures the page has in both modes, and one it only has
+   * in dark mode, last in document order. The condition's axe run carries 50
+   * nodes per rule, so the one node a check can report only survives when
+   * the baseline's own nodes are dropped before that cap applies.
+   */
+  const CONTRAST_CAP_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Contrast cap fixture</title>
+<style>
+  body { background: #fff; color: #111; font-family: system-ui, sans-serif }
+  a { text-decoration: underline }
+  .always { color: #eee; background: #fff }
+  #dark-only { color: #0b5ed7; background: #fff }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111; color: #eee }
+    #dark-only { color: #777; background: #666 }
+  }
+</style></head>
+<body>
+  <main>
+    <h1>Fifty failures and one</h1>
+${Array.from(
+  { length: 50 },
+  (_, index) =>
+    `    <p>Copy with <a class="always" href="https://example.com/${index}">link ${index} that fails in both modes</a> in it.</p>`
+).join("\n")}
+    <p>Copy with <a id="dark-only" href="https://example.com/dark">a link that only fails in dark mode</a> in it.</p>
+  </main>
+</body></html>`;
+
+  /**
+   * More failures the mode introduced than one run carries, so the condition
+   * is reported as truncated instead of silently partial.
+   */
+  const CONTRAST_MANY_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Contrast many fixture</title>
+<style>
+  body { background: #fff; color: #111; font-family: system-ui, sans-serif }
+  a { color: #0b5ed7; background: #fff; text-decoration: underline }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111; color: #eee }
+    a { color: #777; background: #666 }
+  }
+</style></head>
+<body>
+  <main>
+    <h1>Sixty failures dark mode introduced</h1>
+${Array.from(
+  { length: 60 },
+  (_, index) =>
+    `    <p>Copy with <a href="https://example.com/${index}">link ${index} that only fails in dark mode</a> in it.</p>`
+).join("\n")}
+  </main>
+</body></html>`;
+
+  /**
+   * The two forced-colours contrast cases, side by side, measured in
+   * Chromium 2026-10-15.
+   *
+   * `#filled` is light text on a dark box, which passes as the page is
+   * normally rendered. Under forced colours the palette replaces its `color`
+   * with black and its background with white — black on white, perfectly
+   * readable — while `-webkit-text-fill-color` keeps the author's `#dddddd`,
+   * which is the colour axe measures: 1.35 against white, a failure about a
+   * colour that is nowhere on the screen. That node is dropped.
+   *
+   * `#opted` sets `forced-color-adjust: none` under forced colours, with a
+   * background and a text-fill colour of its own. The palette does not reach
+   * it, so the fill colour is the painted one and axe's 1.3 is real: that
+   * node stays, although its `color` and its fill colour differ too.
+   */
+  const FORCED_CONTRAST_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Forced contrast fixture</title>
+<style>
+  body { background: #fff; color: #111; font-family: system-ui, sans-serif }
+  #filled { background-color: #222222; color: #dddddd; -webkit-text-fill-color: #dddddd;
+    padding: 4px }
+  @media (forced-colors: active) {
+    #opted {
+      forced-color-adjust: none;
+      background-color: #666666;
+      color: #777777;
+      -webkit-text-fill-color: #787878;
+    }
+  }
+</style></head>
+<body>
+  <main>
+    <h1>Forced colours and contrast</h1>
+    <p id="filled">Copy the author draws light on a dark box of its own.</p>
+    <p id="opted">Copy that keeps the author's own colours when the system forces its palette.</p>
+  </main>
+</body></html>`;
+
+  /**
+   * Two animations on one element, and a nested pair whose inner animation
+   * starts first, so `getAnimations()` lists the descendant before its
+   * ancestor. One element is one thing that moves, whatever order its
+   * animations come in.
+   */
+  const MOTION_IDENTITY_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Motion identity fixture</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif }
+  #multi { width: 40px; height: 40px; background: #333;
+    animation: spin 2s linear infinite, pulse 3s linear infinite }
+  @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+  @keyframes pulse { from { opacity: 1 } to { opacity: 0.4 } }
+  #outer { width: 60px; height: 60px; background: #06c }
+  #inner { width: 20px; height: 20px; background: #fff }
+</style></head>
+<body>
+  <main>
+    <h1>One element, two animations</h1>
+    <div id="multi"></div>
+    <div id="outer"><div id="inner"></div></div>
+  </main>
+  <script>
+    /* The inner animation is created first, so it comes first in the list. */
+    document.getElementById('inner').animate(
+      [{ transform: 'rotate(0deg)' }, { transform: 'rotate(360deg)' }],
+      { duration: 2000, iterations: Infinity }
+    );
+    document.getElementById('outer').animate(
+      [{ transform: 'scale(1)' }, { transform: 'scale(1.2)' }],
+      { duration: 2000, iterations: Infinity }
+    );
+  </script>
+</body></html>`;
+
+  /**
+   * `forced-color-adjust: none` on `html` or on `body`, which opts the whole
+   * page out of the forced palette. The walk starts inside the body, so
+   * neither element used to be collected at all: the opt-out had no owner to
+   * be reported at, and the descendants that merely inherited it were
+   * suppressed as the ancestor's decision — one finding became none.
+   */
+  const rootAdjustFixture = (owner: "html" | "body") => `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Root opt-out fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif }
+  ${owner} { forced-color-adjust: none }
+</style></head>
+<body>
+  <main>
+    <h1>Colours the system may not replace</h1>
+    <p>Copy under an element that opted the whole page out of the forced palette.</p>
+    <span id="swatch" style="display: inline-block; width: 20px; height: 20px; background: #06c"></span>
+  </main>
+</body></html>`;
+
+  /**
+   * More bordered elements than the forced-colours group carries. None of
+   * them is a finding — a plain divider is decoration — so only the
+   * collection can report that it stopped early.
+   */
+  const PAINTED_CAP_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Painted cap fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif }
+  .rule { width: 200px; height: 4px; border-top: 1px solid #ccc }
+</style></head>
+<body>
+  <main>
+    <h1>More borders than the group carries</h1>
+${Array.from({ length: MAX_PAINTED + 20 }, () => '    <div class="rule"></div>').join("\n")}
+  </main>
+</body></html>`;
+
+  /**
+   * One animated carousel with more animated children than the motion group
+   * carries. The children fold into the carousel, so the check reports one
+   * movement and is nowhere near its own cap: only the collection can report
+   * that it stopped early.
+   */
+  const MOTION_CAP_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Motion cap fixture</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif }
+  #carousel { padding: 4px }
+  .dot { display: inline-block; width: 10px; height: 10px; margin: 1px; background: #06c }
+</style></head>
+<body>
+  <main>
+    <h1>One movement, many animations</h1>
+    <div id="carousel">
+${Array.from({ length: MAX_ANIMATIONS + 20 }, () => '      <span class="dot"></span>').join("\n")}
+    </div>
+  </main>
+  <script>
+    /* The carousel's own animation is created first, so it leads the list
+       and the cap drops children rather than the element that owns them. */
+    document.getElementById('carousel').animate(
+      [{ transform: 'translateX(0)' }, { transform: 'translateX(10px)' }],
+      { duration: 2000, iterations: Infinity }
+    );
+    for (const dot of document.querySelectorAll('.dot')) {
+      dot.animate([{ opacity: 1 }, { opacity: 0.4 }], { duration: 2000, iterations: Infinity });
+    }
+  </script>
+</body></html>`;
+
+  /** Criterion 6, with and without a reduced-motion rule that stops it. */
+  const motionFixture = (honoursReducedMotion: boolean) => `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Motion fixture</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif }
+  #spinner { width: 40px; height: 40px; background: #333; animation: spin 2s linear infinite }
+  @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+  ${honoursReducedMotion ? "@media (prefers-reduced-motion: reduce) { #spinner { animation: none } }" : ""}
+</style></head>
+<body>
+  <main>
+    <h1>Motion</h1>
+    <div id="spinner"></div>
+  </main>
+</body></html>`;
+
   let browser: Awaited<ReturnType<typeof puppeteer.launch>>;
   let fixtureDir: string;
   const url = (name: string) => `file://${join(fixtureDir, name)}`;
@@ -2807,6 +3163,21 @@ describe("rendering checks (real audit, real browser)", () => {
     writeFileSync(join(fixtureDir, "patch.html"), PATCH_FIXTURE);
     writeFileSync(join(fixtureDir, "hidden-nav.html"), HIDDEN_NAV_FIXTURE);
     writeFileSync(join(fixtureDir, "disclosure.html"), DISCLOSURE_FIXTURE);
+    writeFileSync(join(fixtureDir, "target.html"), TARGET_FIXTURE);
+    writeFileSync(join(fixtureDir, "target-always.html"), TARGET_ALWAYS_FIXTURE);
+    writeFileSync(join(fixtureDir, "dark-contrast.html"), DARK_CONTRAST_FIXTURE);
+    writeFileSync(join(fixtureDir, "forced-colors.html"), FORCED_COLORS_FIXTURE);
+    writeFileSync(join(fixtureDir, "contrast-cap.html"), CONTRAST_CAP_FIXTURE);
+    writeFileSync(join(fixtureDir, "contrast-many.html"), CONTRAST_MANY_FIXTURE);
+    writeFileSync(join(fixtureDir, "forced-contrast.html"), FORCED_CONTRAST_FIXTURE);
+    writeFileSync(join(fixtureDir, "motion-identity.html"), MOTION_IDENTITY_FIXTURE);
+    writeFileSync(join(fixtureDir, "transition.html"), TRANSITION_FIXTURE);
+    writeFileSync(join(fixtureDir, "root-adjust-html.html"), rootAdjustFixture("html"));
+    writeFileSync(join(fixtureDir, "root-adjust-body.html"), rootAdjustFixture("body"));
+    writeFileSync(join(fixtureDir, "painted-cap.html"), PAINTED_CAP_FIXTURE);
+    writeFileSync(join(fixtureDir, "motion-cap.html"), MOTION_CAP_FIXTURE);
+    writeFileSync(join(fixtureDir, "motion.html"), motionFixture(false));
+    writeFileSync(join(fixtureDir, "motion-reduced.html"), motionFixture(true));
 
     browser = await puppeteer.launch({
       headless: true,
@@ -2815,10 +3186,15 @@ describe("rendering checks (real audit, real browser)", () => {
   }, 120_000);
 
   afterAll(async () => {
-    await browser?.close();
-    if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
-    mock.module("./engines/axe.js", () => axeStubModule);
-    mock.module("./puppeteer-launch.js", () => puppeteerLaunchStubModule);
+    try {
+      await browser?.close();
+      if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
+    } finally {
+      // A browser that refuses to close must not leave the real modules
+      // mocked in for whatever runs next in this process.
+      mock.module("./engines/axe.js", () => axeStubModule);
+      mock.module("./puppeteer-launch.js", () => puppeteerLaunchStubModule);
+    }
   });
 
   const renderIssues = (result: Awaited<ReturnType<typeof audit>>, checkId?: string) =>
@@ -3353,6 +3729,309 @@ describe("rendering checks (real audit, real browser)", () => {
     } finally {
       await page.close();
     }
+  }, 120_000);
+
+  // Criterion 4, as amended on 2026-10-15: the rule runs in the normal
+  // engine pass too (decision 2), so the rendering check reports what only
+  // the phone layout breaks, and never repeats what the engine pass said.
+  it("reports targets that only fail on the phone, and leaves the rest to the normal pass", async () => {
+    const result = await audit(url("target.html"), {
+      rendering: { conditions: ["viewport:360"] },
+    });
+
+    const findings = renderIssues(result, "target-size");
+    expect(findings.map((issue) => issue.selector).sort()).toEqual(["#print", "#save", "#share"]);
+    const [finding] = findings;
+    expect(finding.id).toBe("render:target-size");
+    expect(finding.impact).toBe("serious");
+    expect(finding.rendering?.condition).toBe("viewport:360");
+    expect(finding.rendering?.evidence.rule).toBe("target-size");
+    expect(finding.rendering?.evidence.viewportWidth).toBe(360);
+    expect(finding.rendering?.evidence.outcome).toBe("violation");
+    expect(finding.failureSummary).toContain("360 px wide viewport");
+    // Drawn on its own capture, at the button's own box.
+    expect(finding.annotation?.state).toBe("resolved");
+    expect(finding.annotation?.rect?.width).toBe(16);
+    expect(result.renderingCaptures?.[finding.rendering?.captureIndex ?? -1]?.condition).toBe(
+      "viewport:360"
+    );
+    // Three buttons, three marks — and `undefined` is not one of them.
+    for (const issue of findings) expect(issue.annotation?.mark).toBeDefined();
+    expect(new Set(findings.map((issue) => issue.annotation?.mark)).size).toBe(3);
+
+    // At the desktop width the row is spaced out: the normal pass is clean.
+    const plain = await audit(url("target.html"));
+    expect(renderIssues(plain)).toEqual([]);
+    expect(plain.issues.filter((issue) => issue.id === "target-size")).toHaveLength(0);
+
+    // A row cramped at every width is the engine pass's finding, once:
+    // neither the phone nor the baseline viewport repeats it.
+    const always = await audit(url("target-always.html"), {
+      rendering: { conditions: ["viewport:1280", "viewport:360"] },
+    });
+    expect(always.issues.filter((issue) => issue.id === "target-size")).toHaveLength(3);
+    expect(renderIssues(always, "target-size")).toEqual([]);
+    // Nothing from the rendering check is only evidence when both
+    // conditions ran and the check itself got to judge them.
+    expect(always.renderingMeta?.conditionsRun).toEqual(["viewport:1280", "viewport:360"]);
+    expect(always.renderingMeta?.conditionsSkipped).toEqual([]);
+    expect(always.renderingMeta?.checksRun).toContain("target-size");
+  }, 120_000);
+
+  // Criterion 5
+  it("reports a contrast failure that only dark mode has, and not one the page already has", async () => {
+    const result = await audit(url("dark-contrast.html"), {
+      rendering: { conditions: ["viewport:1280", "media:dark"] },
+    });
+
+    const findings = renderIssues(result, "contrast-under-mode");
+    expect(findings.map((issue) => issue.selector)).toEqual(["#dark-only"]);
+    const [finding] = findings;
+    expect(finding.id).toBe("render:contrast-under-mode");
+    expect(finding.impact).toBe("serious");
+    expect(finding.rendering?.condition).toBe("media:dark");
+    expect(finding.rendering?.evidence.rule).toBe("color-contrast");
+    expect(finding.rendering?.evidence.mode).toBe("dark mode");
+    expect(finding.failureSummary).toContain("Under dark mode");
+    expect(finding.annotation?.state).toBe("resolved");
+
+    // The link that fails in both is the engine pass's finding, once.
+    const baselineFailures = result.issues.filter(
+      (issue) => issue.id === "color-contrast" && issue.selector === "#always-bad"
+    );
+    expect(baselineFailures).toHaveLength(1);
+    expect(
+      result.issues.filter(
+        (issue) =>
+          issue.rendering?.checkId === "contrast-under-mode" && issue.selector === "#always-bad"
+      )
+    ).toEqual([]);
+  }, 120_000);
+
+  it("keeps a failure the mode introduced behind fifty the page already has", async () => {
+    // The condition's axe run carries 50 nodes per rule. The engine pass
+    // already reported the first 50 links, so the one the mode introduced is
+    // node 51 and only survives when the baseline's nodes are dropped before
+    // the cap applies.
+    const result = await audit(url("contrast-cap.html"), {
+      rendering: { conditions: ["media:dark"] },
+    });
+
+    expect(result.issues.filter((issue) => issue.id === "color-contrast")).toHaveLength(50);
+    const findings = renderIssues(result, "contrast-under-mode");
+    expect(findings.map((issue) => issue.selector)).toEqual(["#dark-only"]);
+    expect(result.renderingMeta?.conditionsRun).toEqual(["media:dark"]);
+    expect(result.renderingMeta?.conditionsSkipped).toEqual([]);
+    expect(result.renderingMeta?.truncatedConditions).toBeUndefined();
+  }, 120_000);
+
+  it("reports a condition whose own failures did not fit the run", async () => {
+    const result = await audit(url("contrast-many.html"), {
+      rendering: { conditions: ["media:dark"] },
+    });
+
+    const findings = renderIssues(result, "contrast-under-mode");
+    expect(findings.length).toBeGreaterThan(0);
+    // Sixty eligible nodes, a run that carries 50 of them: partial, and the
+    // meta says so instead of presenting the findings as the whole picture.
+    expect(result.renderingMeta?.truncatedConditions).toEqual(["media:dark"]);
+    expect(result.renderingMeta?.conditionsSkipped).toEqual([]);
+  }, 120_000);
+
+  it("drops the forced-colours contrast axe misread and keeps the opted-out one", async () => {
+    const result = await audit(url("forced-contrast.html"), {
+      rendering: { conditions: ["media:forced-colors"] },
+    });
+
+    const findings = renderIssues(result, "contrast-under-mode");
+    // `#filled` is reached by the forced palette, so axe's ratio is about a
+    // colour the browser does not paint; `#opted` keeps its own colours, so
+    // axe measured what is on the screen.
+    expect(findings.map((issue) => issue.selector)).toEqual(["#opted"]);
+    expect(findings[0].rendering?.evidence.rule).toBe("color-contrast");
+    expect(findings[0].annotation?.state).toBe("resolved");
+    expect(result.renderingMeta?.conditionsRun).toEqual(["media:forced-colors"]);
+    expect(result.renderingMeta?.conditionsSkipped).toEqual([]);
+    expect(result.renderingMeta?.checksRun).toContain("contrast-under-mode");
+  }, 120_000);
+
+  it("gives one finding to an element with two animations and to a nested pair", async () => {
+    const result = await audit(url("motion-identity.html"), {
+      rendering: { conditions: ["media:reduced-motion"] },
+    });
+
+    const findings = renderIssues(result, "motion-not-reduced");
+    // One element, one identity, one finding — and the nested pair is one
+    // movement, reported on the outer element although the inner animation
+    // comes first in `getAnimations()`.
+    expect(findings.map((issue) => issue.selector).sort()).toEqual(["#multi", "#outer"]);
+    const multi = findings.find((issue) => issue.selector === "#multi");
+    expect(multi?.rendering?.evidence.animations).toBe(2);
+    for (const issue of findings) expect(issue.annotation?.mark).toBeDefined();
+    expect(new Set(findings.map((issue) => issue.annotation?.mark)).size).toBe(2);
+    expect(result.renderingMeta?.conditionsRun).toEqual(["media:reduced-motion"]);
+    expect(result.renderingMeta?.conditionsSkipped).toEqual([]);
+  }, 120_000);
+
+  it("waits for the colours of a mode to finish fading before it judges them", async () => {
+    const result = await audit(url("transition.html"), {
+      rendering: { conditions: ["viewport:1280", "media:dark"] },
+    });
+
+    // The background flips at once and the link colour fades over 600 ms, so
+    // mid-fade the link is near-black on black; settled it is #eee on #111.
+    expect(renderIssues(result, "contrast-under-mode")).toEqual([]);
+    // An empty result is only evidence when the check actually ran: a
+    // condition that timed out, or a collection that failed, finds nothing
+    // either.
+    expect(result.renderingMeta?.conditionsRun).toEqual(["viewport:1280", "media:dark"]);
+    expect(result.renderingMeta?.conditionsSkipped).toEqual([]);
+    expect(result.renderingMeta?.checksRun).toContain("contrast-under-mode");
+  }, 120_000);
+
+  it("does not settle a condition while a transition has not finished", async () => {
+    // The real-browser test above proves the wait on a page that fades its
+    // colours; this one proves it is the wait and not the timing: the
+    // transition's `finished` promise is the test's, so a settle step that
+    // stopped waiting for transitions would come back before it is released.
+    const page = await browser.newPage();
+
+    try {
+      await page.goto(url("mode.html"), { waitUntil: "networkidle2" });
+      await page.evaluate(() => {
+        const held = window as unknown as { __release?: () => void };
+        let release = (): void => {};
+        const finished = new Promise<void>((resolve) => {
+          release = () => resolve();
+        });
+        held.__release = release;
+        document.getAnimations = () =>
+          [
+            { transitionProperty: "color", playState: "running", finished },
+          ] as unknown as Animation[];
+      });
+
+      let settled = false;
+      const settling = settleCondition(page as unknown as BrowserPage).then(() => {
+        settled = true;
+      });
+
+      // Well past the two animation frames and well inside the one-second
+      // cap, so only the transition can be what it is still waiting for.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(settled).toBe(false);
+
+      await page.evaluate(() => {
+        (window as unknown as { __release: () => void }).__release();
+      });
+      await settling;
+      expect(settled).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 120_000);
+
+  it("reports an element that forced colours leave nothing of, and nothing else", async () => {
+    const result = await audit(url("forced-colors.html"), {
+      rendering: { conditions: ["media:forced-colors"] },
+    });
+
+    const findings = renderIssues(result, "forced-colors-loss");
+    // The button with a label, the one with an inline svg, the divider and
+    // the bordered image submit — which is replaced content itself — all
+    // keep something under a forced palette. The swatch panel does not: it
+    // opts out of it, once, and the swatch that inherited the opt-out is not
+    // a second finding about the same decision.
+    expect(findings.map((issue) => issue.selector)).toEqual(["#icon-only", "#swatches"]);
+    expect(findings[1].rendering?.evidence.reason).toBe("forced-color-adjust");
+    const [finding] = findings;
+    expect(finding.id).toBe("render:forced-colors-loss");
+    expect(finding.impact).toBe("serious");
+    expect(finding.rendering?.condition).toBe("media:forced-colors");
+    expect(finding.rendering?.evidence.reason).toBe("paint-only");
+    expect(finding.rendering?.evidence.backgroundImage).toBe(true);
+    expect(finding.failureSummary).toContain("background image");
+    expect(finding.annotation?.state).toBe("resolved");
+    expect(finding.annotation?.rect?.width).toBe(24);
+  }, 120_000);
+
+  it("reports a root opt-out once, at the element that sets it", async () => {
+    for (const [owner, fixture] of [
+      ["html", "root-adjust-html.html"],
+      ["body", "root-adjust-body.html"],
+    ] as const) {
+      const result = await audit(url(fixture), {
+        rendering: { conditions: ["media:forced-colors"] },
+      });
+
+      const findings = renderIssues(result, "forced-colors-loss");
+      // One decision about the whole page, reported where it was made; the
+      // swatch under it only inherited the opt-out.
+      expect(findings).toHaveLength(1);
+      expect(findings[0].failureSummary).toContain(`The <${owner}> sets`);
+      expect(findings[0].rendering?.evidence.reason).toBe("forced-color-adjust");
+      expect(findings[0].rendering?.condition).toBe("media:forced-colors");
+      expect(result.renderingMeta?.checksRun).toContain("forced-colors-loss");
+      expect(result.renderingMeta?.conditionsSkipped).toEqual([]);
+    }
+  }, 120_000);
+
+  it("reports the forced-colours collection that hit its cap", async () => {
+    const result = await audit(url("painted-cap.html"), {
+      rendering: { conditions: ["media:forced-colors"] },
+    });
+
+    // Decoration, so there is nothing to report — and the collection still
+    // says it carried less than the page has.
+    expect(renderIssues(result, "forced-colors-loss")).toEqual([]);
+    expect(result.renderingMeta?.truncatedConditions).toEqual(["media:forced-colors"]);
+    expect(result.renderingMeta?.conditionsSkipped).toEqual([]);
+    expect(result.renderingMeta?.checksRun).toContain("forced-colors-loss");
+  }, 120_000);
+
+  it("reports the motion collection that hit its cap, with the movement still one finding", async () => {
+    const result = await audit(url("motion-cap.html"), {
+      rendering: { conditions: ["media:reduced-motion"] },
+    });
+
+    const findings = renderIssues(result, "motion-not-reduced");
+    // The children fold into the carousel, so the check is nowhere near its
+    // own cap: the collection is what stopped early, and it says so.
+    expect(findings.map((issue) => issue.selector)).toEqual(["#carousel"]);
+    expect(findings[0].rendering?.evidence.animations).toBe(MAX_ANIMATIONS);
+    expect(result.renderingMeta?.truncatedConditions).toEqual(["media:reduced-motion"]);
+    expect(result.renderingMeta?.conditionsSkipped).toEqual([]);
+  }, 120_000);
+
+  // Criterion 6
+  it("reports an infinite animation under reduced motion, unless the page stops it", async () => {
+    const running = await audit(url("motion.html"), {
+      rendering: { conditions: ["media:reduced-motion"] },
+    });
+
+    const findings = renderIssues(running, "motion-not-reduced");
+    expect(findings.map((issue) => issue.selector)).toEqual(["#spinner"]);
+    const [finding] = findings;
+    expect(finding.id).toBe("render:motion-not-reduced");
+    expect(finding.impact).toBe("moderate");
+    expect(finding.rendering?.condition).toBe("media:reduced-motion");
+    expect(finding.rendering?.evidence.kind).toBe("infinite-animation");
+    expect(finding.rendering?.evidence.animation).toBe("spin");
+    expect(finding.failureSummary).toContain("repeats forever");
+    expect(finding.annotation?.state).toBe("resolved");
+    // The box of the rotating square, which is wider than the square: the
+    // rect is the one the element occupies at the moment it was measured.
+    expect(finding.annotation?.rect?.width).toBeGreaterThanOrEqual(40);
+
+    const stopped = await audit(url("motion-reduced.html"), {
+      rendering: { conditions: ["media:reduced-motion"] },
+    });
+    expect(renderIssues(stopped, "motion-not-reduced")).toEqual([]);
+    // The page stopping the animation is why there is nothing, not a
+    // condition that never ran or a check that never got its data.
+    expect(stopped.renderingMeta?.conditionsRun).toEqual(["media:reduced-motion"]);
+    expect(stopped.renderingMeta?.conditionsSkipped).toEqual([]);
+    expect(stopped.renderingMeta?.checksRun).toContain("motion-not-reduced");
   }, 120_000);
 
   /**

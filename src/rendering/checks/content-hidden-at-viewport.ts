@@ -150,6 +150,29 @@ function regionOfAncestor(
   return undefined;
 }
 
+/**
+ * The highest identity any group of the measurement hands out: candidates,
+ * ancestor boxes, painted elements, motion targets and the condition's axe
+ * nodes all share one numbering, and a fallback region must not collide with
+ * any of them (a target-size node at the same condition would otherwise get
+ * the region's marker).
+ */
+function highestIdentity(measurement: RenderingMeasurement): number {
+  let highest = -1;
+  const see = (index: number) => {
+    if (index > highest) highest = index;
+  };
+  for (const element of measurement.elements) see(element.index);
+  for (const ancestor of measurement.ancestors ?? []) see(ancestor.index);
+  for (const element of measurement.painted ?? []) see(element.index);
+  for (const animation of measurement.motion?.animations ?? []) see(animation.index);
+  for (const element of measurement.motion?.elements ?? []) see(element.index);
+  for (const result of measurement.axe?.results ?? []) {
+    for (const node of result.nodes) see(node.index);
+  }
+  return highest;
+}
+
 export const contentHiddenAtViewportCheck: CrossConditionCheck = {
   id: "content-hidden-at-viewport",
   kind: "cross-condition",
@@ -159,7 +182,7 @@ export const contentHiddenAtViewportCheck: CrossConditionCheck = {
   reportsUnder: "viewport:1280",
   comparesWith: "viewport:360",
 
-  evaluate({ measurement, reference }) {
+  evaluate({ measurement, reference, onTruncated }) {
     // An absence in a measurement that stopped early is not an absence.
     if (reference.truncated) return [];
 
@@ -175,7 +198,7 @@ export const contentHiddenAtViewportCheck: CrossConditionCheck = {
      * an ancestor box for, which is a walk that hit its cap. Past every real
      * index, so the region still gets a mark of its own and not a member's.
      */
-    let nextRegionIndex = measurement.elements.length + (measurement.ancestors?.length ?? 0);
+    let nextRegionIndex = highestIdentity(measurement) + 1;
 
     for (const element of measurement.elements) {
       if (!element.rendered || !element.hasText) continue;
@@ -223,6 +246,8 @@ export const contentHiddenAtViewportCheck: CrossConditionCheck = {
 
     const wideWidth = Math.round(measurement.viewport.width);
     const narrowWidth = Math.round(reference.viewport.width);
+
+    if (regions.size > MAX_FINDINGS) onTruncated?.();
 
     return [...regions.values()].slice(0, MAX_FINDINGS).map((region): RenderingFinding => {
       const state = region.presentAtNarrowViewport ? "not rendered" : "absent";

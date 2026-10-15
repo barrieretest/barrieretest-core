@@ -489,10 +489,13 @@ describe("parseArgs (rendering flags)", () => {
     ).not.toThrow();
   });
 
-  it("rejects an unknown check id", () => {
-    expect(() => parseArgs(["https://example.com", "--rendering-checks", "target-size"])).toThrow(
-      /Invalid --rendering-checks 'target-size'/
+  it("rejects an unknown check id and takes a built-in one", () => {
+    expect(() => parseArgs(["https://example.com", "--rendering-checks", "contrast"])).toThrow(
+      /Invalid --rendering-checks 'contrast'/
     );
+    expect(() =>
+      parseArgs(["https://example.com", "--rendering-checks", "target-size"])
+    ).not.toThrow();
   });
 
   it("rejects a missing or empty value", () => {

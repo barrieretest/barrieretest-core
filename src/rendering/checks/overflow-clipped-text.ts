@@ -47,7 +47,7 @@ export const overflowClippedTextCheck: PerConditionCheck = {
 
   appliesTo: (condition) => condition.viewport !== undefined || condition.textSpacing === true,
 
-  evaluate({ condition, measurement }) {
+  evaluate({ condition, measurement, onTruncated }) {
     const findings: RenderingFinding[] = [];
     const helpUrl = condition.textSpacing ? TEXT_SPACING_HELP_URL : REFLOW_HELP_URL;
 
@@ -61,7 +61,10 @@ export const overflowClippedTextCheck: PerConditionCheck = {
       const horizontal = clipsHard(clipping.overflowX) && horizontalBy > TOLERANCE;
       if (!vertical && !horizontal) continue;
 
-      if (findings.length >= MAX_FINDINGS) break;
+      if (findings.length >= MAX_FINDINGS) {
+        onTruncated?.();
+        break;
+      }
 
       const minor = isSingleLineEllipsis(clipping);
       const axis = vertical ? "below" : "beyond";

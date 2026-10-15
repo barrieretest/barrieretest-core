@@ -155,6 +155,171 @@ export interface RenderingAncestor {
   rect: MeasuredRect;
 }
 
+/**
+ * One element whose paint the forced-colors check judges, as the in-page
+ * measurement reports it under `forced-colors: active`. Not a text
+ * candidate: an icon button carries no text at all, which is the whole
+ * point, so these are gathered beside `elements` rather than in it.
+ */
+export interface RenderingPaintedElement {
+  /** Identity within this measurement; what the mark numbering groups by. */
+  index: number;
+  selector: string;
+  html: string;
+  tag: string;
+  role: string | null;
+  /** Rect in CSS px in document space, like `RenderingElement.rect`. */
+  rect: MeasuredRect;
+  anchored: boolean;
+  /** Computed `background-image`, bounded; `"none"` when there is none. */
+  backgroundImage: string;
+  /** A border side that paints: width above 0 and a style other than none. */
+  border: boolean;
+  /** Computed `forced-color-adjust`, which is an inherited property. */
+  forcedColorAdjust: string;
+  /**
+   * Whether this element is where `forced-color-adjust: none` starts, rather
+   * than a descendant that inherited it. The opt-out is one decision, made
+   * at one element, and reported there: every element under it would
+   * otherwise carry the same finding.
+   */
+  setsForcedColorAdjust: boolean;
+  /** Whether the subtree holds any non-whitespace text. */
+  hasContentText: boolean;
+  /**
+   * Whether the element itself is, or holds, replaced or vector content —
+   * `img`, `svg`, `canvas`, `video`, `object`, an image input — which keeps
+   * rendering under forced colours and is therefore not lost. The element
+   * itself counts: a bordered, named `img` is not rendering the forced
+   * palette takes away.
+   */
+  hasGraphic: boolean;
+  /** `aria-hidden="true"` on the element or an ancestor: decorative. */
+  ariaHidden: boolean;
+  /** Whether the element is itself focusable or an interactive element. */
+  interactive: boolean;
+  /** Whether it carries `aria-label`, `aria-labelledby` or `title`. */
+  named: boolean;
+  /** Whether it is, or sits inside, a rendered link or button. */
+  inControl: boolean;
+}
+
+/**
+ * One entry of `document.getAnimations()` under the condition, resolved to
+ * the element it animates.
+ */
+export interface RenderingAnimation {
+  /** Identity within this measurement; what the mark numbering groups by. */
+  index: number;
+  /** The animated element, when the effect has one. */
+  selector: string | null;
+  html?: string;
+  tag?: string;
+  rect?: MeasuredRect;
+  anchored?: boolean;
+  /** `animation-name`, transition property, or the animation's id. */
+  name: string;
+  /** `"running"`, `"paused"`, `"finished"` or `"idle"`. */
+  playState: string;
+  /** -1 stands for an infinite count: JSON cannot carry `Infinity`. */
+  iterations: number;
+  /** Iteration duration in ms; 0 when the effect reports `"auto"`. */
+  durationMs: number;
+  /**
+   * Identity of the nearest element above this one that is animated too, or
+   * -1. An SVG spinner animates the `svg` and the `circle` in it; that is
+   * one thing moving, and the check reports the outermost of them.
+   */
+  parentIndex: number;
+}
+
+/** Markup that moves by itself, which no media query can stop. */
+export interface RenderingMotionElement {
+  index: number;
+  kind: "video-autoplay" | "marquee";
+  selector: string;
+  html: string;
+  tag: string;
+  rect: MeasuredRect;
+  anchored: boolean;
+}
+
+/** What the motion check reads: the animations and the self-moving markup. */
+export interface RenderingMotion {
+  animations: RenderingAnimation[];
+  elements: RenderingMotionElement[];
+  /**
+   * Whether the collection dropped running animations or self-moving
+   * elements it was eligible to carry, so the group is partial.
+   */
+  truncated?: boolean;
+}
+
+/** One node of one axe rule, as the condition's axe run reported it. */
+export interface RenderingAxeNode {
+  /**
+   * The axe target, flattened the way the engine pass flattens it, so the
+   * baseline lookup compares like with like.
+   */
+  selector: string;
+  html: string;
+  failureSummary?: string;
+  impact: IssueSeverity;
+  /** Identity within this measurement; what the mark numbering groups by. */
+  index: number;
+  /** Rect in CSS px in document space; absent when the node had no element. */
+  rect?: MeasuredRect;
+  anchored?: boolean;
+  /**
+   * Whether the engine pass already reported this rule on this element. A
+   * mode-specific check reports what the mode added, and this is how it
+   * knows; set by the collection, so the check stays a pure function of the
+   * data it is handed.
+   */
+  inBaseline: boolean;
+  /**
+   * Whether axe measured a text colour the browser does not paint: the
+   * element's computed `color` and `-webkit-text-fill-color` disagree *and*
+   * the element is subject to forced-colour adjustment. Axe reads the fill
+   * colour in preference to `color`, and under `forced-colors: active`
+   * Chromium forces `color` and paints with it but leaves the fill colour at
+   * the author's value — so axe's contrast numbers are about a colour that
+   * is nowhere on the screen. An element that opted out of the forced
+   * palette (`forced-color-adjust: none`, its own or inherited) keeps both
+   * author values, so its mismatch is the author's and axe's numbers are
+   * about what is painted: it is never flagged here.
+   */
+  textFillMismatch?: boolean;
+}
+
+/** One rule's results under the condition, violations and incomplete apart. */
+export interface RenderingAxeResult {
+  /** The axe rule id, e.g. `"target-size"`. */
+  id: string;
+  /** Whether axe failed the nodes or could not decide about them. */
+  outcome: "violation" | "incomplete";
+  description: string;
+  help: string;
+  helpUrl: string;
+  impact: IssueSeverity;
+  nodes: RenderingAxeNode[];
+  /**
+   * Whether the rule had more nodes a check could report than the run
+   * carries. The baseline's own nodes are dropped before the cap applies, so
+   * this is about findings the condition introduced and nothing else.
+   */
+  truncated?: boolean;
+}
+
+/** Everything the condition's axe run returned. */
+export interface RenderingAxeRun {
+  /** The rules it was restricted to. */
+  rules: string[];
+  results: RenderingAxeResult[];
+  /** Whether any rule hit the node cap, so its findings are partial. */
+  truncated?: boolean;
+}
+
 /** Everything the single measurement round trip of one condition returns. */
 export interface RenderingMeasurement {
   elements: RenderingElement[];
@@ -169,6 +334,24 @@ export interface RenderingMeasurement {
   scroll: { x: number; y: number };
   /** Only when `collect.ancestors` asked for it. */
   ancestors?: RenderingAncestor[];
+  /** Only when `collect.forcedColors` asked for it. */
+  painted?: RenderingPaintedElement[];
+  /**
+   * Whether the forced-colours collection dropped elements it was eligible
+   * to carry, so that group is partial. Apart from `truncated`, which is
+   * the element walk: a check that reads one group must not be told the
+   * other one stopped early.
+   */
+  paintedTruncated?: boolean;
+  /**
+   * Whether the ancestor-box collection hit its cap, so some hidden regions
+   * fall back to their members' union box and an identity of their own.
+   */
+  ancestorsTruncated?: boolean;
+  /** Only when `collect.motion` asked for it. */
+  motion?: RenderingMotion;
+  /** Only when `collect.axeRules` asked for rules. */
+  axe?: RenderingAxeRun;
 }
 
 /**
@@ -193,6 +376,17 @@ export interface RenderingCollect {
    * check that reports a region rather than an element.
    */
   ancestors?: boolean;
+  /** Paint, text and naming of the elements the forced-colours check judges. */
+  forcedColors?: boolean;
+  /** Running animations, autoplaying video and `<marquee>`. */
+  motion?: boolean;
+  /**
+   * Axe rules to run under this condition, on top of the measurement. Axe is
+   * already on the page from the engine pass and is re-injected only when it
+   * is not; the run is restricted to these rules, and its cost counts
+   * against the condition's own budget like every other step.
+   */
+  axeRules?: string[];
 }
 
 /** One rendering finding, before it becomes an `Issue`. */
@@ -225,10 +419,32 @@ export interface RenderingFinding {
   evidence: Record<string, number | string | boolean>;
 }
 
+/**
+ * The runner's cancellation token, as a step that takes one sees it. The
+ * runner owns the clock: a step that spans several browser operations asks
+ * before each of them, so a condition the runner has abandoned cannot reach
+ * the page again.
+ */
+export interface ConditionCancellation {
+  /** Throws when the condition has been abandoned. */
+  check(): void;
+}
+
 interface RenderingCheckBase {
   id: string;
   collect: RenderingCollect;
 }
+
+/**
+ * How a check says its own finding cap dropped results it was eligible to
+ * report. The runner rolls this into `truncatedConditions` and its warning,
+ * so a partial result is never presented as the whole picture.
+ *
+ * A side channel rather than part of the return value: the findings stay a
+ * pure function of the measurement, and a check that reports everything it
+ * found says nothing at all.
+ */
+export type RenderingTruncationReport = () => void;
 
 /** A check that runs on the measurement of a single condition. */
 export interface PerConditionCheck extends RenderingCheckBase {
@@ -238,6 +454,8 @@ export interface PerConditionCheck extends RenderingCheckBase {
   evaluate(input: {
     condition: RenderingCondition;
     measurement: RenderingMeasurement;
+    /** Called when the check's finding cap dropped an eligible result. */
+    onTruncated?: RenderingTruncationReport;
   }): RenderingFinding[];
 }
 
@@ -254,6 +472,8 @@ export interface CrossConditionCheck extends RenderingCheckBase {
     condition: RenderingCondition;
     measurement: RenderingMeasurement;
     reference: RenderingMeasurement;
+    /** Called when the check's finding cap dropped an eligible result. */
+    onTruncated?: RenderingTruncationReport;
   }): RenderingFinding[];
 }
 

@@ -62,6 +62,26 @@ interface StubOptions {
   rejectSettleAfter?: number;
   /** Report the element cap in every measurement. */
   truncated?: boolean;
+  /** Report the forced-colours cap in every measurement. */
+  paintedTruncated?: boolean;
+  /** Report the motion cap in every measurement. */
+  motionTruncated?: boolean;
+  /** Report the ancestor-box cap in every measurement. */
+  ancestorsTruncated?: boolean;
+  /** Answer the settle steps after this many only after this delay, in ms. */
+  slowSettleAfter?: { after: number; delayMs: number };
+  /** Pretend axe is not on the page, so the run has to inject it. */
+  axeMissing?: boolean;
+  /** Delay the axe-presence probe, so the condition loses its race during it. */
+  axeProbeDelayMs?: number;
+  /** Never answer the axe run, so the condition cannot be confirmed stopped. */
+  hangAxe?: boolean;
+  /** Reject the axe run, the way a page that navigated under it does. */
+  failAxe?: boolean;
+  /** Report the axe node cap in every axe run. */
+  axeTruncated?: boolean;
+  /** Nodes every rule of the axe run reports, so a check can hit its own cap. */
+  axeNodes?: number;
 }
 
 interface Stub {
@@ -89,14 +109,22 @@ function createStub(options: StubOptions = {}): Stub {
     document: { width: state.viewport.width, height: 2000 },
     client: { ...state.viewport },
     scroll: { x: 0, y: 0 },
+    ...(options.paintedTruncated ? { painted: [], paintedTruncated: true } : {}),
+    ...(options.ancestorsTruncated ? { ancestors: [], ancestorsTruncated: true } : {}),
+    ...(options.motionTruncated
+      ? { motion: { animations: [], elements: [], truncated: true } }
+      : {}),
   });
 
-  // The in-page steps are told apart by the argument they carry: a number is
-  // the settle step, a string the text-spacing removal, `{ key, css }` the
-  // injection, and the measurement's own argument bag the measurement.
+  // The in-page steps are told apart by the argument they carry:
+  // `{ networkCapMs }` is the settle step, the text-spacing key the override
+  // removal, `{ key, css }` its injection, `{ rules }` the condition's axe
+  // run, and the measurement's own argument bag the measurement. The
+  // axe-presence probe takes no argument at all; any other string is the
+  // axe-core source, which only a page without axe on it is sent.
   let settles = 0;
   const evaluate = (async (_fn: unknown, arg?: unknown) => {
-    if (typeof arg === "number") {
+    if (arg && typeof arg === "object" && "networkCapMs" in (arg as Record<string, unknown>)) {
       settles++;
       if (options.hangSettleAfter !== undefined && settles > options.hangSettleAfter) {
         log.push("settle:pending");
@@ -106,11 +134,14 @@ function createStub(options: StubOptions = {}): Stub {
         log.push("settle:rejected");
         throw new Error("Execution context was destroyed");
       }
+      if (options.slowSettleAfter && settles > options.slowSettleAfter.after) {
+        await new Promise((resolve) => setTimeout(resolve, options.slowSettleAfter?.delayMs));
+      }
       log.push("settle");
       return undefined;
     }
     if (typeof arg === "string") {
-      log.push("text-spacing:off");
+      log.push(arg.startsWith("__barrieretest") ? "text-spacing:off" : "axe:inject");
       return undefined;
     }
     if (arg && typeof arg === "object" && "css" in (arg as Record<string, unknown>)) {
@@ -122,6 +153,42 @@ function createStub(options: StubOptions = {}): Stub {
       collects.push(collect);
       log.push("measure");
       return measurementFor();
+    }
+    if (arg && typeof arg === "object" && "rules" in (arg as Record<string, unknown>)) {
+      const { rules } = arg as { rules: string[] };
+      if (options.hangAxe) {
+        // Logged before it hangs, so a test can tell a run that started from
+        // one that never did.
+        log.push("axe:pending");
+        await new Promise(() => {});
+      }
+      if (options.failAxe) {
+        log.push("axe:rejected");
+        throw new Error("Execution context was destroyed");
+      }
+      log.push(`axe:${rules.join(",")}`);
+      return rules.map((rule) => ({
+        id: rule,
+        outcome: "violation",
+        description: "Stub rule",
+        help: "Stub help",
+        helpUrl: "https://example.test/",
+        impact: "serious",
+        nodes: Array.from({ length: options.axeNodes ?? 0 }, (_, node) => ({
+          target: [`#n${node}`],
+          html: `<a id="n${node}">`,
+          impact: "serious",
+          failureSummary: "Element has insufficient color contrast of 1.03",
+        })),
+        ...(options.axeTruncated ? { truncated: true } : {}),
+      }));
+    }
+    if (arg === undefined) {
+      log.push("axe:probe");
+      if (options.axeProbeDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, options.axeProbeDelayMs));
+      }
+      return options.axeMissing !== true;
     }
     return undefined;
   }) as BrowserPage["evaluate"];
@@ -220,7 +287,7 @@ function playwrightStub(options: PlaywrightStubOptions = {}): Stub {
   const viewport = { width: 1280, height: 720 };
 
   const evaluate = (async (_fn: unknown, arg?: unknown) => {
-    if (typeof arg === "number") {
+    if (arg && typeof arg === "object" && "networkCapMs" in (arg as Record<string, unknown>)) {
       log.push("settle");
       return undefined;
     }
@@ -245,6 +312,11 @@ function playwrightStub(options: PlaywrightStubOptions = {}): Stub {
         scroll: { x: 0, y: 0 },
       } satisfies RenderingMeasurement;
     }
+    if (arg && typeof arg === "object" && "rules" in (arg as Record<string, unknown>)) {
+      log.push(`axe:${(arg as { rules: string[] }).rules.join(",")}`);
+      return [];
+    }
+    if (arg === undefined) return true;
     return { width: viewport.width, height: viewport.height };
   }) as BrowserPage["evaluate"];
 
@@ -337,6 +409,11 @@ describe("runRenderingChecks", () => {
       "media:prefers-color-scheme=dark",
       "settle",
       "measure",
+      // The mode-specific contrast check needs axe's verdict under the
+      // mode; it is part of the same step and runs before the capture. The
+      // probe is what spares a page that already has axe the injection.
+      "axe:probe",
+      "axe:color-contrast,link-in-text-block",
       "screenshot",
       "media:none",
       "cvd:protanopia",
@@ -391,8 +468,8 @@ describe("runRenderingChecks", () => {
     expect(stub.collects).toEqual([
       // reflow, clipped text and overlap
       { elements: true, clipping: true, stacking: true },
-      // no check applies, so the element walk is skipped
-      { elements: false },
+      // contrast under the mode: no element walk, two axe rules
+      { elements: false, axeRules: ["color-contrast", "link-in-text-block"] },
       // clipped text and overlap
       { elements: true, clipping: true, stacking: true },
     ]);
@@ -806,13 +883,169 @@ describe("runRenderingChecks", () => {
     ).toBe(true);
   });
 
+  it("keeps the page when an axe run is still outstanding past the budget", async () => {
+    // The axe run owns no clock of its own: the browser operation is still
+    // in flight when the condition's budget runs out, so the condition may
+    // still be mid-step and nothing after it may be measured on that page.
+    const stub = createStub({ hangAxe: true });
+
+    // Media conditions run before the CVD ones, so the hanging one is first.
+    const result = await runRenderingChecks(stub.page, {
+      conditions: ["media:dark", "cvd:protanopia"],
+      conditionTimeout: 20,
+      // Shorter than the grace period: a bound of its own inside the axe
+      // step would settle the chain here and let the pass believe the
+      // abandoned work had stopped while the browser was still running it.
+      timeout: 50,
+    });
+
+    expect(result.meta.conditionsRun).toEqual([]);
+    expect(result.meta.conditionsSkipped).toEqual([
+      { condition: "media:dark", reason: "the condition timed out after 20ms" },
+      {
+        condition: "cvd:protanopia",
+        reason:
+          "the pass stopped after it could not establish the page's state following media:dark",
+      },
+    ]);
+    expect(result.meta.restorationFailed).toEqual(["media:dark"]);
+    expect(result.meta.pageUnsafe).toBe(true);
+    expect(stub.log).toContain("axe:pending");
+    // No next condition, and no restore racing the run that still holds the
+    // page.
+    expect(stub.log).not.toContain("cvd:protanopia");
+    expect(stub.log).not.toContain("media:none");
+  }, 10_000);
+
+  it("injects and runs nothing when the condition is abandoned during the axe probe", async () => {
+    // The page has no axe on it, and the budget runs out while the probe is
+    // in flight: the injection and the run are mutations of a page the
+    // runner has already given up on.
+    const stub = createStub({ axeMissing: true, axeProbeDelayMs: 80 });
+
+    const result = await runRenderingChecks(stub.page, {
+      conditions: ["media:dark"],
+      conditionTimeout: 10,
+    });
+
+    expect(result.meta.conditionsRun).toEqual([]);
+    expect(result.meta.conditionsSkipped[0].reason).toBe("the condition timed out after 10ms");
+    expect(stub.log).toContain("axe:probe");
+    expect(stub.log).not.toContain("axe:inject");
+    expect(stub.log.some((entry) => entry.startsWith("axe:color-contrast"))).toBe(false);
+    // The probe answered, so the chain stopped at its next step and the page
+    // is the pass's own again.
+    expect(result.meta.restorationFailed).toBeUndefined();
+    expect(result.meta.pageUnsafe).toBeUndefined();
+    expect(stub.log).toContain("media:none");
+
+    const afterReturn = [...stub.log];
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(stub.log).toEqual(afterReturn);
+  }, 10_000);
+
+  it("skips a condition whose axe run is rejected and reverts the page", async () => {
+    const stub = createStub({ failAxe: true });
+
+    const result = await runRenderingChecks(stub.page, {
+      conditions: ["media:dark", "cvd:protanopia"],
+    });
+
+    expect(result.meta.conditionsRun).toEqual(["cvd:protanopia"]);
+    expect(result.meta.conditionsSkipped).toEqual([
+      { condition: "media:dark", reason: "Execution context was destroyed" },
+    ]);
+    expect(result.meta.checksRun).not.toContain("contrast-under-mode");
+    // The condition was reverted before the next one started, and the pass
+    // carried on.
+    expect(stub.log).toEqual([
+      "media:prefers-color-scheme=dark",
+      "settle",
+      "measure",
+      "axe:probe",
+      "axe:rejected",
+      "media:none",
+      "cvd:protanopia",
+      "settle",
+      "measure",
+      "screenshot",
+      "cvd:none",
+      "settle",
+    ]);
+    expect(result.meta.pageUnsafe).toBeUndefined();
+  });
+
+  it("reports a condition whose axe run hit its node cap", async () => {
+    const stub = createStub({ axeTruncated: true });
+
+    const result = await runRenderingChecks(stub.page, { conditions: ["media:dark"] });
+
+    expect(result.meta.conditionsRun).toEqual(["media:dark"]);
+    expect(result.meta.truncatedConditions).toEqual(["media:dark"]);
+    expect(warnings.some((warning) => warning.includes("hit a collection cap"))).toBe(true);
+  });
+
+  it("reports a condition whose check could not report everything the run carried", async () => {
+    // Twenty-six nodes the mode introduced and a check that reports 25: the
+    // axe run carried them all, so only the check can say the result is
+    // partial.
+    const stub = createStub({ axeNodes: 26 });
+
+    const result = await runRenderingChecks(stub.page, { conditions: ["media:dark"] });
+
+    expect(
+      result.issues.filter((issue) => issue.rendering?.checkId === "contrast-under-mode")
+    ).toHaveLength(25);
+    expect(result.meta.truncatedConditions).toEqual(["media:dark"]);
+    expect(warnings.some((warning) => warning.includes("hit a collection cap"))).toBe(true);
+  });
+
+  it("reports a condition whose collected group hit its cap", async () => {
+    // The painted group and the motion group are capped in the browser, and
+    // the measurement says which one stopped early.
+    const painted = createStub({ paintedTruncated: true });
+    expect(
+      (await runRenderingChecks(painted.page, { conditions: ["media:forced-colors"] })).meta
+        .truncatedConditions
+    ).toEqual(["media:forced-colors"]);
+
+    const motion = createStub({ motionTruncated: true });
+    expect(
+      (await runRenderingChecks(motion.page, { conditions: ["media:reduced-motion"] })).meta
+        .truncatedConditions
+    ).toEqual(["media:reduced-motion"]);
+    expect(warnings.some((warning) => warning.includes("hit a collection cap"))).toBe(true);
+  });
+
+  it("reports an ancestor-box collection that hit its cap", async () => {
+    const stub = createStub({ ancestorsTruncated: true });
+
+    const result = await runRenderingChecks(stub.page, { conditions: ["viewport:1280"] });
+
+    expect(result.meta.truncatedConditions).toEqual(["viewport:1280"]);
+  });
+
+  it("gives the final settle room for its own waits", async () => {
+    // settleCondition waits up to its network and transition caps in a row;
+    // a page that uses both is slow, not unsafe.
+    const stub = createStub({
+      slowSettleAfter: { after: 1, delayMs: CLEANUP_TIMEOUT_MS + 500 },
+    });
+
+    const result = await runRenderingChecks(stub.page, { conditions: ["viewport:320"] });
+
+    expect(result.meta.conditionsRun).toEqual(["viewport:320"]);
+    expect(result.meta.pageUnsafe).toBeUndefined();
+    expect(stub.log.at(-1)).toBe("settle");
+  }, 20_000);
+
   it("reports a measurement that hit its element cap", async () => {
     const stub = createStub({ truncated: true });
 
     const result = await runRenderingChecks(stub.page, { conditions: ["viewport:320"] });
 
     expect(result.meta.truncatedConditions).toEqual(["viewport:320"]);
-    expect(warnings.some((warning) => warning.includes("hit its element cap"))).toBe(true);
+    expect(warnings.some((warning) => warning.includes("hit a collection cap"))).toBe(true);
   });
 
   it("runs the cross-condition check only when both of its conditions ran", async () => {

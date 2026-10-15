@@ -3,9 +3,11 @@
  *
  * For each condition in order: apply it, let the layout settle, run the one
  * measurement `page.evaluate` that gathers the union of what the checks
- * active under that condition need, capture the page, and revert — apply and
- * revert paired in `try/finally`, so a condition that fails costs its own
- * findings and one warning, never a page the later steps cannot use.
+ * active under that condition need — plus, for the checks that ask for it,
+ * one axe run restricted to their rules, inside the same step and on the
+ * same budget — capture the page, and revert: apply and revert paired in
+ * `try/finally`, so a condition that fails costs its own findings and one
+ * warning, never a page the later steps cannot use.
  *
  * Conditions whose emulation the page cannot do are skipped with a reason
  * instead of failing. Checks never touch the browser: they are pure
@@ -43,12 +45,24 @@ import type {
   RenderingMeta,
   RenderingOptions,
 } from "../types.js";
+import { renderingAxeBaseline, runConditionAxe } from "./axe.js";
 import { createRenderingCapabilities, type RenderingCapabilities } from "./capabilities.js";
 import { resolveRenderingChecks } from "./checks/index.js";
 import { requiredCapabilities, resolveConditions } from "./conditions.js";
 import { renderingIssues } from "./issues.js";
-import { isRenderingMeasurement, measureRendering, unionCollect } from "./measure.js";
-import { applyTextSpacing, removeTextSpacing, settleCondition } from "./page.js";
+import {
+  isRenderingMeasurement,
+  measureRendering,
+  nextMeasurementIdentity,
+  unionCollect,
+} from "./measure.js";
+import {
+  applyTextSpacing,
+  removeTextSpacing,
+  SETTLE_NETWORK_CAP_MS,
+  SETTLE_TRANSITION_CAP_MS,
+  settleCondition,
+} from "./page.js";
 import type {
   CrossConditionCheck,
   PerConditionCheck,
@@ -70,12 +84,27 @@ export const DEFAULT_CONDITION_TIMEOUT_MS = 8_000;
  */
 export const CLEANUP_TIMEOUT_MS = 2_000;
 
+/**
+ * Bound for a cleanup settle: `settleCondition` waits up to its network and
+ * transition caps in sequence, plus frames and round trips, so the plain
+ * cleanup bound would mark a responsive page unsafe.
+ */
+export const SETTLE_CLEANUP_TIMEOUT_MS =
+  SETTLE_NETWORK_CAP_MS + SETTLE_TRANSITION_CAP_MS + CLEANUP_TIMEOUT_MS;
+
 /** Quality of the condition captures; the baseline screenshot stays PNG. */
 const CAPTURE_QUALITY = 85;
 
 export interface RenderingRunOptions extends RenderingOptions {
   /** Audit timeout; the measurement uses the smaller of it and its own bound. */
   timeout?: number;
+  /**
+   * What the engine pass reported. A mode-specific check reports what the
+   * mode broke, not the page's own failures a second time, and this is what
+   * it compares against; without it every baseline failure would look like
+   * one the mode introduced.
+   */
+  baselineIssues?: readonly Issue[];
   onProgress?: (data: { percent: number; message: string }) => void | Promise<void>;
   /** Progress percentage reported for every condition. */
   progressPercent?: number;
@@ -263,6 +292,7 @@ export async function runRenderingChecks(
     ),
   ];
 
+  const baseline = renderingAxeBaseline(options.baselineIssues ?? []);
   const capabilities = await createRenderingCapabilities(page);
   const runs = new Map<RenderingConditionId, ConditionRun>();
   const captures: RenderingCapture[] = [];
@@ -272,8 +302,15 @@ export async function runRenderingChecks(
 
   /** Conditions whose revert could not be established, in run order. */
   const restorationFailed: RenderingConditionId[] = [];
-  /** Conditions whose element walk hit its cap, so the measurement is partial. */
+  /**
+   * Conditions where a cap dropped something eligible — the element walk, a
+   * collected group, the axe run or a check's own finding cap — so their
+   * results are partial.
+   */
   const truncated: RenderingConditionId[] = [];
+  const markTruncated = (condition: RenderingConditionId): void => {
+    if (!truncated.includes(condition)) truncated.push(condition);
+  };
   /** Set once the page's state is no longer established; the loop then stops. */
   let stopped = false;
   /**
@@ -311,7 +348,11 @@ export async function runRenderingChecks(
 
       const collect = unionCollect(collectorsFor(condition).map((check) => check.collect));
       const token = new ConditionToken();
-      const work = applyAndMeasure(page, capabilities, condition, collect, options.timeout, token);
+      const work = applyAndMeasure(page, capabilities, condition, collect, {
+        timeout: options.timeout,
+        token,
+        baseline,
+      });
       // Once the race is lost nothing awaits it any more, and a rejection
       // without a handler would be an unhandled one.
       work.catch(() => {});
@@ -326,7 +367,15 @@ export async function runRenderingChecks(
         );
         runs.set(condition.id, run);
         conditionsRun.push(condition.id);
-        if (run.measurement.truncated) truncated.push(condition.id);
+        if (
+          run.measurement.truncated ||
+          run.measurement.paintedTruncated === true ||
+          run.measurement.ancestorsTruncated === true ||
+          run.measurement.motion?.truncated === true ||
+          run.measurement.axe?.truncated
+        ) {
+          markTruncated(condition.id);
+        }
         if (keepCaptures) {
           captureIndexes.set(condition.id, captures.length);
           captures.push({
@@ -427,7 +476,7 @@ export async function runRenderingChecks(
       const settled = await cleanupStep(
         "the scroll to the top",
         () => settleCondition(page),
-        CLEANUP_TIMEOUT_MS
+        SETTLE_CLEANUP_TIMEOUT_MS
       );
       if (settled.problem) {
         console.warn(
@@ -440,12 +489,6 @@ export async function runRenderingChecks(
       // page-dependent passes must not trust it.
       if (settled.outstanding || settled.problem) pageUnsafe = true;
     }
-  }
-
-  if (truncated.length > 0) {
-    console.warn(
-      `Rendering measurement hit its element cap under ${truncated.join(", ")}; those conditions report on what was measured.`
-    );
   }
 
   // ---- Pure evaluation, once every condition has been reverted ----
@@ -466,7 +509,14 @@ export async function runRenderingChecks(
     for (const check of perConditionChecks) {
       if (!check.appliesTo(condition)) continue;
       try {
-        collectFindings(condition.id, check.evaluate({ condition, measurement: run.measurement }));
+        collectFindings(
+          condition.id,
+          check.evaluate({
+            condition,
+            measurement: run.measurement,
+            onTruncated: () => markTruncated(condition.id),
+          })
+        );
         checksRun.add(check.id);
       } catch (error) {
         console.warn(`Rendering check ${check.id} failed under ${condition.id}: ${message(error)}`);
@@ -487,6 +537,7 @@ export async function runRenderingChecks(
           condition,
           measurement: target.measurement,
           reference: reference.measurement,
+          onTruncated: () => markTruncated(check.reportsUnder),
         })
       );
       checksRun.add(check.id);
@@ -495,6 +546,12 @@ export async function runRenderingChecks(
         `Rendering check ${check.id} failed under ${check.reportsUnder}: ${message(error)}`
       );
     }
+  }
+
+  if (truncated.length > 0) {
+    console.warn(
+      `Rendering measurement hit a collection cap under ${truncated.join(", ")}; those conditions report on what was measured.`
+    );
   }
 
   const issues: Issue[] = [];
@@ -535,9 +592,9 @@ async function applyAndMeasure(
   capabilities: RenderingCapabilities,
   condition: RenderingCondition,
   collect: ReturnType<typeof unionCollect>,
-  timeout: number | undefined,
-  token: ConditionToken
+  context: { timeout?: number; token: ConditionToken; baseline: ReadonlySet<string> }
 ): Promise<ConditionRun> {
+  const { timeout, token, baseline } = context;
   // Before every step, not only before the mutating ones: a chain the runner
   // has given up on must not reach the page again at all, and a result
   // measured after that is stale anyway.
@@ -565,6 +622,22 @@ async function applyAndMeasure(
   const measurement = await measureRendering(page, collect, { timeout });
   if (!isRenderingMeasurement(measurement)) {
     throw new Error("the measurement returned unexpected data");
+  }
+
+  // The second half of the measurement step: axe's own verdict under this
+  // condition, for the checks that need one. It spends the condition's
+  // budget, so a slow run costs this condition and nothing after it.
+  if (collect.axeRules && collect.axeRules.length > 0) {
+    token.check();
+    measurement.axe = await runConditionAxe(page, {
+      rules: collect.axeRules,
+      indexOffset: nextMeasurementIdentity(measurement),
+      baseline,
+      // The axe run spans three browser steps of its own and keeps no clock:
+      // the condition's budget bounds it, and the token stops it, so a run
+      // the pass gave up waiting for is outstanding work like any other.
+      token,
+    });
   }
 
   token.check();
@@ -664,7 +737,7 @@ function restoreWhenSettled(
       const settled = await cleanupStep(
         "the scroll to the top",
         () => settleCondition(page),
-        timeoutMs
+        Math.max(timeoutMs, SETTLE_CLEANUP_TIMEOUT_MS)
       );
       const failures = [...problems, ...(settled.problem ? [settled.problem] : [])];
       console.warn(

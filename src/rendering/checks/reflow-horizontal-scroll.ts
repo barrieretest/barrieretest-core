@@ -50,7 +50,7 @@ export const reflowHorizontalScrollCheck: PerConditionCheck = {
   // composite `viewport:320+text-spacing` lands.
   appliesTo: (condition) => condition.viewport !== undefined && condition.viewport.width <= 320,
 
-  evaluate({ condition, measurement }) {
+  evaluate({ condition, measurement, onTruncated }) {
     const findings: RenderingFinding[] = [];
     const available = measurement.client.width;
     const documentScrolls = measurement.document.width > available + TOLERANCE;
@@ -80,7 +80,10 @@ export const reflowHorizontalScrollCheck: PerConditionCheck = {
       if (hasFlaggedAncestor(element, measurement.elements, flagged)) continue;
 
       flagged.add(element.index);
-      if (findings.length >= MAX_FINDINGS) continue;
+      if (findings.length >= MAX_FINDINGS) {
+        onTruncated?.();
+        continue;
+      }
 
       findings.push({
         checkId: "reflow-horizontal-scroll",

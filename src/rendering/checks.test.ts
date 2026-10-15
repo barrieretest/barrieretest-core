@@ -6,11 +6,24 @@
 
 import { describe, expect, it } from "bun:test";
 import { contentHiddenAtViewportCheck } from "./checks/content-hidden-at-viewport.js";
+import { CONTRAST_RULES, contrastUnderModeCheck } from "./checks/contrast-under-mode.js";
+import { forcedColorsLossCheck } from "./checks/forced-colors-loss.js";
+import { motionNotReducedCheck } from "./checks/motion-not-reduced.js";
 import { overflowClippedTextCheck } from "./checks/overflow-clipped-text.js";
 import { overlapTextCheck } from "./checks/overlap-text.js";
 import { reflowHorizontalScrollCheck } from "./checks/reflow-horizontal-scroll.js";
+import { targetSizeCheck } from "./checks/target-size.js";
 import { resolveCondition } from "./conditions.js";
-import type { ElementClipping, RenderingElement, RenderingMeasurement } from "./types.js";
+import type {
+  ElementClipping,
+  RenderingAnimation,
+  RenderingAxeNode,
+  RenderingAxeResult,
+  RenderingElement,
+  RenderingMeasurement,
+  RenderingMotion,
+  RenderingPaintedElement,
+} from "./types.js";
 
 let nextIndex = 0;
 
@@ -677,6 +690,45 @@ describe("content-hidden-at-viewport", () => {
       expect(findings[0].elementIndex).toBe(5);
     });
 
+    it("keeps a fallback region's identity clear of the condition's axe nodes", () => {
+      // An axe node at the same condition takes the next free identity, which
+      // is where a fallback region used to start: both would share a mark.
+      const findings = contentHiddenAtViewportCheck.evaluate({
+        condition: VIEWPORT_1280,
+        measurement: {
+          ...wideRegion,
+          axe: {
+            rules: ["target-size"],
+            results: [
+              {
+                id: "target-size",
+                outcome: "violation",
+                description: "d",
+                help: "h",
+                helpUrl: "https://example.test/",
+                impact: "serious",
+                nodes: [
+                  {
+                    selector: "#tiny",
+                    html: "<button>",
+                    failureSummary: "f",
+                    impact: "serious",
+                    index: 5,
+                    rect: { x: 0, y: 0, width: 16, height: 16 },
+                    inBaseline: false,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        reference: narrowRegion(),
+      });
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0].elementIndex).toBe(6);
+    });
+
     it("takes the region's box and identity from the wide measurement", () => {
       // The section itself carries no text, so the wide walk has it as an
       // ancestor box and not as a candidate: 100 px taller than the
@@ -888,5 +940,688 @@ describe("content-hidden-at-viewport", () => {
 
       expect(findings.map((finding) => finding.selector)).toEqual(["#offer-link"]);
     });
+  });
+});
+
+/**
+ * The phase 2 checks read different collected data: axe's own nodes under
+ * the condition (`target-size`, `contrast-under-mode`), the paint of
+ * elements that carry no text (`forced-colors-loss`), and the animations and
+ * self-moving markup (`motion-not-reduced`). Same rule as above: the
+ * fixtures are written by hand, so every false positive can be reproduced
+ * from the numbers alone.
+ */
+
+const MEDIA_DARK = resolveCondition("media:dark");
+const FORCED_COLORS = resolveCondition("media:forced-colors");
+const MORE_CONTRAST = resolveCondition("media:more-contrast");
+const REDUCED_MOTION = resolveCondition("media:reduced-motion");
+
+function axeNode(overrides: Partial<RenderingAxeNode> = {}): RenderingAxeNode {
+  const index = overrides.index ?? 0;
+  return {
+    selector: `#a${index}`,
+    html: "<button>",
+    failureSummary: "Fix any of the following:\n  Target has insufficient size",
+    impact: "serious",
+    index,
+    rect: { x: 0, y: 0, width: 16, height: 16 },
+    inBaseline: false,
+    ...overrides,
+  };
+}
+
+function axeResult(overrides: Partial<RenderingAxeResult> = {}): RenderingAxeResult {
+  return {
+    id: "target-size",
+    outcome: "violation",
+    description: "Ensure touch targets have sufficient size and space",
+    help: "All touch targets must be 24px large, or leave sufficient space",
+    helpUrl: "https://dequeuniversity.com/rules/axe/4.11/target-size",
+    impact: "serious",
+    nodes: [axeNode()],
+    ...overrides,
+  };
+}
+
+function withAxe(results: RenderingAxeResult[], rules: string[]): RenderingMeasurement {
+  return { ...measurement([]), axe: { rules, results } };
+}
+
+function painted(overrides: Partial<RenderingPaintedElement> = {}): RenderingPaintedElement {
+  const index = overrides.index ?? 0;
+  return {
+    index,
+    selector: `#p${index}`,
+    html: "<span>",
+    tag: "span",
+    role: null,
+    rect: { x: 0, y: 0, width: 24, height: 24 },
+    anchored: false,
+    backgroundImage: 'url("icon.svg")',
+    border: false,
+    forcedColorAdjust: "auto",
+    setsForcedColorAdjust: false,
+    hasContentText: false,
+    hasGraphic: false,
+    ariaHidden: false,
+    interactive: true,
+    named: false,
+    inControl: true,
+    ...overrides,
+  };
+}
+
+function withPainted(elements: RenderingPaintedElement[]): RenderingMeasurement {
+  return { ...measurement([]), painted: elements };
+}
+
+function animation(overrides: Partial<RenderingAnimation> = {}): RenderingAnimation {
+  const index = overrides.index ?? 0;
+  return {
+    index,
+    selector: `#m${index}`,
+    html: "<div>",
+    tag: "div",
+    rect: { x: 0, y: 0, width: 30, height: 30 },
+    name: "spin",
+    playState: "running",
+    iterations: -1,
+    durationMs: 2000,
+    parentIndex: -1,
+    ...overrides,
+  };
+}
+
+function withMotion(motion: RenderingMotion): RenderingMeasurement {
+  return { ...measurement([]), motion };
+}
+
+describe("target-size", () => {
+  it("runs under the phone and the baseline viewport only", () => {
+    expect(targetSizeCheck.appliesTo(VIEWPORT_360)).toBe(true);
+    expect(targetSizeCheck.appliesTo(VIEWPORT_1280)).toBe(true);
+    expect(targetSizeCheck.appliesTo(VIEWPORT_320)).toBe(false);
+    expect(targetSizeCheck.appliesTo(TEXT_SPACING)).toBe(false);
+    expect(targetSizeCheck.appliesTo(MEDIA_DARK)).toBe(false);
+    // It needs no element walk, only axe's verdict.
+    expect(targetSizeCheck.collect).toEqual({ elements: false, axeRules: ["target-size"] });
+  });
+
+  it("maps a violation to a finding with axe's impact and the viewport in the evidence", () => {
+    const findings = targetSizeCheck.evaluate({
+      condition: VIEWPORT_360,
+      measurement: withAxe([axeResult()], ["target-size"]),
+    });
+
+    expect(findings).toHaveLength(1);
+    const [finding] = findings;
+    expect(finding.checkId).toBe("target-size");
+    expect(finding.impact).toBe("serious");
+    expect(finding.selector).toBe("#a0");
+    expect(finding.rect).toEqual({ x: 0, y: 0, width: 16, height: 16 });
+    expect(finding.elementIndex).toBe(0);
+    expect(finding.failureSummary).toContain("360 px wide viewport");
+    // Axe's own multi-line summary, on one line.
+    expect(finding.failureSummary).toContain("Target has insufficient size");
+    expect(finding.failureSummary).not.toContain("\n");
+    expect(finding.evidence).toEqual({
+      rule: "target-size",
+      viewportWidth: 360,
+      outcome: "violation",
+    });
+  });
+
+  it("marks an incomplete result as needing review and keeps the issue shape", () => {
+    const findings = targetSizeCheck.evaluate({
+      condition: VIEWPORT_360,
+      measurement: withAxe(
+        [
+          axeResult({
+            outcome: "incomplete",
+            nodes: [axeNode({ impact: "minor", failureSummary: "Element is partially obscured" })],
+          }),
+        ],
+        ["target-size"]
+      ),
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].impact).toBe("minor");
+    expect(findings[0].failureSummary).toStartWith("Needs review:");
+    expect(findings[0].evidence.needsReview).toBe(true);
+    expect(findings[0].evidence.outcome).toBe("incomplete");
+  });
+
+  it("does not repeat a target the engine pass already reported, at any viewport", () => {
+    // The engine pass audits at the caller's viewport and now runs the rule
+    // itself; reporting its findings again is the same problem twice.
+    const measured = withAxe(
+      [axeResult({ nodes: [axeNode({ inBaseline: true }), axeNode({ index: 1 })] })],
+      ["target-size"]
+    );
+
+    for (const condition of [VIEWPORT_1280, VIEWPORT_360]) {
+      expect(
+        targetSizeCheck
+          .evaluate({ condition, measurement: measured })
+          .map((finding) => finding.selector)
+      ).toEqual(["#a1"]);
+    }
+  });
+
+  it("reports nothing when the condition ran no axe rules", () => {
+    expect(
+      targetSizeCheck.evaluate({ condition: VIEWPORT_360, measurement: measurement([]) })
+    ).toEqual([]);
+    expect(
+      targetSizeCheck.evaluate({
+        condition: VIEWPORT_360,
+        measurement: withAxe([axeResult({ id: "color-contrast" })], ["color-contrast"]),
+      })
+    ).toEqual([]);
+  });
+});
+
+describe("contrast-under-mode", () => {
+  const contrastResult = (overrides: Partial<RenderingAxeResult> = {}) =>
+    axeResult({
+      id: "color-contrast",
+      description: "Ensure the contrast between foreground and background colors meets WCAG 2 AA",
+      help: "Elements must meet minimum color contrast ratio thresholds",
+      nodes: [
+        axeNode({
+          selector: "#dark-link",
+          html: "<a>",
+          failureSummary: "Element has insufficient color contrast of 1.03",
+        }),
+      ],
+      ...overrides,
+    });
+
+  it("runs under the three colour modes only", () => {
+    expect(contrastUnderModeCheck.appliesTo(MEDIA_DARK)).toBe(true);
+    expect(contrastUnderModeCheck.appliesTo(FORCED_COLORS)).toBe(true);
+    expect(contrastUnderModeCheck.appliesTo(MORE_CONTRAST)).toBe(true);
+    expect(contrastUnderModeCheck.appliesTo(REDUCED_MOTION)).toBe(false);
+    expect(contrastUnderModeCheck.appliesTo(VIEWPORT_360)).toBe(false);
+  });
+
+  it("reports a failure the mode introduced, naming the mode", () => {
+    const findings = contrastUnderModeCheck.evaluate({
+      condition: MEDIA_DARK,
+      measurement: withAxe([contrastResult()], CONTRAST_RULES),
+    });
+
+    expect(findings).toHaveLength(1);
+    const [finding] = findings;
+    expect(finding.impact).toBe("serious");
+    expect(finding.selector).toBe("#dark-link");
+    expect(finding.failureSummary).toContain("dark mode");
+    expect(finding.failureSummary).toContain("insufficient color contrast");
+    expect(finding.description).toContain("under dark mode only");
+    expect(finding.evidence).toEqual({
+      rule: "color-contrast",
+      mode: "dark mode",
+      inBaseline: false,
+    });
+  });
+
+  it("stays silent about a failure the page already has", () => {
+    const findings = contrastUnderModeCheck.evaluate({
+      condition: MEDIA_DARK,
+      measurement: withAxe(
+        [
+          contrastResult({
+            nodes: [axeNode({ selector: "#dark-link", inBaseline: true })],
+          }),
+        ],
+        CONTRAST_RULES
+      ),
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it("ignores incomplete results: nobody measured them in the baseline either", () => {
+    const findings = contrastUnderModeCheck.evaluate({
+      condition: FORCED_COLORS,
+      measurement: withAxe([contrastResult({ outcome: "incomplete" })], CONTRAST_RULES),
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it("drops a contrast node under forced colours whose colour axe misread", () => {
+    // Chromium forces `color` and paints with it, but leaves
+    // `-webkit-text-fill-color` at the author's value, which is the one axe
+    // measures: the ratio is about a colour that is not on the screen.
+    const misread = withAxe(
+      [
+        contrastResult({
+          nodes: [axeNode({ selector: "#button", textFillMismatch: true })],
+        }),
+      ],
+      CONTRAST_RULES
+    );
+
+    expect(
+      contrastUnderModeCheck.evaluate({ condition: FORCED_COLORS, measurement: misread })
+    ).toEqual([]);
+    // Only under forced colours: elsewhere the fill colour is the painted one.
+    expect(
+      contrastUnderModeCheck.evaluate({ condition: MEDIA_DARK, measurement: misread })
+    ).toHaveLength(1);
+    // And an element that keeps its own colours under forced colours has no
+    // mismatch, so it is still reported.
+    expect(
+      contrastUnderModeCheck.evaluate({
+        condition: FORCED_COLORS,
+        measurement: withAxe([contrastResult()], CONTRAST_RULES),
+      })
+    ).toHaveLength(1);
+  });
+
+  it("reports link-in-text-block the same way, with the mode's own name", () => {
+    const findings = contrastUnderModeCheck.evaluate({
+      condition: MORE_CONTRAST,
+      measurement: withAxe(
+        [contrastResult({ id: "link-in-text-block", impact: "serious" })],
+        CONTRAST_RULES
+      ),
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].evidence.rule).toBe("link-in-text-block");
+    expect(findings[0].evidence.mode).toBe("the increased-contrast mode");
+  });
+});
+
+describe("forced-colors-loss", () => {
+  it("runs under forced colours only", () => {
+    expect(forcedColorsLossCheck.appliesTo(FORCED_COLORS)).toBe(true);
+    expect(forcedColorsLossCheck.appliesTo(MEDIA_DARK)).toBe(false);
+    expect(forcedColorsLossCheck.appliesTo(VIEWPORT_360)).toBe(false);
+  });
+
+  it("reports an icon button whose only rendering is a background image", () => {
+    const findings = forcedColorsLossCheck.evaluate({
+      condition: FORCED_COLORS,
+      measurement: withPainted([painted({ tag: "button", selector: "#search", named: true })]),
+    });
+
+    expect(findings).toHaveLength(1);
+    const [finding] = findings;
+    expect(finding.impact).toBe("serious");
+    expect(finding.selector).toBe("#search");
+    expect(finding.failureSummary).toContain("a background image alone");
+    expect(finding.evidence.reason).toBe("paint-only");
+    expect(finding.evidence.backgroundImage).toBe(true);
+    expect(finding.rect).toEqual({ x: 0, y: 0, width: 24, height: 24 });
+  });
+
+  it("reports an indicator whose only rendering is a border", () => {
+    const findings = forcedColorsLossCheck.evaluate({
+      condition: FORCED_COLORS,
+      measurement: withPainted([
+        painted({
+          backgroundImage: "none",
+          border: true,
+          role: "status",
+          interactive: false,
+          inControl: false,
+        }),
+      ]),
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].failureSummary).toContain("a border alone");
+    expect(findings[0].evidence.border).toBe(true);
+  });
+
+  it("leaves text, graphics, decoration and plain decoration alone", () => {
+    const cases: [string, RenderingPaintedElement][] = [
+      // Text survives forced colours: it is forced, not lost.
+      ["text", painted({ index: 0, hasContentText: true })],
+      // An `img` or inline `svg` keeps rendering.
+      ["graphic", painted({ index: 1, hasGraphic: true })],
+      // Decoration the accessibility tree already drops.
+      ["aria-hidden", painted({ index: 2, ariaHidden: true })],
+      // A divider with a border, no function and no name.
+      [
+        "decorative",
+        painted({
+          index: 3,
+          backgroundImage: "none",
+          border: true,
+          interactive: false,
+          inControl: false,
+          named: false,
+          role: null,
+        }),
+      ],
+      // Nothing is painted at all.
+      ["nothing painted", painted({ index: 4, backgroundImage: "none", border: false })],
+      // A `presentation` role is not a meaningful one.
+      [
+        "presentation",
+        painted({ index: 5, role: "presentation", interactive: false, inControl: false }),
+      ],
+    ];
+
+    for (const [name, element] of cases) {
+      const findings = forcedColorsLossCheck.evaluate({
+        condition: FORCED_COLORS,
+        measurement: withPainted([element]),
+      });
+      expect(`${name}: ${findings.length}`).toBe(`${name}: 0`);
+    }
+  });
+
+  it("reports forced-color-adjust: none, whatever else the element has", () => {
+    const findings = forcedColorsLossCheck.evaluate({
+      condition: FORCED_COLORS,
+      measurement: withPainted([
+        painted({
+          tag: "div",
+          forcedColorAdjust: "none",
+          setsForcedColorAdjust: true,
+          hasContentText: true,
+          backgroundImage: "none",
+          interactive: false,
+          inControl: false,
+        }),
+      ]),
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].impact).toBe("serious");
+    expect(findings[0].evidence.reason).toBe("forced-color-adjust");
+    expect(findings[0].failureSummary).toContain("forced-color-adjust: none");
+  });
+
+  it("gives an element that opted out and paints only one finding", () => {
+    const findings = forcedColorsLossCheck.evaluate({
+      condition: FORCED_COLORS,
+      measurement: withPainted([
+        painted({ forcedColorAdjust: "none", setsForcedColorAdjust: true }),
+      ]),
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].evidence.reason).toBe("forced-color-adjust");
+  });
+
+  it("reports the opt-out at the element that sets it, not at what inherited it", () => {
+    // `forced-color-adjust` is inherited: a swatch panel that opts out puts
+    // the computed `none` on every element in it, and one decision is one
+    // finding.
+    const findings = forcedColorsLossCheck.evaluate({
+      condition: FORCED_COLORS,
+      measurement: withPainted([
+        painted({
+          index: 0,
+          selector: "#swatches",
+          tag: "div",
+          forcedColorAdjust: "none",
+          setsForcedColorAdjust: true,
+          hasContentText: true,
+          backgroundImage: "none",
+          border: true,
+          interactive: false,
+          inControl: false,
+        }),
+        painted({
+          index: 1,
+          selector: "#swatches > span",
+          forcedColorAdjust: "none",
+          setsForcedColorAdjust: false,
+          hasContentText: true,
+          backgroundImage: "none",
+          border: true,
+          interactive: false,
+          inControl: false,
+        }),
+      ]),
+    });
+
+    expect(findings.map((finding) => finding.selector)).toEqual(["#swatches"]);
+    expect(findings[0].evidence.reason).toBe("forced-color-adjust");
+  });
+
+  it("judges an inherited opt-out by its own paint", () => {
+    // The descendant is not reported for the opt-out, and the paint-only
+    // rule still applies to it: an icon button inside the panel has lost its
+    // only rendering just the same.
+    const findings = forcedColorsLossCheck.evaluate({
+      condition: FORCED_COLORS,
+      measurement: withPainted([
+        painted({
+          index: 1,
+          selector: "#swatches > button",
+          tag: "button",
+          forcedColorAdjust: "none",
+          setsForcedColorAdjust: false,
+          named: true,
+        }),
+      ]),
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].evidence.reason).toBe("paint-only");
+  });
+});
+
+describe("motion-not-reduced", () => {
+  it("runs under reduced motion only", () => {
+    expect(motionNotReducedCheck.appliesTo(REDUCED_MOTION)).toBe(true);
+    expect(motionNotReducedCheck.appliesTo(MEDIA_DARK)).toBe(false);
+    expect(motionNotReducedCheck.appliesTo(VIEWPORT_360)).toBe(false);
+  });
+
+  it("reports an animation that repeats forever", () => {
+    const findings = motionNotReducedCheck.evaluate({
+      condition: REDUCED_MOTION,
+      measurement: withMotion({ animations: [animation()], elements: [] }),
+    });
+
+    expect(findings).toHaveLength(1);
+    const [finding] = findings;
+    expect(finding.impact).toBe("moderate");
+    expect(finding.selector).toBe("#m0");
+    expect(finding.failureSummary).toContain("repeats forever");
+    expect(finding.evidence.kind).toBe("infinite-animation");
+    expect(finding.evidence.iterations).toBe(-1);
+  });
+
+  it("reports an animation longer than five seconds and leaves a short one alone", () => {
+    const long = motionNotReducedCheck.evaluate({
+      condition: REDUCED_MOTION,
+      measurement: withMotion({
+        animations: [animation({ iterations: 1, durationMs: 8000 })],
+        elements: [],
+      }),
+    });
+    expect(long).toHaveLength(1);
+    expect(long[0].evidence.kind).toBe("long-animation");
+    expect(long[0].failureSummary).toContain("8 s per iteration");
+
+    const short = motionNotReducedCheck.evaluate({
+      condition: REDUCED_MOTION,
+      measurement: withMotion({
+        animations: [animation({ iterations: 1, durationMs: 300 })],
+        elements: [],
+      }),
+    });
+    expect(short).toEqual([]);
+  });
+
+  it("ignores an animation that is not running", () => {
+    const findings = motionNotReducedCheck.evaluate({
+      condition: REDUCED_MOTION,
+      measurement: withMotion({
+        animations: [
+          animation({ playState: "paused" }),
+          animation({ index: 1, playState: "finished" }),
+        ],
+        elements: [],
+      }),
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it("counts several animations on one element as one finding", () => {
+    const findings = motionNotReducedCheck.evaluate({
+      condition: REDUCED_MOTION,
+      measurement: withMotion({
+        animations: [animation(), animation({ name: "pulse" }), animation({ index: 1 })],
+        elements: [],
+      }),
+    });
+
+    expect(findings).toHaveLength(2);
+    expect(findings[0].evidence.animations).toBe(2);
+    expect(findings[1].evidence.animations).toBe(1);
+  });
+
+  it("reports the outermost animated element of one movement", () => {
+    // An SVG spinner animates the `svg` and the `circle` in it.
+    const findings = motionNotReducedCheck.evaluate({
+      condition: REDUCED_MOTION,
+      measurement: withMotion({
+        animations: [
+          animation({ index: 0, tag: "svg", name: "spinner-rotator" }),
+          animation({ index: 1, tag: "circle", name: "spinner-dash", parentIndex: 0 }),
+        ],
+        elements: [],
+      }),
+    });
+
+    expect(findings.map((finding) => finding.elementIndex)).toEqual([0]);
+    expect(findings[0].evidence.animation).toBe("spinner-rotator");
+    expect(findings[0].evidence.parentIndex).toBeUndefined();
+  });
+
+  it("keeps an animated element whose animated ancestor is not reported", () => {
+    const findings = motionNotReducedCheck.evaluate({
+      condition: REDUCED_MOTION,
+      measurement: withMotion({
+        animations: [
+          // A short fade on the wrapper is no finding, so the spinner in it
+          // is still the one that moves.
+          animation({ index: 0, tag: "div", iterations: 1, durationMs: 200 }),
+          animation({ index: 1, tag: "svg", parentIndex: 0 }),
+        ],
+        elements: [],
+      }),
+    });
+
+    expect(findings.map((finding) => finding.elementIndex)).toEqual([1]);
+  });
+
+  it("folds a nested movement into its outermost element across a short animation", () => {
+    // Outer and inner repeat forever, and the element between them only
+    // fades for 300 ms: the nesting is still the nesting, and following it
+    // through the qualifying animations alone stopped at the middle entry
+    // and reported the pair twice.
+    const findings = motionNotReducedCheck.evaluate({
+      condition: REDUCED_MOTION,
+      measurement: withMotion({
+        animations: [
+          animation({ index: 0, tag: "div", name: "outer-drift" }),
+          animation({ index: 1, tag: "div", iterations: 1, durationMs: 300, parentIndex: 0 }),
+          animation({ index: 2, tag: "svg", name: "inner-spin", parentIndex: 1 }),
+        ],
+        elements: [],
+      }),
+    });
+
+    expect(findings.map((finding) => finding.elementIndex)).toEqual([0]);
+    expect(findings[0].evidence.animation).toBe("outer-drift");
+    // The movement of the folded descendant is counted where it is reported.
+    expect(findings[0].evidence.animations).toBe(2);
+  });
+
+  it("reports the animated parent of more children than the cap carries", () => {
+    // `getAnimations()` is in neither document nor nesting order, so the
+    // children can come first; applying the cap before the nesting spent it
+    // on 25 of them and left the parent — the one movement — out.
+    const animations = [
+      ...Array.from({ length: 30 }, (_, child) =>
+        animation({ index: child + 1, tag: "div", parentIndex: 0 })
+      ),
+      animation({ index: 0, tag: "div", name: "carousel" }),
+    ];
+
+    let truncations = 0;
+    const findings = motionNotReducedCheck.evaluate({
+      condition: REDUCED_MOTION,
+      measurement: withMotion({ animations, elements: [] }),
+      onTruncated: () => {
+        truncations++;
+      },
+    });
+
+    expect(findings.map((finding) => finding.elementIndex)).toEqual([0]);
+    expect(findings[0].evidence.animation).toBe("carousel");
+    expect(findings[0].evidence.animations).toBe(31);
+    // One movement, inside the cap: nothing was dropped.
+    expect(truncations).toBe(0);
+  });
+
+  it("reports its cap as truncation when it drops a movement of its own", () => {
+    const animations = Array.from({ length: 30 }, (_, index) => animation({ index, tag: "div" }));
+
+    let truncated = false;
+    const findings = motionNotReducedCheck.evaluate({
+      condition: REDUCED_MOTION,
+      measurement: withMotion({ animations, elements: [] }),
+      onTruncated: () => {
+        truncated = true;
+      },
+    });
+
+    expect(findings).toHaveLength(25);
+    expect(truncated).toBe(true);
+  });
+
+  it("reports autoplaying video without controls and a marquee", () => {
+    const findings = motionNotReducedCheck.evaluate({
+      condition: REDUCED_MOTION,
+      measurement: withMotion({
+        animations: [],
+        elements: [
+          {
+            index: 0,
+            kind: "video-autoplay",
+            selector: "#hero-video",
+            html: "<video>",
+            tag: "video",
+            rect: { x: 0, y: 0, width: 300, height: 200 },
+            anchored: false,
+          },
+          {
+            index: 1,
+            kind: "marquee",
+            selector: "marquee:nth-child(2)",
+            html: "<marquee>",
+            tag: "marquee",
+            rect: { x: 0, y: 0, width: 300, height: 20 },
+            anchored: false,
+          },
+        ],
+      }),
+    });
+
+    expect(findings.map((finding) => finding.evidence.kind)).toEqual(["video-autoplay", "marquee"]);
+    expect(findings[0].failureSummary).toContain("plays by itself");
+    expect(findings.every((finding) => finding.impact === "moderate")).toBe(true);
+  });
+
+  it("reports nothing when the condition gathered no motion", () => {
+    expect(
+      motionNotReducedCheck.evaluate({ condition: REDUCED_MOTION, measurement: measurement([]) })
+    ).toEqual([]);
   });
 });

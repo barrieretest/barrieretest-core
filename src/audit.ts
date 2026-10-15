@@ -231,6 +231,11 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
           ...renderingEffective,
           timeout,
           onProgress,
+          // Unfiltered and unlocalized, which is what a rule-and-selector
+          // comparison needs: a check that reports what a colour mode broke
+          // must see everything the engine pass already failed, including
+          // what `minSeverity` or `ignore` would drop from the result.
+          baselineIssues: engineResult.issues,
         });
         renderingIssues = rendering.issues;
         renderingMeta = rendering.meta;

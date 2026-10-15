@@ -8,15 +8,23 @@
 
 import type { RenderingCheck } from "../types.js";
 import { contentHiddenAtViewportCheck } from "./content-hidden-at-viewport.js";
+import { contrastUnderModeCheck } from "./contrast-under-mode.js";
+import { forcedColorsLossCheck } from "./forced-colors-loss.js";
+import { motionNotReducedCheck } from "./motion-not-reduced.js";
 import { overflowClippedTextCheck } from "./overflow-clipped-text.js";
 import { overlapTextCheck } from "./overlap-text.js";
 import { reflowHorizontalScrollCheck } from "./reflow-horizontal-scroll.js";
+import { targetSizeCheck } from "./target-size.js";
 
 export const BUILT_IN_RENDERING_CHECKS: readonly RenderingCheck[] = [
   reflowHorizontalScrollCheck,
   overflowClippedTextCheck,
   overlapTextCheck,
   contentHiddenAtViewportCheck,
+  targetSizeCheck,
+  contrastUnderModeCheck,
+  forcedColorsLossCheck,
+  motionNotReducedCheck,
 ];
 
 export const BUILT_IN_RENDERING_CHECK_IDS: readonly string[] = BUILT_IN_RENDERING_CHECKS.map(
@@ -53,6 +61,10 @@ export function resolveRenderingChecks(requestedIds?: string[]): RenderingCheck[
 }
 
 export { contentHiddenAtViewportCheck } from "./content-hidden-at-viewport.js";
+export { contrastUnderModeCheck } from "./contrast-under-mode.js";
+export { forcedColorsLossCheck } from "./forced-colors-loss.js";
+export { motionNotReducedCheck } from "./motion-not-reduced.js";
 export { overflowClippedTextCheck } from "./overflow-clipped-text.js";
 export { overlapTextCheck } from "./overlap-text.js";
 export { reflowHorizontalScrollCheck } from "./reflow-horizontal-scroll.js";
+export { targetSizeCheck } from "./target-size.js";

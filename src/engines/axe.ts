@@ -48,13 +48,32 @@ type AxeResults = {
   violations: AxeViolation[];
 };
 
+/** What `axe.run` takes as its second argument; only what we set. */
+export type AxeRunOptions = {
+  rules?: Record<string, { enabled: boolean }>;
+  runOnly?: { type: "rule"; values: string[] };
+};
+
+/**
+ * Rules the pass turns on beyond axe's defaults.
+ *
+ * `target-size` (WCAG 2.5.8) ships disabled in axe-core, so nothing in the
+ * stack ever reported an undersized touch target. Enabling it here is the
+ * contract's decision 2 of 2026-10-14: it applies to every audit, not only
+ * to one with `rendering`, and it changes the score of audits that have
+ * small targets.
+ */
+export const AXE_ENABLED_RULES: Record<string, { enabled: boolean }> = {
+  "target-size": { enabled: true },
+};
+
 type AxeSourceExport = {
   source: string;
 };
 
 type AxeRuntime = {
   axe?: {
-    run: (context: Document) => Promise<AxeResults>;
+    run: (context: Document, options?: AxeRunOptions) => Promise<AxeResults>;
   };
 };
 
@@ -254,7 +273,7 @@ function hasAxeSource(value: unknown): value is AxeSourceExport {
   return isRecord(value) && typeof value.source === "string";
 }
 
-function resolveAxeSource(module: unknown): string {
+export function resolveAxeSource(module: unknown): string {
   if (hasAxeSource(module)) {
     return module.source;
   }
@@ -266,7 +285,7 @@ function resolveAxeSource(module: unknown): string {
   throw new Error("Unable to load axe-core source.");
 }
 
-function toIssueSeverity(impact?: string | null): IssueSeverity {
+export function toIssueSeverity(impact?: string | null): IssueSeverity {
   switch (impact) {
     case "critical":
     case "serious":
@@ -278,7 +297,12 @@ function toIssueSeverity(impact?: string | null): IssueSeverity {
   }
 }
 
-function flattenTarget(target: (string | string[])[]): string | null {
+/**
+ * One selector string for an axe target. Also the key a rendering condition's
+ * axe run is compared with the engine pass by, so both have to flatten the
+ * same way.
+ */
+export function flattenTarget(target: (string | string[])[]): string | null {
   if (!target || target.length === 0) return null;
 
   const parts: string[] = target.map((segment) =>
@@ -319,16 +343,19 @@ export function transformAxeViolation(violation: AxeViolation): Issue[] {
 
 async function runAxe(page: BrowserPage, timeout?: number): Promise<AxeResults> {
   const run = () =>
-    page.evaluate(() => {
-      const axeRuntime = globalThis as typeof globalThis & AxeRuntime;
-      if (!axeRuntime.axe) {
-        // NOTE: this runs in the browser via page.evaluate — it cannot
-        // reference Node-scope constants, so the message must be a literal.
-        // Keep it in sync with AXE_LOAD_FAILURE_PREFIX / isAxeLoadFailure().
-        throw new Error("axe-core failed to load.");
-      }
-      return axeRuntime.axe.run(document);
-    });
+    page.evaluate(
+      (options: AxeRunOptions) => {
+        const axeRuntime = globalThis as typeof globalThis & AxeRuntime;
+        if (!axeRuntime.axe) {
+          // NOTE: this runs in the browser via page.evaluate — it cannot
+          // reference Node-scope constants, so the message must be a literal.
+          // Keep it in sync with AXE_LOAD_FAILURE_PREFIX / isAxeLoadFailure().
+          throw new Error("axe-core failed to load.");
+        }
+        return axeRuntime.axe.run(document, options);
+      },
+      { rules: AXE_ENABLED_RULES }
+    );
 
   if (!timeout) {
     return run();
