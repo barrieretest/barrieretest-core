@@ -78,16 +78,32 @@ export function transformPa11yIssue(issue: Pa11yIssue): TransformedIssue {
   };
 }
 
+type ScoringSeverity = "critical" | "serious" | "moderate" | "minor";
+
+/** Points one occurrence of a finding costs, by severity. */
+const BASE_DEDUCTION: Record<ScoringSeverity, number> = {
+  critical: 26,
+  serious: 10,
+  moderate: 3,
+  minor: 3,
+};
+
+/** Engine impacts as they are; pa11y types mapped as `transformPa11yIssue` maps them. */
+function normalizeSeverity(impact: string): ScoringSeverity {
+  if (impact === "critical" || impact === "error") return "critical";
+  if (impact === "serious" || impact === "warning") return "serious";
+  if (impact === "minor") return "minor";
+  return "moderate";
+}
+
 /**
  * Calculate accessibility score from 0-100 based on issues
  *
  * Scoring rules:
  * - Start at 100 (perfect score)
- * - Deduct points based on severity:
- *   - Critical/Error: -26 points
- *   - Warning/Serious: -10 points
- *   - Notice/Moderate: -3 points
- * - Diminishing returns: After 2 occurrences of same issue, deduct only 50%
+ * - Base deduction per severity: critical (pa11y error) 26, serious (pa11y
+ *   warning) 10, moderate (pa11y notice) and minor 3
+ * - One deduction per rule and severity: base x (1 + log2(occurrences))
  * - Floor: Minimum 5 (or 1 if >100 issues)
  */
 export function calculateScore(
@@ -99,43 +115,29 @@ export function calculateScore(
 
   let score = 100;
 
-  // Group issues by their code/type to detect duplicates
-  const issuesByCode = new Map<string, typeof issues>();
+  // One deduction per rule and severity, growing with the logarithm of its
+  // occurrences: base x (1 + log2(count)). A single occurrence costs exactly
+  // the base; one root cause reported on every element (axe's `region` when
+  // `main` is missing, say 67 times) costs about seven times the base
+  // instead of sinking the score to the floor. Severity is part of the key
+  // because some rules report mixed severities (overflow-clipped-text).
+  const counts = new Map<string, { base: number; count: number }>();
 
   for (const issue of issues) {
     const code = issue.id || issue.code || "unknown";
-    if (!issuesByCode.has(code)) {
-      issuesByCode.set(code, []);
+    const severity = normalizeSeverity(issue.impact || issue.type || "moderate");
+    const base = BASE_DEDUCTION[severity];
+    const key = `${code}\u0000${severity}`;
+    const entry = counts.get(key);
+    if (entry) {
+      entry.count += 1;
+    } else {
+      counts.set(key, { base, count: 1 });
     }
-    issuesByCode.get(code)!.push(issue);
   }
 
-  // Calculate deductions for each issue type
-  for (const [, issueGroup] of issuesByCode.entries()) {
-    for (let i = 0; i < issueGroup.length; i++) {
-      const issue = issueGroup[i];
-      const occurrenceIndex = i;
-
-      // Determine base severity deduction
-      let baseDeduction = 0;
-      const impact = issue.impact || issue.type || "moderate";
-
-      if (impact === "error" || impact === "critical") {
-        baseDeduction = 26;
-      } else if (impact === "warning" || impact === "serious") {
-        baseDeduction = 10;
-      } else {
-        baseDeduction = 3;
-      }
-
-      // Apply diminishing returns for repeated issues
-      let deduction = baseDeduction;
-      if (occurrenceIndex >= 2) {
-        deduction = baseDeduction * 0.5;
-      }
-
-      score -= deduction;
-    }
+  for (const { base, count } of counts.values()) {
+    score -= base * (1 + Math.log2(count));
   }
 
   // Floor at 5 unless absolutely awful (more than 100 issues)

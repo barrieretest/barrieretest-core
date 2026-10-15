@@ -29,14 +29,63 @@ describe("calculateScore", () => {
     expect(calculateScore(issues)).toBe(97);
   });
 
-  it("applies diminishing returns after 2 occurrences", () => {
+  it("grows a rule's deduction with the logarithm of its occurrences", () => {
     const issues = [
       { id: "same-issue", impact: "critical" },
       { id: "same-issue", impact: "critical" },
-      { id: "same-issue", impact: "critical" }, // This should be 50% = 13 points
+      { id: "same-issue", impact: "critical" },
     ];
-    // 100 - 26 - 26 - 13 = 35
-    expect(calculateScore(issues)).toBe(35);
+    // 100 - 26 x (1 + log2 3) = 32.8
+    expect(calculateScore(issues)).toBe(33);
+  });
+
+  it("charges each distinct rule its full base once", () => {
+    const issues = [
+      { id: "a", impact: "serious" },
+      { id: "b", impact: "serious" },
+    ];
+    expect(calculateScore(issues)).toBe(80);
+  });
+
+  it("keeps one root cause on many elements from sinking the score", () => {
+    // acurion.at/pricing: no <main>, so axe reports `region` on 67 elements.
+    const issues = [
+      ...Array.from({ length: 67 }, () => ({ id: "region", impact: "moderate" })),
+      { id: "landmark-one-main", impact: "moderate" },
+    ];
+    // 100 - 3 x (1 + log2 67) - 3 = 75.8
+    expect(calculateScore(issues)).toBe(76);
+  });
+
+  it("keeps moderate and minor apart although they cost the same", () => {
+    const issues = [
+      { id: "rule", impact: "moderate" },
+      { id: "rule", impact: "moderate" },
+      { id: "rule", impact: "minor" },
+    ];
+    // 100 - 3 x (1 + log2 2) - 3 = 91
+    expect(calculateScore(issues)).toBe(91);
+  });
+
+  it("groups pa11y types with the severity they map to", () => {
+    const issues = [
+      { code: "WCAG2AA.x", type: "error" },
+      { code: "WCAG2AA.x", type: "error" },
+      { code: "WCAG2AA.x", impact: "critical" },
+    ];
+    // one group of three critical findings: 100 - 26 x (1 + log2 3) = 32.8;
+    // split into two groups it would be 100 - 52 - 26 = 22
+    expect(calculateScore(issues)).toBe(33);
+  });
+
+  it("deducts per rule and severity when a rule reports mixed severities", () => {
+    const issues = [
+      { id: "render:overflow-clipped-text", impact: "serious" },
+      { id: "render:overflow-clipped-text", impact: "minor" },
+      { id: "render:overflow-clipped-text", impact: "minor" },
+    ];
+    // 100 - 10 - 3 x (1 + log2 2) = 84
+    expect(calculateScore(issues)).toBe(84);
   });
 
   it("has a floor of 5 for many issues", () => {
