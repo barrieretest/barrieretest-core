@@ -17,6 +17,7 @@
 import type { BrowserPage } from "../browser.js";
 import type { Issue, ScreenshotMeta } from "../types.js";
 import {
+  annotatedElsewhere,
   applyAnnotations,
   captureSizeFrom,
   resolveSelectorAnnotations,
@@ -42,6 +43,8 @@ export interface AnnotateResult {
 function uniqueSelectors(issues: Issue[]): string[] {
   const selectors: string[] = [];
   for (const issue of issues) {
+    // A rendering finding is already annotated in its own capture's space.
+    if (annotatedElsewhere(issue)) continue;
     const selector = issue.selector;
     if (selector === null || selector.trim() === "") continue;
     if (!selectors.includes(selector)) selectors.push(selector);
@@ -87,10 +90,15 @@ export async function annotateIssues(
   };
 }
 
-export type { CaptureSize, SelectorAnnotation } from "./map.js";
+export { readImageSize, readJpegSize } from "./jpeg.js";
+export type { CaptureMeasurement, CaptureSize, MarkCandidate, SelectorAnnotation } from "./map.js";
 export {
+  annotatedElsewhere,
   applyAnnotations,
   captureSizeFrom,
+  clipRect,
+  markNumbersInReadingOrder,
+  MIN_VISIBLE_SIZE_PX,
   resolveSelectorAnnotations,
   screenshotMetaFrom,
   unresolvedAnnotations,

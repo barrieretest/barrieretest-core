@@ -42,6 +42,94 @@ export interface SemanticIssueMeta {
 }
 
 /**
+ * Identifier of a rendering condition — a named, reversible change to how the
+ * page is rendered. Built-ins are `viewport:320`, `viewport:360`,
+ * `viewport:768`, `viewport:1280`, `cvd:protanopia`, `cvd:deuteranopia`,
+ * `cvd:tritanopia`, `cvd:achromatopsia`, `cvd:reduced-contrast`,
+ * `cvd:blurred-vision`, `media:dark`, `media:forced-colors`,
+ * `media:more-contrast`, `media:reduced-motion` and `text-spacing`. Two or
+ * more of them joined with `+` compose, e.g. `viewport:320+text-spacing`.
+ */
+export type RenderingConditionId = string;
+
+/** The page as it rendered under one condition. */
+export interface RenderingCapture {
+  condition: RenderingConditionId;
+  /** Full-page JPEG at quality 85. */
+  screenshot: Uint8Array;
+  /** Geometry of this capture, for placing the rects of its findings. */
+  meta: ScreenshotMeta;
+}
+
+/**
+ * Per-issue metadata attached when an Issue was produced by a rendering check
+ * (see `src/rendering/`). The issue's `annotation` is in the coordinate space
+ * of the capture named here, not of `AuditResult.screenshot`.
+ */
+export interface RenderingIssueMeta {
+  /** Check identifier, e.g. "reflow-horizontal-scroll". */
+  checkId: string;
+  /** The condition the page was rendered under when this was found. */
+  condition: RenderingConditionId;
+  /** Index into `AuditResult.renderingCaptures`; -1 when captures were not kept. */
+  captureIndex: number;
+  /** Check-specific numbers, e.g. `{ scrollWidth: 412, clientWidth: 320 }`. */
+  evidence: Record<string, number | string | boolean>;
+}
+
+/** Options for the rendering pass (`AuditOptions.rendering`). */
+export interface RenderingOptions {
+  /**
+   * Conditions to apply.
+   * @default ["viewport:1280", "viewport:320", "viewport:360", "media:dark", "cvd:protanopia", "cvd:deuteranopia", "text-spacing"]
+   */
+  conditions?: RenderingConditionId[];
+  /** Checks to run; default: all built-ins. */
+  checks?: string[];
+  /**
+   * Keep the captures on the result.
+   * @default true
+   */
+  captures?: boolean;
+  /**
+   * Per-condition time budget in ms, covering apply, settle, measure and capture.
+   * @default 8000
+   */
+  conditionTimeout?: number;
+}
+
+/** Pass-level metadata of the rendering pass (`AuditResult.renderingMeta`). */
+export interface RenderingMeta {
+  conditionsRun: RenderingConditionId[];
+  conditionsSkipped: { condition: RenderingConditionId; reason: string }[];
+  checksRun: string[];
+  durationMs: number;
+  /**
+   * Conditions after which the page could not be put back into its original
+   * state. Present only when that happened: the pass then stops, so no
+   * condition after the one named here ran, and the findings of the named
+   * condition are the last ones measured on established state.
+   */
+  restorationFailed?: RenderingConditionId[];
+  /**
+   * Conditions whose element walk hit its cap, so their measurement covers
+   * only part of the page. Present only when that happened; a check that
+   * reasons from absent content does not report under them.
+   */
+  truncatedConditions?: RenderingConditionId[];
+  /**
+   * True when the pass could not confirm the page is back in its original
+   * state: work it gave up waiting for — an abandoned condition, or a
+   * restoration step that did not answer within its bound — can still change
+   * the page, or the last full restore failed. The engine findings, the score
+   * and the screenshot were taken before the pass and stay valid; everything
+   * that measures the page as it is now — localization, the semantic pass
+   * and the annotation step — is skipped.
+   */
+  pageUnsafe?: boolean;
+}
+
+/**
  * Rectangle of an annotated element, in CSS pixels in document space, origin
  * at the top-left of the full-page screenshot. Whole pixels, rounded outward
  * from the measured box and clipped to the captured area.
@@ -106,6 +194,8 @@ export interface Issue {
   ai?: AIAnalysis;
   /** Semantic-check metadata (when produced by `semanticAudit`) */
   semantic?: SemanticIssueMeta;
+  /** Rendering-check metadata (when produced by the rendering pass) */
+  rendering?: RenderingIssueMeta;
   /** Position on the page screenshot (when annotation ran) */
   annotation?: IssueAnnotation;
 }
@@ -283,6 +373,28 @@ export interface AuditOptions {
    *   need a second launch to run semantic.
    */
   semantic?: SemanticOptions;
+
+  /**
+   * Optional rendering pass.
+   *
+   * When set, after the engine pass `audit()` renders the page under a set of
+   * named rendering conditions (viewports, media and vision-deficiency
+   * emulations, a text-spacing override), runs deterministic geometry checks
+   * under each, and merges the findings into `result.issues` as `render:*`
+   * issues. One capture per condition is returned on
+   * `result.renderingCaptures`, pass metadata on `result.renderingMeta`.
+   *
+   * `true` means the default condition set. Every condition is reverted
+   * before the pass returns, so the semantic pass and the annotation step see
+   * the original rendering.
+   *
+   * Runs on whatever page the audit has: the page `audit()` opened for a URL
+   * target with `engine: 'axe'`, or a caller-supplied page with either
+   * engine. A URL target with `engine: 'pa11y'` has no page the audit can
+   * use (pa11y manages its own browser), so the pass is skipped with a
+   * warning there.
+   */
+  rendering?: RenderingOptions | true;
 }
 
 /**
@@ -332,6 +444,10 @@ export interface AuditResult {
   semanticMeta?: SemanticMeta;
   /** Geometry of `screenshot`, for placing `Issue.annotation` rects (if annotation ran) */
   screenshotMeta?: ScreenshotMeta;
+  /** One capture per rendering condition that ran (if the `rendering` option was set and `captures` kept) */
+  renderingCaptures?: RenderingCapture[];
+  /** Rendering-pass metadata (if the `rendering` option was set) */
+  renderingMeta?: RenderingMeta;
 }
 
 export type { BrowserPage } from "./browser.js";

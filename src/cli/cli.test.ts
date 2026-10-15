@@ -452,6 +452,59 @@ describe("parseArgs (missing semantic flag values)", () => {
   });
 });
 
+describe("parseArgs (rendering flags)", () => {
+  it("parses --rendering as a bare flag", () => {
+    expect(parseArgs(["https://example.com", "--rendering"]).rendering).toBe(true);
+  });
+
+  it("parses condition and check lists", () => {
+    const args = parseArgs([
+      "https://example.com",
+      "--rendering-conditions",
+      "viewport:320, viewport:320+text-spacing",
+      "--rendering-checks",
+      "reflow-horizontal-scroll,overlap-text",
+    ]);
+
+    expect(args.renderingConditions).toEqual(["viewport:320", "viewport:320+text-spacing"]);
+    expect(args.renderingChecks).toEqual(["reflow-horizontal-scroll", "overlap-text"]);
+  });
+
+  it("rejects an unknown condition id, including inside a composed one", () => {
+    expect(() =>
+      parseArgs(["https://example.com", "--rendering-conditions", "viewport:999"])
+    ).toThrow(/Invalid --rendering-conditions 'viewport:999'/);
+    expect(() =>
+      parseArgs(["https://example.com", "--rendering-conditions", "viewport:320+nope"])
+    ).toThrow(/Invalid --rendering-conditions/);
+  });
+
+  it("rejects a composite whose parts contradict each other", () => {
+    // The pass would have run only the last part, under the composite id.
+    expect(() =>
+      parseArgs(["https://example.com", "--rendering-conditions", "viewport:320+viewport:1280"])
+    ).toThrow(/Conflicting rendering condition id/);
+    expect(() =>
+      parseArgs(["https://example.com", "--rendering-conditions", "viewport:320+text-spacing"])
+    ).not.toThrow();
+  });
+
+  it("rejects an unknown check id", () => {
+    expect(() => parseArgs(["https://example.com", "--rendering-checks", "target-size"])).toThrow(
+      /Invalid --rendering-checks 'target-size'/
+    );
+  });
+
+  it("rejects a missing or empty value", () => {
+    expect(() => parseArgs(["https://example.com", "--rendering-conditions"])).toThrow(
+      "Flag --rendering-conditions requires a value"
+    );
+    expect(() => parseArgs(["https://example.com", "--rendering-checks", " , "])).toThrow(
+      "Flag --rendering-checks requires a value"
+    );
+  });
+});
+
 describe("CLI_COMMANDS", () => {
   it("exports audit command", () => {
     expect(CLI_COMMANDS).toContain("audit");
@@ -663,6 +716,9 @@ describe("runCli help", () => {
       "--semantic-large-provider",
       "--semantic-large-model",
     ]) {
+      expect(help).toContain(flag);
+    }
+    for (const flag of ["--rendering", "--rendering-conditions", "--rendering-checks"]) {
       expect(help).toContain(flag);
     }
     expect(help).toContain("MISTRAL_API_KEY");

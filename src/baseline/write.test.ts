@@ -51,6 +51,25 @@ describe("writeBaseline", () => {
     expect(content.issues[0].hash).toBe(generateIssueHash(issues[0]));
   });
 
+  it("stores the rendering condition a finding was accepted under", async () => {
+    const issue = createIssue({
+      id: "render:overflow-clipped-text",
+      selector: "#intro",
+      rendering: {
+        checkId: "overflow-clipped-text",
+        condition: "viewport:320",
+        captureIndex: 0,
+        evidence: { clippedBy: 24 },
+      },
+    });
+
+    await writeBaseline(TEST_FILE, "https://example.com", [createIssue(), issue]);
+
+    const content = await Bun.file(TEST_FILE).json();
+    expect(content.issues[0].condition).toBeUndefined();
+    expect(content.issues[1].condition).toBe("viewport:320");
+  });
+
   it("includes ISO date timestamps", async () => {
     await writeBaseline(TEST_FILE, "https://example.com", []);
 

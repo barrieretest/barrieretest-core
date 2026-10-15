@@ -1,3 +1,5 @@
+import type { RenderingConditionId } from "../types.js";
+
 /**
  * Current baseline file version
  */
@@ -13,6 +15,12 @@ export interface BaselineIssue {
   selector: string | null;
   /** Stable hash identifier for this issue */
   hash: string;
+  /**
+   * Rendering condition this finding was made under, for rendering findings
+   * only. Part of the hash, and kept here so a stored entry says which
+   * condition it accepted.
+   */
+  condition?: RenderingConditionId;
 }
 
 /**

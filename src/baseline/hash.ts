@@ -10,7 +10,8 @@ function extractElementTag(html: string): string {
 
 /**
  * Generates a stable hash identifier for an accessibility issue.
- * The hash is based on: rule ID + selector + element context (tag name)
+ * The hash is based on: rule ID + selector + element context (tag name),
+ * plus the rendering condition for a rendering finding.
  */
 export function generateIssueHash(issue: Issue): string {
   const parts: string[] = [
@@ -18,6 +19,15 @@ export function generateIssueHash(issue: Issue): string {
     issue.selector ?? "",
     extractElementTag(issue.nodes[0]?.html ?? ""),
   ];
+
+  // The same element failing the same check is a different regression under
+  // a different rendering condition: a paragraph that was only clipped at
+  // 320 px and is now clipped under text spacing too is new. Appended, and
+  // only for rendering findings, so every hash issued before stays what it
+  // was.
+  if (issue.rendering) {
+    parts.push(issue.rendering.condition);
+  }
 
   const input = parts.join("|");
 

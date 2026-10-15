@@ -77,6 +77,14 @@ function partitionIssues(issues: Issue[]): Partitioned {
   const notLocated: Issue[] = [];
 
   for (const issue of issues) {
+    // A rendering finding is annotated in the space of its own condition's
+    // capture, not of this screenshot, so it carries no marker here. The
+    // capture sections that show it are a later change.
+    if (issue.rendering) {
+      notLocated.push(issue);
+      continue;
+    }
+
     const annotation = issue.annotation;
     const mark = markerNumber(annotation?.mark);
     const rect = usableRect(annotation?.rect);

@@ -11,6 +11,9 @@ import {
 import { runAxeCore } from "./engines/axe.js";
 import { type LocalizationOptions, localizeIssues } from "./localization/index.js";
 import { type LaunchedSession, closeSession, launchPuppeteerSession } from "./puppeteer-launch.js";
+import { resolveRenderingChecks } from "./rendering/checks/index.js";
+import { resolveConditions } from "./rendering/conditions.js";
+import { runRenderingChecks } from "./rendering/runner.js";
 import {
   calculateScore,
   getScoreInterpretation,
@@ -26,6 +29,9 @@ import type {
   AuditTarget,
   Issue,
   IssueSeverity,
+  RenderingCapture,
+  RenderingMeta,
+  RenderingOptions,
   ScreenshotMeta,
 } from "./types.js";
 
@@ -91,7 +97,25 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     localization: localizationOptions,
     ai: aiOptions,
     semantic: semanticOptions,
+    rendering: renderingOptions,
   } = options;
+
+  // `rendering: true` means the default condition set; everything else is
+  // an explicit subset. Resolved here so the rest of the flow sees one shape.
+  const renderingEffective: RenderingOptions | undefined = renderingOptions
+    ? renderingOptions === true
+      ? {}
+      : renderingOptions
+    : undefined;
+
+  // An unknown condition or check id, or a composite whose parts contradict
+  // each other, is the caller's configuration error, not a page that could
+  // not be rendered: it is rejected here, before the pass enters the
+  // warn-and-continue path that swallows its own failures.
+  if (renderingEffective) {
+    resolveConditions(renderingEffective.conditions);
+    resolveRenderingChecks(renderingEffective.checks);
+  }
 
   // Annotation needs the page the engine pass measured, the full-page
   // screenshot that pass captured, and selectors axe produced, so it only
@@ -100,9 +124,10 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
 
   let url: string;
   let page: BrowserPage | undefined;
-  // When `semantic` or annotation is requested with a URL target, audit()
-  // owns the browser so the engine pass, the semantic pass and the annotation
-  // measurement share a single page (no second browser launch). The session is
+  // When `semantic`, `rendering` or annotation is requested with a URL
+  // target, audit() owns the browser so the engine pass, the rendering pass,
+  // the semantic pass and the annotation measurement share a single page (no
+  // second browser launch). The session is
   // created inside the try/finally below so any failure before the engine pass
   // still releases it.
   //
@@ -122,7 +147,11 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
   }
 
   try {
-    if (isUrl(target) && (semanticOptions || annotationEffective) && engine === "axe") {
+    if (
+      isUrl(target) &&
+      (semanticOptions || renderingEffective || annotationEffective) &&
+      engine === "axe"
+    ) {
       ownedSession = await launchPuppeteerSession({ headless, viewport });
       page = ownedSession.page;
     }
@@ -185,6 +214,55 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
       };
     }
 
+    // ---- Rendering pass (opt-in) ----
+    //
+    // On the page the engine pass used, after lazy content and the
+    // `content-visibility` override, before the semantic pass. Every
+    // condition is applied, captured and reverted in turn, so the semantic
+    // pass and the annotation step see the original rendering.
+
+    let renderingIssues: Issue[] = [];
+    let renderingCaptures: RenderingCapture[] | undefined;
+    let renderingMeta: RenderingMeta | undefined;
+
+    if (renderingEffective && page) {
+      try {
+        const rendering = await runRenderingChecks(page, {
+          ...renderingEffective,
+          timeout,
+          onProgress,
+        });
+        renderingIssues = rendering.issues;
+        renderingMeta = rendering.meta;
+        renderingCaptures = renderingEffective.captures === false ? undefined : rendering.captures;
+      } catch (error) {
+        // A rendering failure must not fail the whole audit.
+        console.warn(
+          `Rendering pass failed: ${error instanceof Error ? error.message : "Unknown error"}`
+        );
+      }
+    } else if (renderingEffective && !page) {
+      // URL target with the pa11y engine: that engine manages its own
+      // browser, so there is no page left to render conditions on.
+      console.warn(
+        "audit({ rendering }) currently requires engine: 'axe' or a pre-existing browser page; rendering pass skipped."
+      );
+    }
+
+    // Whether the page is still the one the pass promised to hand back.
+    // Computed here, before the first step that measures it: work the pass
+    // gave up waiting for can still change the page, and a restoration it
+    // could not establish means the page is not in its original state. What
+    // was taken before the pass — the engine findings, the score, the
+    // screenshot — stays; `renderingMeta.pageUnsafe` says why the rest is
+    // missing.
+    const pageUnsafe = renderingMeta?.pageUnsafe === true;
+    if (pageUnsafe) {
+      console.warn(
+        "Rendering pass could not establish the page's state; localization, the semantic pass and issue annotation are skipped."
+      );
+    }
+
     // ---- Post-engine processing (engine-agnostic) ----
     //
     // Order:
@@ -194,8 +272,9 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     // 2. Localize / AI-enhance the surviving engine issues. Semantic findings
     //    are NOT localized or per-issue-enhanced in this release (decision 7A).
     // 3. Run the semantic pass and collect its issues separately.
-    // 4. Merge engine + semantic, then re-apply the same filter to the
-    //    combined set so semantic findings also obey `minSeverity`/`ignore`.
+    // 4. Merge engine + rendering + semantic, then re-apply the same filter
+    //    to the combined set so those findings also obey
+    //    `minSeverity`/`ignore`.
     // 5. Run baseline processing on the final merged + filtered list.
 
     let engineIssues: Issue[] = filterIssues(engineResult.issues, { minSeverity, ignore });
@@ -205,8 +284,13 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     // view, so it stays limited to the pages it had before — a caller's page
     // object, or the session the semantic pass makes audit() own.
     const localizationPage = isUrl(target) && !semanticOptions ? undefined : page;
+    // Localization scrolls elements into view and captures them, so it is
+    // one of the steps an unsafe page rules out.
     const shouldLocalize =
-      detail === "fix-ready" && localizationPage && localizationOptions?.enabled !== false;
+      detail === "fix-ready" &&
+      localizationPage &&
+      !pageUnsafe &&
+      localizationOptions?.enabled !== false;
 
     if (shouldLocalize && localizationPage) {
       try {
@@ -252,7 +336,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
 
     let semanticIssues: Issue[] = [];
     let semanticMeta: SemanticMeta | undefined;
-    if (semanticOptions && page) {
+    if (semanticOptions && page && !pageUnsafe) {
       try {
         await onProgress?.({ percent: 88, message: "Running semantic audit" });
       } catch {
@@ -294,10 +378,17 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     // the same filter so semantic findings also obey `minSeverity` / `ignore`.
     // The second pass over engine issues is a no-op since they were already
     // filtered above.
-    const mergedIssues = [...engineIssues, ...semanticIssues];
+    const mergedIssues = [...engineIssues, ...renderingIssues, ...semanticIssues];
     const filteredIssues = filterIssues(mergedIssues, { minSeverity, ignore });
 
-    const baselineResult = await processAuditWithBaseline(filteredIssues, engineResult.pageUrl, {
+    // Rendering findings arrive annotated in their capture's space, and the
+    // baseline step writes the last-run cache, which must never contain
+    // annotations — so it sees them without.
+    const baselineIssues = filteredIssues.map((issue) =>
+      issue.rendering && issue.annotation ? { ...issue, annotation: undefined } : issue
+    );
+
+    const baselineResult = await processAuditWithBaseline(baselineIssues, engineResult.pageUrl, {
       baseline,
       updateBaseline,
     });
@@ -308,7 +399,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     let resultIssues: Issue[] = filteredIssues;
     let screenshotMeta: ScreenshotMeta | undefined;
 
-    if (annotationEffective && page && engineResult.screenshot) {
+    if (annotationEffective && page && engineResult.screenshot && !pageUnsafe) {
       const annotated = await annotateIssues(page, filteredIssues, engineResult.screenshot, {
         timeout,
       });
@@ -338,6 +429,8 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
       baseline: baselineResult.baseline,
       semanticMeta,
       screenshotMeta,
+      renderingCaptures,
+      renderingMeta,
     };
   } finally {
     if (ownedSession) {

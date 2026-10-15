@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { audit } from "../audit.js";
 import { CACHE_DIR, getLastRun } from "../baseline/cache.js";
 import { readBaseline, updateBaseline, writeBaseline } from "../baseline/write.js";
@@ -6,9 +7,24 @@ import {
   HTML_REPORT_LOCALES,
   renderHtmlReport,
 } from "../html-report/index.js";
+import {
+  BUILT_IN_RENDERING_CHECK_IDS,
+  RENDERING_CONDITION_IDS,
+  resolveCondition,
+} from "../rendering/index.js";
 import { formatActionable, formatFixReady, formatMinimal } from "../report.js";
 import type { SemanticMeta, SemanticModelTier } from "../semantic/types.js";
-import type { AuditEngine, AuditOptions, DetailLevel, Issue, IssueSeverity } from "../types.js";
+import type {
+  AuditEngine,
+  AuditOptions,
+  AuditResult,
+  DetailLevel,
+  Issue,
+  IssueSeverity,
+  RenderingCapture,
+  RenderingMeta,
+  RenderingOptions,
+} from "../types.js";
 import {
   type BarrieretestConfig,
   getConfigPath,
@@ -69,6 +85,9 @@ export interface ParsedArgs {
   semanticLargeModel?: string;
   semanticChecks?: string[];
   semanticTimeout?: number;
+  rendering?: boolean;
+  renderingConditions?: string[];
+  renderingChecks?: string[];
   configSubcommand?: ConfigSubcommand;
   configKey?: string;
   configValue?: string;
@@ -246,6 +265,14 @@ function parseAuditFlags(args: string[], startIndex: number, result: ParsedArgs)
     } else if (arg === "--semantic-timeout") {
       result.semanticTimeout = Number.parseInt(requireFlagValue(arg, nextArg), 10);
       i++;
+    } else if (arg === "--rendering") {
+      result.rendering = true;
+    } else if (arg === "--rendering-conditions") {
+      result.renderingConditions = parseConditionIds(arg, nextArg);
+      i++;
+    } else if (arg === "--rendering-checks") {
+      result.renderingChecks = parseIdList(arg, nextArg, BUILT_IN_RENDERING_CHECK_IDS, false);
+      i++;
     }
   }
 }
@@ -261,6 +288,59 @@ function requireFlagValue(flag: string, value: string | undefined): string {
     throw new Error(`Flag ${flag} requires a value`);
   }
   return value;
+}
+
+/**
+ * A comma-separated list of ids, validated against what is known so a typo
+ * fails loudly instead of running less than was asked for. Condition ids may
+ * be composed with `+`, so each part is validated on its own.
+ */
+function parseIdList(
+  flag: string,
+  value: string | undefined,
+  known: readonly string[],
+  composable: boolean
+): string[] {
+  const ids = requireFlagValue(flag, value)
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+
+  if (ids.length === 0) {
+    throw new Error(`Flag ${flag} requires a value`);
+  }
+
+  const unknown = ids.filter((id) =>
+    (composable ? id.split("+") : [id]).some((part) => !known.includes(part.trim()))
+  );
+
+  if (unknown.length > 0) {
+    throw new Error(`Invalid ${flag} '${unknown.join(", ")}'. Must be one of: ${known.join(", ")}`);
+  }
+
+  return ids;
+}
+
+/**
+ * Condition ids, validated the way the pass itself validates them: an unknown
+ * part and a composite whose parts contradict each other
+ * (`viewport:320+viewport:1280`) both fail here, before a browser is
+ * launched, instead of running something other than what was asked for.
+ */
+function parseConditionIds(flag: string, value: string | undefined): string[] {
+  const ids = parseIdList(flag, value, RENDERING_CONDITION_IDS, true);
+
+  for (const id of ids) {
+    try {
+      resolveCondition(id);
+    } catch (error) {
+      throw new Error(
+        `Invalid ${flag} '${id}'. ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  return ids;
 }
 
 function parseConfigSubcommand(args: string[], result: ParsedArgs): void {
@@ -429,6 +509,40 @@ function addSemanticSummaryLines(lines: string[], meta: SemanticMeta, issues: Is
   lines.push(`    Findings: ${semanticIssueCount}`);
 }
 
+function addRenderingSummaryLines(lines: string[], meta: RenderingMeta, issues: Issue[]): void {
+  lines.push("  Rendering checks:");
+
+  for (const condition of meta.conditionsRun) {
+    const count = issues.filter((issue) => issue.rendering?.condition === condition).length;
+    lines.push(`    ${condition}: ${count} finding${count === 1 ? "" : "s"}`);
+  }
+
+  for (const { condition, reason } of meta.conditionsSkipped) {
+    lines.push(`    ${condition}: skipped (${reason})`);
+  }
+
+  lines.push(`    Checks run: ${meta.checksRun.length ? meta.checksRun.join(", ") : "none"}`);
+  lines.push(`    Duration: ${Math.round(meta.durationMs)} ms`);
+}
+
+/** A capture is bytes; JSON carries it as base64. */
+type SerializedCapture = Omit<RenderingCapture, "screenshot"> & { screenshot: string };
+type SerializedResult = Omit<AuditResult, "renderingCaptures"> & {
+  renderingCaptures?: SerializedCapture[];
+};
+
+function serializeResult(result: AuditResult): AuditResult | SerializedResult {
+  if (!result.renderingCaptures) return result;
+
+  return {
+    ...result,
+    renderingCaptures: result.renderingCaptures.map((capture) => ({
+      ...capture,
+      screenshot: Buffer.from(capture.screenshot).toString("base64"),
+    })),
+  };
+}
+
 /**
  * Run CLI command
  */
@@ -496,6 +610,13 @@ Audit options:
   --html <file>                 Write a static HTML report (screenshot with markers)
   --html-locale <lang>          Report label language: en | de (default: en)
   --headless <bool>             Run headless (default: true)
+
+Rendering checks (opt-in; any --rendering-* flag enables the pass):
+  --rendering                   Render the page under the default conditions and
+                                run the deterministic geometry checks
+  --rendering-conditions <ids>  Comma-separated condition ids, each optionally
+                                composed with "+" (e.g. viewport:320+text-spacing)
+  --rendering-checks <ids>      Comma-separated check ids
 
 Semantic AI options (opt-in; any --semantic-* flag enables semantic mode):
   --semantic                    Enable AI-driven semantic audit
@@ -576,6 +697,17 @@ async function runAudit(args: ParsedArgs, deps: RunAuditDeps): Promise<CliResult
     semantic: semanticOptions,
   };
 
+  // Any --rendering-* flag enables the pass, like the semantic flags do.
+  if (args.rendering || args.renderingConditions || args.renderingChecks) {
+    const rendering: RenderingOptions = {};
+    if (args.renderingConditions) rendering.conditions = args.renderingConditions;
+    if (args.renderingChecks) rendering.checks = args.renderingChecks;
+    // Captures are large; on stdout they would drown the JSON, so they are
+    // only kept when a file takes them.
+    if (args.json && !args.output) rendering.captures = false;
+    options.rendering = rendering;
+  }
+
   if (!args.json) {
     options.onProgress = async ({ percent, message }) => {
       writeProgress(message, percent);
@@ -592,7 +724,7 @@ async function runAudit(args: ParsedArgs, deps: RunAuditDeps): Promise<CliResult
   }
 
   if (args.json || args.output) {
-    const json = JSON.stringify(result, null, 2);
+    const json = JSON.stringify(serializeResult(result), null, 2);
     if (args.output) {
       const { writeFileSync, mkdirSync } = await import("node:fs");
       const { dirname } = await import("node:path");
@@ -625,6 +757,11 @@ async function runAudit(args: ParsedArgs, deps: RunAuditDeps): Promise<CliResult
     lines.push(
       `  Baseline: ${b.newIssues.length} new, ${b.knownIssues.length} known, ${b.fixedIssues.length} fixed`
     );
+  }
+
+  if (result.renderingMeta) {
+    lines.push("");
+    addRenderingSummaryLines(lines, result.renderingMeta, result.issues);
   }
 
   if (result.semanticMeta) {

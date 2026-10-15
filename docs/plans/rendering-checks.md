@@ -1,6 +1,6 @@
 # Feature intent: Deterministic rendering checks
 
-Status: intent, not started. Written 2026-10-12. Background: `barrieretest/docs/ai-feature-assessment.md`, items A.1, A.2, A.3, A.5, A.6. Depends on nothing; the annotation feature (`screenshot-coordinate-map.md`) should land first so every finding here can be drawn on its capture.
+Status: contract, in implementation (phase 1 of 3). Written 2026-10-12; decisions and implementation amendments 2026-10-14 at the end, binding where they differ from the text above. Background: `barrieretest/docs/ai-feature-assessment.md`, items A.1, A.2, A.3, A.5, A.6. Depends on nothing; the annotation feature (`screenshot-coordinate-map.md`) should land first so every finding here can be drawn on its capture.
 
 ## Outcome
 
@@ -189,3 +189,32 @@ The runner is called from `audit()` after the engine pass and before the semanti
 1. Default condition set: all eleven plus the composite (about 12 captures, roughly 6 to 10 s extra per page), or a lean default (320, 360, dark, protanopia, deuteranopia, text-spacing) with the full set opt-in? Proposed: lean default in core, full set in the paid backend.
 2. Should `target-size` be enabled in the normal engine pass as well, independent of `rendering`? It changes today's results, so it is a separate decision. Proposed: yes, but as its own change with its own changelog entry.
 3. Capture format: PNG (lossless, large) or JPEG at quality 85 for the condition captures, PNG only for the baseline? Proposed: JPEG for conditions.
+
+## Decisions (2026-10-14)
+
+1. **Default condition set is lean:** `viewport:1280`, `viewport:320`, `viewport:360`, `media:dark`, `cvd:protanopia`, `cvd:deuteranopia`, `text-spacing`. `rendering: true` means this set; every other condition is available through `rendering.conditions`. The composite `viewport:320+text-spacing` is not in the default set. (`viewport:1280` added 2026-10-15 so `content-hidden-at-viewport`, which compares it with `viewport:360`, runs by default.)
+2. **`target-size` is enabled in the normal engine pass too.** The axe run in `runAxeCore` enables the rule (`rules: { "target-size": { enabled: true } }`) for every audit, not only under rendering conditions. This changes scores of existing audits; it gets its own CHANGELOG `Changed` entry stating that. The rendering check `render:target-size` still runs under `viewport:360`.
+3. **Condition captures are JPEG** at quality 85; the baseline screenshot stays PNG. Core gains a JPEG size reader (SOF0/SOF2 marker parsing, no dependency) next to the PNG one, so capture geometry comes from the image for both formats.
+4. **The HTML report shows the captures** in phase 3: one capture section per condition with its markers, reusing the existing screenshot panel and marker rendering, and the condition named on each rendering finding.
+
+## Implementation amendments (2026-10-14)
+
+- **Phases.** Each phase is one worker round, reviewed by the orchestrator and a fresh Codex review, and fixed before the next starts.
+  1. Foundation: data model, capability adapter (Puppeteer and Playwright, all condition kinds incl. media and vision deficiency), condition registry with every condition from the table, runner (apply, settle, one measurement evaluate, capture, revert, in `try/finally`), JPEG size reader, annotations for rendering findings in their capture's space, `audit()` integration, CLI flags, and the geometry checks `reflow-horizontal-scroll`, `overflow-clipped-text`, `overlap-text`, `content-hidden-at-viewport`. Media and CVD conditions already produce captures in this phase; their checks come later.
+  2. `target-size` (rendering check plus normal pass, decision 2), `contrast-under-mode`, `forced-colors-loss`, `motion-not-reduced`.
+  3. `cvd-link-distinction`, `cvd-state-by-color`, and the HTML report capture sections (decision 4).
+- **CVD checks use computed colours, not decoded pixels.** The measurement returns computed foreground and background colours; the pure check applies the Machado et al. (2009) simulation matrices at severity 1.0 for the deficiency (the model Chromium's emulation implements) and compares the simulated colours. This keeps the checks pure functions of measured data and avoids decoding image pixels. The capture remains the visual evidence.
+- **Annotations for rendering findings** are computed from the rects the measurement returns, in that condition's capture space, with the same rounding, clipping and per-element mark numbering (reading order) as `src/annotate/`. The shared pieces move to or are exported from `src/annotate/` so both use one implementation; `src/rendering/` depends on `src/annotate/`, never the reverse. Marks are numbered per capture.
+- **Where the runner sits.** After the engine pass (and therefore after lazy-content loading and the `content-visibility` override, which stay in place), before the semantic pass. It runs on the page the engine pass used, including a caller-supplied page, because `rendering` is opt-in and every condition is reverted. After the last condition the viewport, media emulation, vision deficiency and injected styles are back to their original state and the page is scrolled to the top, so the semantic pass and the annotation step see the original rendering.
+- **Original state.** The adapter reads the original viewport before the first condition (Puppeteer `page.viewport()`, Playwright `page.viewportSize()`), and reverts emulations to "no override", not to a guessed value.
+- **No change without `rendering`** (invariant 1) except decision 2 and, decided by Andreas on 2026-10-15, the scoring change: `calculateScore` deducts once per rule and severity, base x (1 + log2(count)), so one root cause on many elements (axe's `region` without `<main>`) no longer sinks the score. Both have their own CHANGELOG entries.
+
+## Amendment 2026-10-15: content-hidden-at-viewport precision
+
+Measured on graz.at with `viewport:1280` in the default set: 10 findings, score 94 to 51, almost all noise: four main-menu links behind a hamburger whose button sits outside the `nav` and has no `aria-controls`; two icon-link labels (`d-none d-lg-block`) whose links stay rendered with their icon; one carousel overline and three thumbnail captions. The check is tuned, before phase 1 is committed:
+
+1. **One finding per hidden region.** When several text elements disappear because a common ancestor is hidden at the narrow viewport, report the topmost hidden ancestor once (rect and selector of that ancestor in the wide capture), with the number of text elements it contains in `evidence`.
+2. **The common hamburger counts as a disclosure control.** Content inside a `nav` or `role=navigation` is revealable when, at the narrow viewport, the page has a visible control with `aria-expanded` (or `aria-controls`) anywhere, not only inside that `nav`. The `aria-controls` and closed-`details` rules stay. No header-wide exemption for arbitrary controls.
+3. **Hidden labels of controls that stay are not lost content.** Text hidden inside a link or button that itself remains rendered at the narrow viewport is not reported (the control keeps its function and accessible name; a missing visible label is a different criterion).
+4. **Acceptance for the tuning:** on graz.at the main menu, the icon labels and duplicate per-element findings are gone; anything left is checked by eye and listed in the report with a judgement. solasit.at and acurion.at are measured too. Fixture tests cover each of the three rules, positive and negative.
+

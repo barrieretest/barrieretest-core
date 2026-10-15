@@ -303,6 +303,107 @@ describe("audit() warn-and-continue on semantic failure", () => {
   });
 });
 
+/**
+ * The rendering pass is opt-in and recoverable, but two of its outcomes
+ * reach the rest of `audit()`: a configuration error, which is the caller's
+ * and is thrown, and a page it could not establish the state of, after which
+ * nothing may measure that page any more.
+ */
+describe("audit() and the rendering pass", () => {
+  /**
+   * A Puppeteer-shaped page whose viewport change lands only when the test
+   * opens the gate, so the pass gives up waiting on work that is still its
+   * own — with the order of the two decided by the test and not by a margin.
+   */
+  function gatedViewportPage(gate: Promise<unknown>): { page: BrowserPage; log: string[] } {
+    const log: string[] = [];
+    const viewport = { width: 1280, height: 720 };
+
+    const page = {
+      evaluate: (async () => undefined) as BrowserPage["evaluate"],
+      goto: async () => undefined,
+      url: () => ENGINE_URL,
+      title: async () => "Stub Doc",
+      screenshot: async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      browser: () => ({ newPage: async () => page }),
+      viewport: () => ({ ...viewport }),
+      setViewport: async (size: { width: number; height: number }) => {
+        const restore = size.width === 1280 && size.height === 720;
+        if (!restore) await gate;
+        Object.assign(viewport, size);
+        log.push(`viewport:${size.width}x${size.height}`);
+      },
+    } as unknown as BrowserPage;
+
+    return { page, log };
+  }
+
+  const warned = (needle: string): boolean =>
+    consoleWarnSpy.calls.some((args) => String(args[0] ?? "").includes(needle));
+
+  it("rejects an invalid rendering configuration instead of warning about it", async () => {
+    await expect(
+      audit(ENGINE_URL, { rendering: { conditions: ["viewport:999"] } })
+    ).rejects.toThrow(/Unknown rendering condition id/);
+
+    await expect(
+      audit(ENGINE_URL, { rendering: { conditions: ["viewport:320+viewport:1280"] } })
+    ).rejects.toThrow(/Conflicting rendering condition id/);
+
+    await expect(audit(ENGINE_URL, { rendering: { checks: ["nope"] } })).rejects.toThrow(
+      /Unknown rendering check id/
+    );
+
+    expect(engineCalls).toHaveLength(0);
+  });
+
+  it("skips localization, the semantic pass and the annotation step when the page may still change", async () => {
+    nextEngineIssues = [makeIssue({ id: "engine-only" })];
+    let openGate = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const { page, log } = gatedViewportPage(gate);
+
+    const result = await audit(page, {
+      // `fix-ready` is what makes localization eligible on a caller's page.
+      detail: "fix-ready",
+      rendering: { conditions: ["viewport:320"], conditionTimeout: 10 },
+      semantic: { provider: { name: "nebius", apiKey: "stub" } },
+    });
+
+    expect(result.renderingMeta?.pageUnsafe).toBe(true);
+    expect(result.renderingMeta?.restorationFailed).toEqual(["viewport:320"]);
+    expect(warned("Rendering pass could not establish the page's state")).toBe(true);
+
+    // Taken before the pass, so they stand.
+    expect(result.issues.map((issue) => issue.id)).toEqual(["engine-only"]);
+    expect(result.score).toBeGreaterThan(0);
+    expect(result.screenshot).toBeDefined();
+
+    // Measured on the page as it is now, so they do not run at all.
+    expect(localizeCalls).toEqual([]);
+    expect(semanticCalls).toEqual([]);
+    expect(result.semanticMeta).toBeUndefined();
+    expect(result.screenshotMeta).toBeUndefined();
+    expect(result.issues.every((issue) => issue.annotation === undefined)).toBe(true);
+
+    // Nothing of the abandoned apply reached the page while the audit ran.
+    expect(log).not.toContain("viewport:320x720");
+
+    // The pass still owns that work and puts the page back when it lands.
+    openGate();
+    const deadline = Date.now() + 5_000;
+    while (!warned("after the abandoned work settled")) {
+      if (Date.now() > deadline) throw new Error("the late restore never happened");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(log.lastIndexOf("viewport:1280x720")).toBeGreaterThan(
+      log.lastIndexOf("viewport:320x720")
+    );
+  }, 20_000);
+});
+
 // ----- browser-side context extraction -----
 
 /**
@@ -2438,4 +2539,872 @@ describe("lazy content (real audit, real browser)", () => {
       await page.close();
     }
   }, 60_000);
+});
+
+/**
+ * Rendering pass against real pages in a real browser: the conditions are
+ * applied, captured and reverted by Chromium, so the acceptance criteria of
+ * `docs/plans/rendering-checks.md` can only be checked here. Fixtures are
+ * `file://` pages, one per criterion.
+ */
+describe("rendering checks (real audit, real browser)", () => {
+  const REFLOW_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Reflow fixture</title></head>
+<body>
+  <h1>Reflow</h1>
+  <div id="wide" style="width: 400px; background: #cfe">A fixed 400 px wide block of text.</div>
+  <p>Ordinary paragraph that reflows.</p>
+</body></html>`;
+
+  const TABLE_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Table fixture</title></head>
+<body>
+  <h1>Data table</h1>
+  <table id="data" style="width: 600px">
+    <caption>Opening hours</caption>
+    <thead><tr><th scope="col">Day</th><th scope="col">From</th><th scope="col">To</th></tr></thead>
+    <tbody><tr><td>Monday</td><td>09:00</td><td>17:00</td></tr></tbody>
+  </table>
+</body></html>`;
+
+  const CLIPPED_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Clipped fixture</title></head>
+<body>
+  <h1>Clipping</h1>
+  <p id="clipped" style="overflow: hidden; height: 2em; width: 200px; margin: 0">
+    This paragraph is three lines long in a box that is two lines tall, so the rest is cut off.
+  </p>
+</body></html>`;
+
+  const overlapFixture = (secondTop: number) => `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Overlap fixture</title></head>
+<body>
+  <h1>Overlap</h1>
+  <div style="position: relative; height: 260px">
+    <p id="first" style="position: absolute; top: 0; left: 0; width: 200px; height: 100px; margin: 0">First block of text.</p>
+    <p id="second" style="position: absolute; top: ${secondTop}px; left: 0; width: 200px; height: 100px; margin: 0">Second block of text.</p>
+  </div>
+</body></html>`;
+
+  const MODE_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Mode fixture</title>
+<style>
+  body { background: #fff; color: #111 }
+  @media (prefers-color-scheme: dark) { body { background: #111; color: #eee } }
+</style></head>
+<body>
+  <h1>Modes</h1>
+  <p id="copy">Some copy to measure spacing on.</p>
+</body></html>`;
+
+  /**
+   * The two layouts that produced false overlaps on real sites: a block of
+   * off-canvas skip links stacked on one spot, and two links in one
+   * paragraph where the second wraps, so its rect is the union of two lines
+   * and covers the first one.
+   */
+  const NOT_OVERLAPPING_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Not overlapping fixture</title></head>
+<body>
+  <section id="skiplinks">
+    <a style="position: absolute; left: -1000px; top: -1000px" href="#main">Skip to content</a>
+    <a style="position: absolute; left: -1000px; top: -1000px" href="#nav">Skip to navigation</a>
+    <a style="position: absolute; left: -1000px; top: -1000px" href="#search">Skip to search</a>
+  </section>
+  <main id="main" style="width: 260px">
+    <h1>Links in a paragraph</h1>
+    <p>
+      Text before <a href="https://example.com/one">the first link</a> and then some more words
+      before <a href="https://example.com/two">a second link whose text is long enough to wrap
+      across two lines</a> and a tail.
+    </p>
+  </main>
+</body></html>`;
+
+  /** Text that the narrow layout drops, outside any navigation region. */
+  const HIDDEN_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Hidden fixture</title>
+<style>@media (max-width: 500px) { .desktop-only { display: none } }</style></head>
+<body>
+  <h1>Mobile drop</h1>
+  <p class="desktop-only">Opening hours are Monday to Friday from nine to five.</p>
+  <p>Always visible paragraph.</p>
+</body></html>`;
+
+  /**
+   * The three tuning rules of the 2026-10-15 amendment, each with the case
+   * it must report:
+   *
+   * - one section the narrow layout hides takes five paragraphs with it, and
+   *   is one finding naming the section;
+   * - the menu of the `nav` is revealable, because the hamburger that opens
+   *   it sits outside the `nav` and carries `aria-expanded` — the page-wide
+   *   rule, which `HIDDEN_NAV_FIXTURE` is the counter-case of;
+   * - the label inside the search link is hidden while the link itself
+   *   stays, and is not lost content.
+   */
+  const HIDDEN_REGION_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Hidden region fixture</title>
+<style>
+  @media (max-width: 500px) { #promos, #menu, #search-label { display: none } }
+  #hamburger { min-width: 44px; min-height: 44px }
+</style></head>
+<body>
+  <header>
+    <button type="button" id="hamburger" aria-expanded="false">Menu</button>
+    <nav aria-label="Main">
+      <ul id="menu">
+        <li><a href="/offer">Our whole offer</a></li>
+        <li><a href="/references">References from our clients</a></li>
+      </ul>
+    </nav>
+    <a href="/search" id="search-link">Go &#x2192; <span id="search-label">Search the whole site</span></a>
+  </header>
+  <main>
+    <h1>Hidden regions</h1>
+    <div id="promos">
+      <p>Opening hours are Monday to Friday from nine to five.</p>
+      <p>Our whole offer is explained on the offer page.</p>
+      <p>Call the office for an appointment.</p>
+      <p>News from the last quarter of the year.</p>
+      <p>Jobs are advertised twice a year.</p>
+    </div>
+    <p>Always visible paragraph.</p>
+  </main>
+</body></html>`;
+
+  /**
+   * A hidden region whose first member carries a finding of its own: the
+   * section disappears at the narrow viewport, and the paragraph it starts
+   * with clips its text at every viewport. Two findings about two different
+   * boxes, so two markers — the region's own box, and the paragraph's.
+   */
+  const HIDDEN_CLIPPED_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Hidden clipped fixture</title>
+<style>
+  body { margin: 0 }
+  @media (max-width: 500px) { #promos { display: none } }
+  #promos { width: 320px; padding: 40px 0 }
+  #promos p { width: 300px; margin: 0 }
+  #clipped-promo { overflow: hidden; height: 2em }
+</style></head>
+<body>
+  <h1>Hidden and clipped</h1>
+  <div id="promos">
+    <p id="clipped-promo">Opening hours are Monday to Friday from nine to five, and on Saturday morning by appointment only.</p>
+    <p id="second-promo">Our whole offer is explained on the offer page.</p>
+  </div>
+  <p>Always visible paragraph.</p>
+</body></html>`;
+
+  /**
+   * The text-spacing override, observed while it is applied: a sampler keeps
+   * every distinct set of computed values `#copy` went through, and the box
+   * fits its text at the page's own spacing and clips under the override.
+   */
+  const SPACING_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Spacing fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif }
+  #copy { font-size: 20px; margin: 0 }
+  #spacing-fits { overflow: hidden; width: 320px; height: 60px; font-size: 16px; line-height: 1.2; margin: 0 }
+</style></head>
+<body>
+  <h1>Text spacing</h1>
+  <p id="copy">Some copy to measure spacing on.</p>
+  <p id="spacing-fits">This paragraph fits its box at the spacing of the page and clips under the override.</p>
+  <script>
+    window.__spacingSamples = [];
+    const copy = document.getElementById('copy');
+    const sample = () => {
+      const style = getComputedStyle(copy);
+      const entry = {
+        fontSize: style.fontSize,
+        lineHeight: style.lineHeight,
+        letterSpacing: style.letterSpacing,
+        wordSpacing: style.wordSpacing,
+        marginBottom: style.marginBottom,
+      };
+      const samples = window.__spacingSamples;
+      const last = samples[samples.length - 1];
+      if (samples.length > 50) return;
+      if (!last || JSON.stringify(last) !== JSON.stringify(entry)) samples.push(entry);
+    };
+    sample();
+    setInterval(sample, 10);
+  </script>
+</body></html>`;
+
+  /** A patch of pure red, which Chromium's protanopia turns to dark olive. */
+  const PATCH_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Patch fixture</title>
+<style>body { margin: 0 } #patch { width: 200px; height: 200px; background: rgb(255, 0, 0) }</style></head>
+<body>
+  <div id="patch"></div>
+  <h1>Colour patch</h1>
+</body></html>`;
+
+  /** The same menu, with no disclosure control anywhere on the page. */
+  const HIDDEN_NAV_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Hidden nav fixture</title>
+<style>@media (max-width: 500px) { #menu { display: none } }</style></head>
+<body>
+  <header>
+    <nav aria-label="Main">
+      <ul id="menu">
+        <li><a href="/offer">Our whole offer</a></li>
+        <li><a href="/references">References from our clients</a></li>
+      </ul>
+    </nav>
+  </header>
+  <main><h1>No toggle</h1><p>Always visible paragraph.</p></main>
+</body></html>`;
+
+  /**
+   * The disclosure exemption as the contract spells it out: a control only
+   * exempts what it can reveal. The search button in the `header` reveals
+   * nothing, so the opening hours the narrow layout drops are a finding; the
+   * hamburger in the `nav` controls the menu, so the menu is not.
+   */
+  const DISCLOSURE_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Disclosure fixture</title>
+<style>@media (max-width: 500px) { .desktop-only, #menu { display: none } }</style></head>
+<body>
+  <header>
+    <button type="button">Search</button>
+    <p class="desktop-only" id="hours">Opening hours are Monday to Friday from nine to five.</p>
+    <nav aria-label="Main">
+      <button type="button" aria-controls="menu" aria-expanded="false">Menu</button>
+      <ul id="menu">
+        <li><a href="/offer">Our whole offer</a></li>
+        <li><a href="/contact">Contact the office</a></li>
+      </ul>
+    </nav>
+  </header>
+  <main><p>Always visible paragraph.</p></main>
+</body></html>`;
+
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>>;
+  let fixtureDir: string;
+  const url = (name: string) => `file://${join(fixtureDir, name)}`;
+
+  beforeAll(async () => {
+    mock.module("./engines/axe.js", () => realAxe);
+    mock.module("./puppeteer-launch.js", () => realPuppeteerLaunch);
+
+    fixtureDir = mkdtempSync(join(tmpdir(), "barrieretest-rendering-"));
+    writeFileSync(join(fixtureDir, "reflow.html"), REFLOW_FIXTURE);
+    writeFileSync(join(fixtureDir, "table.html"), TABLE_FIXTURE);
+    writeFileSync(join(fixtureDir, "clipped.html"), CLIPPED_FIXTURE);
+    writeFileSync(join(fixtureDir, "overlap.html"), overlapFixture(50));
+    writeFileSync(join(fixtureDir, "adjacent.html"), overlapFixture(120));
+    writeFileSync(join(fixtureDir, "mode.html"), MODE_FIXTURE);
+    writeFileSync(join(fixtureDir, "not-overlapping.html"), NOT_OVERLAPPING_FIXTURE);
+    writeFileSync(join(fixtureDir, "hidden.html"), HIDDEN_FIXTURE);
+    writeFileSync(join(fixtureDir, "hidden-region.html"), HIDDEN_REGION_FIXTURE);
+    writeFileSync(join(fixtureDir, "hidden-clipped.html"), HIDDEN_CLIPPED_FIXTURE);
+    writeFileSync(join(fixtureDir, "spacing.html"), SPACING_FIXTURE);
+    writeFileSync(join(fixtureDir, "patch.html"), PATCH_FIXTURE);
+    writeFileSync(join(fixtureDir, "hidden-nav.html"), HIDDEN_NAV_FIXTURE);
+    writeFileSync(join(fixtureDir, "disclosure.html"), DISCLOSURE_FIXTURE);
+
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    await browser?.close();
+    if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
+    mock.module("./engines/axe.js", () => axeStubModule);
+    mock.module("./puppeteer-launch.js", () => puppeteerLaunchStubModule);
+  });
+
+  const renderIssues = (result: Awaited<ReturnType<typeof audit>>, checkId?: string) =>
+    result.issues.filter(
+      (issue) =>
+        issue.rendering !== undefined &&
+        (checkId === undefined || issue.rendering.checkId === checkId)
+    );
+
+  // Criterion 1
+  it("reports a fixed-width element as a reflow failure, and nothing without the option", async () => {
+    const withRendering = await audit(url("reflow.html"), {
+      rendering: { conditions: ["viewport:320"] },
+    });
+
+    const findings = renderIssues(withRendering, "reflow-horizontal-scroll");
+    expect(findings).toHaveLength(1);
+    const [finding] = findings;
+    expect(finding.id).toBe("render:reflow-horizontal-scroll");
+    expect(finding.impact).toBe("serious");
+    expect(finding.helpUrl).toContain("reflow");
+    expect(finding.rendering?.condition).toBe("viewport:320");
+    expect(finding.selector).toBe("#wide");
+    expect(Number(finding.rendering?.evidence.scrollWidth)).toBeGreaterThan(320);
+    // The rect sits on the element, in the capture's space.
+    expect(finding.annotation?.state).toBe("resolved");
+    expect(finding.annotation?.mark).toBe(1);
+    expect(finding.annotation?.rect?.width).toBeGreaterThanOrEqual(400);
+    expect(withRendering.renderingMeta?.conditionsRun).toEqual(["viewport:320"]);
+
+    const plain = await audit(url("reflow.html"));
+    expect(renderIssues(plain)).toEqual([]);
+    expect(plain.renderingMeta).toBeUndefined();
+    expect(plain.renderingCaptures).toBeUndefined();
+    // The same audit otherwise: the engine findings and their annotations are
+    // untouched, and only the added rendering finding moves the score, which
+    // the scoring module weighs like any other issue.
+    expect(plain.issues.map((issue) => issue.id)).toEqual(
+      withRendering.issues.filter((issue) => !issue.rendering).map((issue) => issue.id)
+    );
+    expect(plain.issues.map((issue) => issue.annotation?.mark)).toEqual(
+      withRendering.issues
+        .filter((issue) => !issue.rendering)
+        .map((issue) => issue.annotation?.mark)
+    );
+    expect(plain.score).toBeGreaterThan(withRendering.score);
+  }, 120_000);
+
+  // Criterion 7
+  it("does not report a data table wider than the viewport", async () => {
+    const result = await audit(url("table.html"), {
+      rendering: { conditions: ["viewport:320"] },
+    });
+
+    expect(renderIssues(result, "reflow-horizontal-scroll")).toEqual([]);
+    expect(result.renderingMeta?.conditionsRun).toEqual(["viewport:320"]);
+  }, 120_000);
+
+  // Criterion 2
+  it("reports clipped text under text spacing and under the 320 px viewport", async () => {
+    const result = await audit(url("clipped.html"), {
+      rendering: { conditions: ["viewport:320", "text-spacing"] },
+    });
+
+    const findings = renderIssues(result, "overflow-clipped-text");
+    expect(findings.map((issue) => issue.rendering?.condition).sort()).toEqual([
+      "text-spacing",
+      "viewport:320",
+    ]);
+    for (const finding of findings) {
+      expect(finding.selector).toBe("#clipped");
+      expect(finding.impact).toBe("serious");
+      expect(Number(finding.rendering?.evidence.clippedBy)).toBeGreaterThan(1);
+      expect(finding.annotation?.state).toBe("resolved");
+    }
+    expect(
+      findings.find((issue) => issue.rendering?.condition === "text-spacing")?.helpUrl
+    ).toContain("text-spacing");
+  }, 120_000);
+
+  // Criterion 3
+  it("reports overlapping paragraphs and leaves adjacent ones alone", async () => {
+    const overlapping = await audit(url("overlap.html"), {
+      rendering: { conditions: ["viewport:1280"] },
+    });
+
+    const findings = renderIssues(overlapping, "overlap-text");
+    expect(findings).toHaveLength(1);
+    expect(findings[0].selector).toBe("#second");
+    expect(findings[0].rendering?.evidence.otherSelector).toBe("#first");
+    expect(Number(findings[0].rendering?.evidence.overlapRatio)).toBeCloseTo(0.5, 1);
+    expect(findings[0].annotation?.rect?.height).toBeGreaterThan(40);
+
+    const adjacent = await audit(url("adjacent.html"), {
+      rendering: { conditions: ["viewport:1280"] },
+    });
+    expect(renderIssues(adjacent, "overlap-text")).toEqual([]);
+  }, 120_000);
+
+  it("does not report off-canvas links or a wrapped inline link as an overlap", async () => {
+    const result = await audit(url("not-overlapping.html"), {
+      rendering: { conditions: ["viewport:320", "viewport:1280"] },
+    });
+
+    expect(renderIssues(result, "overlap-text")).toEqual([]);
+  }, 120_000);
+
+  it("reports text the narrow layout drops, and only on the wide capture", async () => {
+    const result = await audit(url("hidden.html"), {
+      rendering: { conditions: ["viewport:1280", "viewport:360"] },
+    });
+
+    const findings = renderIssues(result, "content-hidden-at-viewport");
+    expect(findings).toHaveLength(1);
+    const [finding] = findings;
+    expect(finding.impact).toBe("moderate");
+    expect(finding.selector).toContain("p");
+    expect(finding.failureSummary).toContain("Opening hours");
+    expect(finding.rendering?.condition).toBe("viewport:1280");
+    expect(finding.annotation?.state).toBe("resolved");
+    expect(result.renderingCaptures?.[finding.rendering?.captureIndex ?? -1]?.condition).toBe(
+      "viewport:1280"
+    );
+  }, 120_000);
+
+  // Amendment 2026-10-15, the three tuning rules at once.
+  it("reports a hidden region once and leaves the hamburger menu and a kept control's label alone", async () => {
+    const result = await audit(url("hidden-region.html"), {
+      rendering: { conditions: ["viewport:1280", "viewport:360"] },
+    });
+
+    const findings = renderIssues(result, "content-hidden-at-viewport");
+    expect(findings.map((issue) => issue.selector)).toEqual(["#promos"]);
+    const [finding] = findings;
+    // One finding for the whole section, with the five paragraphs counted.
+    expect(finding.rendering?.evidence.textElements).toBe(5);
+    expect(finding.failureSummary).toContain("5 text elements");
+    expect(finding.failureSummary).toContain("Opening hours");
+    expect(finding.annotation?.state).toBe("resolved");
+    // The box covers the whole section, not one paragraph.
+    expect(finding.annotation?.rect?.height).toBeGreaterThan(80);
+    // Rule 2: the hamburger sits outside the nav and has no aria-controls.
+    expect(result.issues.map((issue) => issue.failureSummary).join(" ")).not.toContain(
+      "References from our clients"
+    );
+    // Rule 3: the link keeps its box, so its hidden label is not lost.
+    expect(result.issues.map((issue) => issue.failureSummary).join(" ")).not.toContain(
+      "Search the whole site"
+    );
+  }, 120_000);
+
+  it("gives a hidden region and a member with a finding of its own two markers", async () => {
+    const result = await audit(url("hidden-clipped.html"), {
+      rendering: { conditions: ["viewport:1280", "viewport:360"] },
+    });
+
+    const findings = renderIssues(result).filter(
+      (issue) => issue.rendering?.condition === "viewport:1280"
+    );
+    const region = findings.find(
+      (issue) => issue.rendering?.checkId === "content-hidden-at-viewport"
+    );
+    const clipped = findings.find((issue) => issue.rendering?.checkId === "overflow-clipped-text");
+
+    expect(region?.selector).toBe("#promos");
+    expect(region?.rendering?.evidence.textElements).toBe(2);
+    expect(clipped?.selector).toBe("#clipped-promo");
+    expect(region?.annotation?.state).toBe("resolved");
+    expect(clipped?.annotation?.state).toBe("resolved");
+
+    // Two elements, two marks: the region's number must not land on the
+    // paragraph that has a finding of its own.
+    expect(region?.annotation?.mark).not.toBe(clipped?.annotation?.mark);
+
+    // And the region's box is the section's, which contains the paragraph's
+    // and is taller than it by the section's padding.
+    const regionRect = region?.annotation?.rect;
+    const clippedRect = clipped?.annotation?.rect;
+    if (!regionRect || !clippedRect) throw new Error("both findings need a rect");
+    expect(regionRect.y).toBeLessThan(clippedRect.y);
+    expect(regionRect.y + regionRect.height).toBeGreaterThan(clippedRect.y + clippedRect.height);
+    expect(regionRect.height).toBeGreaterThan(clippedRect.height * 2);
+  }, 120_000);
+
+  it("reports a menu no control can reveal, once, naming the list", async () => {
+    const result = await audit(url("hidden-nav.html"), {
+      rendering: { conditions: ["viewport:1280", "viewport:360"] },
+    });
+
+    const findings = renderIssues(result, "content-hidden-at-viewport");
+    expect(findings.map((issue) => issue.selector)).toEqual(["#menu"]);
+    expect(findings[0].rendering?.evidence.textElements).toBe(2);
+    expect(findings[0].annotation?.state).toBe("resolved");
+  }, 120_000);
+
+  it("exempts only what a control can reveal, not everything beside one", async () => {
+    const result = await audit(url("disclosure.html"), {
+      rendering: { conditions: ["viewport:1280", "viewport:360"] },
+    });
+
+    const findings = renderIssues(result, "content-hidden-at-viewport");
+    // The paragraph next to the search button, and nothing from the nav the
+    // hamburger controls.
+    expect(findings.map((issue) => issue.selector)).toEqual(["#hours"]);
+    expect(findings[0].failureSummary).toContain("Opening hours");
+    expect(findings[0].annotation?.state).toBe("resolved");
+    expect(result.issues.map((issue) => issue.failureSummary).join(" ")).not.toContain(
+      "Contact the office"
+    );
+  }, 120_000);
+
+  it("keeps a caller page's device settings and navigates no second time", async () => {
+    const page = await browser.newPage();
+    const original = {
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 2,
+      isMobile: true,
+      hasTouch: true,
+    };
+    await page.setViewport(original);
+
+    /**
+     * Puppeteer replaces the whole viewport on every change and reloads the
+     * page when mobile or touch emulation changes, so a pass that passed the
+     * dimensions alone reset the caller's device emulation and navigated a
+     * second time.
+     */
+    let navigations = 0;
+    const readState = () =>
+      page.evaluate(() => ({
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        devicePixelRatio: window.devicePixelRatio,
+        maxTouchPoints: navigator.maxTouchPoints,
+        coarsePointer: window.matchMedia("(pointer: coarse)").matches,
+      }));
+
+    try {
+      await page.goto(url("mode.html"), { waitUntil: "networkidle2" });
+      // The baseline for the comparison is the page after an audit without
+      // the rendering pass, so what is compared is the pass alone: Puppeteer
+      // leaves touch emulation off after any full-page screenshot, which the
+      // engine pass takes as well.
+      await audit(page, {});
+      const before = await readState();
+      page.on("framenavigated", (frame) => {
+        if (frame === page.mainFrame()) navigations++;
+      });
+
+      const result = await audit(page, {
+        rendering: { conditions: ["viewport:320", "viewport:768", "text-spacing"] },
+      });
+
+      expect(result.renderingMeta?.conditionsRun).toEqual([
+        "viewport:320",
+        "viewport:768",
+        "text-spacing",
+      ]);
+      expect(result.renderingMeta?.restorationFailed).toBeUndefined();
+      expect(navigations).toBe(0);
+      expect(page.viewport()).toEqual(original);
+      expect(await readState()).toEqual(before);
+    } finally {
+      await page.close();
+    }
+  }, 120_000);
+
+  // Criterion 9
+  it("returns one capture per condition, each matching its own condition", async () => {
+    const conditions = ["viewport:320", "viewport:768", "media:dark", "text-spacing"];
+    const result = await audit(url("mode.html"), { rendering: { conditions } });
+
+    expect(result.renderingMeta?.conditionsRun).toEqual(conditions);
+    expect(result.renderingCaptures).toHaveLength(conditions.length);
+
+    const captures = result.renderingCaptures ?? [];
+    expect(captures.map((capture) => capture.condition)).toEqual(conditions);
+    expect(captures.map((capture) => capture.meta.viewport.width)).toEqual([320, 768, 1280, 1280]);
+
+    for (const capture of captures) {
+      // Readable JPEG geometry, in CSS px, matching its condition's viewport.
+      expect(capture.screenshot.length).toBeGreaterThan(100);
+      expect(capture.screenshot[0]).toBe(0xff);
+      expect(capture.screenshot[1]).toBe(0xd8);
+      expect(capture.meta.width).toBe(capture.meta.viewport.width);
+      expect(capture.meta.fullPage).toBe(true);
+      expect(capture.meta.scroll).toEqual({ x: 0, y: 0 });
+    }
+
+    // A capture index points at its own capture.
+    for (const issue of renderIssues(result)) {
+      const index = issue.rendering?.captureIndex ?? -1;
+      expect(captures[index]?.condition).toBe(issue.rendering?.condition);
+    }
+  }, 120_000);
+
+  // Criterion 8
+  it("leaves the page at its original viewport, emulation and styles", async () => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+
+    /**
+     * The state the pass must restore. Read before and after instead of
+     * asserted as literals: the browser's own defaults (a headless Chrome can
+     * prefer dark) are what "original" means here.
+     */
+    const readState = () =>
+      page.evaluate(() => ({
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        dark: window.matchMedia("(prefers-color-scheme: dark)").matches,
+        forcedColors: window.matchMedia("(forced-colors: active)").matches,
+        moreContrast: window.matchMedia("(prefers-contrast: more)").matches,
+        reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+        background: getComputedStyle(document.body).backgroundColor,
+        letterSpacing: getComputedStyle(document.getElementById("copy") as Element).letterSpacing,
+        lineHeight: getComputedStyle(document.getElementById("copy") as Element).lineHeight,
+        adoptedSheets: document.adoptedStyleSheets.length,
+        textSpacingFlag: (window as unknown as Record<string, unknown>).__barrieretestTextSpacing,
+        scrollY: window.scrollY,
+      }));
+
+    try {
+      await page.goto(url("mode.html"), { waitUntil: "networkidle2" });
+      const before = await readState();
+
+      // Every kind of condition, including the composite.
+      const result = await audit(page, {
+        rendering: {
+          conditions: [
+            "viewport:320",
+            "media:dark",
+            "media:forced-colors",
+            "media:more-contrast",
+            "media:reduced-motion",
+            "cvd:protanopia",
+            "text-spacing",
+            "viewport:320+text-spacing",
+          ],
+        },
+      });
+
+      expect(result.renderingMeta?.conditionsRun).toEqual([
+        "viewport:320",
+        "media:dark",
+        "media:forced-colors",
+        "media:more-contrast",
+        "media:reduced-motion",
+        "cvd:protanopia",
+        "text-spacing",
+        "viewport:320+text-spacing",
+      ]);
+      expect(result.renderingMeta?.conditionsSkipped).toEqual([]);
+
+      const after = await readState();
+      expect(after).toEqual(before);
+      expect(after.innerWidth).toBe(1280);
+      expect(after.innerHeight).toBe(720);
+      expect(after.letterSpacing).toBe("normal");
+      expect(after.textSpacingFlag).toBeUndefined();
+      expect(after.scrollY).toBe(0);
+    } finally {
+      await page.close();
+    }
+  }, 120_000);
+
+  it("applies the whole text-spacing override while the condition runs, and takes it back", async () => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+
+    interface SpacingSample {
+      fontSize: string;
+      lineHeight: string;
+      letterSpacing: string;
+      wordSpacing: string;
+      marginBottom: string;
+    }
+
+    /** What the page itself saw, in the order it saw it. */
+    const samples = () =>
+      page.evaluate(
+        () => (window as unknown as { __spacingSamples: SpacingSample[] }).__spacingSamples
+      );
+
+    try {
+      await page.goto(url("spacing.html"), { waitUntil: "networkidle2" });
+      const before = await samples();
+      expect(before).toHaveLength(1);
+
+      const result = await audit(page, {
+        rendering: { conditions: ["viewport:1280", "text-spacing"] },
+      });
+
+      expect(result.renderingMeta?.conditionsRun).toEqual(["viewport:1280", "text-spacing"]);
+
+      // Every value WCAG 1.4.12 asks for, computed on the page while the
+      // condition was applied: 1.5 times the 20 px font size, 0.12em,
+      // 0.16em, and 2em of paragraph spacing.
+      const seen = await samples();
+      const underOverride = seen.filter((sample) => sample.letterSpacing !== "normal");
+      expect(underOverride.length).toBeGreaterThan(0);
+      for (const sample of underOverride) {
+        expect(sample.fontSize).toBe("20px");
+        expect(sample.lineHeight).toBe("30px");
+        expect(sample.letterSpacing).toBe("2.4px");
+        expect(sample.wordSpacing).toBe("3.2px");
+        expect(sample.marginBottom).toBe("40px");
+      }
+
+      // And the page is back at its own spacing afterwards.
+      expect(seen[seen.length - 1]).toEqual(before[0]);
+      expect(
+        await page.evaluate(() => {
+          const style = getComputedStyle(document.getElementById("copy") as Element);
+          return {
+            lineHeight: style.lineHeight,
+            letterSpacing: style.letterSpacing,
+            wordSpacing: style.wordSpacing,
+            marginBottom: style.marginBottom,
+          };
+        })
+      ).toEqual({
+        lineHeight: before[0].lineHeight,
+        letterSpacing: before[0].letterSpacing,
+        wordSpacing: before[0].wordSpacing,
+        marginBottom: before[0].marginBottom,
+      });
+
+      // The override is what the finding is about: the box fits its text at
+      // the page's own spacing and loses a line to the override.
+      const clipped = renderIssues(result, "overflow-clipped-text").filter(
+        (issue) => issue.selector === "#spacing-fits"
+      );
+      expect(clipped.map((issue) => issue.rendering?.condition)).toEqual(["text-spacing"]);
+      expect(Number(clipped[0].rendering?.evidence.scrollHeight)).toBeGreaterThan(
+        Number(clipped[0].rendering?.evidence.clientHeight)
+      );
+    } finally {
+      await page.close();
+    }
+  }, 120_000);
+
+  it("applies and removes the vision-deficiency emulation, seen in the pixels", async () => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+    const probe = await browser.newPage();
+
+    /** The colour of one pixel of a JPEG, decoded in the browser itself. */
+    const colourAt = (image: Uint8Array, x: number, y: number) =>
+      probe.evaluate(
+        async (input: { data: string; x: number; y: number }) => {
+          const binary = atob(input.data);
+          const bytes = new Uint8Array(binary.length);
+          for (let index = 0; index < binary.length; index++) {
+            bytes[index] = binary.charCodeAt(index);
+          }
+          const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+          const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+          const context = canvas.getContext("2d") as OffscreenCanvasRenderingContext2D;
+          context.drawImage(bitmap, 0, 0);
+          const [r, g, b] = context.getImageData(input.x, input.y, 1, 1).data;
+          return { r, g, b };
+        },
+        { data: Buffer.from(image).toString("base64"), x, y }
+      );
+
+    try {
+      await page.goto(url("patch.html"), { waitUntil: "networkidle2" });
+
+      const result = await audit(page, { rendering: { conditions: ["cvd:protanopia"] } });
+
+      expect(result.renderingMeta?.conditionsRun).toEqual(["cvd:protanopia"]);
+      const capture = result.renderingCaptures?.[0];
+      if (!capture) throw new Error("the condition needs its capture");
+
+      // Pure red is not red under protanopia: Chromium's Machado model
+      // drops the red channel and raises the green one.
+      const simulated = await colourAt(capture.screenshot, 100, 100);
+      expect(simulated.r).toBeLessThan(180);
+      expect(simulated.g).toBeGreaterThan(50);
+
+      // And the page the pass hands back shows the patch as it was.
+      const after = await page.screenshot({ type: "jpeg", quality: 85, fullPage: true });
+      const restored = await colourAt(after, 100, 100);
+      expect(restored.r).toBeGreaterThan(200);
+      expect(restored.g).toBeLessThan(60);
+    } finally {
+      await probe.close();
+      await page.close();
+    }
+  }, 120_000);
+
+  it("emulates the media conditions it reverts", async () => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+
+    try {
+      await page.goto(url("mode.html"), { waitUntil: "networkidle2" });
+
+      // The adapter is what the pass uses; this proves the emulations it
+      // claims really reach the page, which the revert test cannot show.
+      const { createRenderingCapabilities } = await import("./rendering/capabilities.js");
+      const capabilities = await createRenderingCapabilities(page as unknown as BrowserPage);
+
+      const matches = () =>
+        page.evaluate(() => ({
+          forcedColors: window.matchMedia("(forced-colors: active)").matches,
+          moreContrast: window.matchMedia("(prefers-contrast: more)").matches,
+          reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+        }));
+
+      await capabilities.emulateMedia({ forcedColors: "active" });
+      expect((await matches()).forcedColors).toBe(true);
+
+      await capabilities.emulateMedia({ prefersContrast: "more" });
+      const contrast = await matches();
+      expect(contrast.moreContrast).toBe(true);
+      expect(contrast.forcedColors).toBe(false);
+
+      await capabilities.emulateMedia({ reducedMotion: "reduce" });
+      expect((await matches()).reducedMotion).toBe(true);
+
+      await capabilities.emulateMedia({});
+      expect(await matches()).toEqual({
+        forcedColors: false,
+        moreContrast: false,
+        reducedMotion: false,
+      });
+
+      await capabilities.dispose();
+    } finally {
+      await page.close();
+    }
+  }, 120_000);
+
+  /**
+   * The missing-capability half of criterion 10: a page that does not expose
+   * the vision-deficiency method at all, so the conditions are skipped at
+   * detection. The runtime half — a Playwright context whose CDP session is
+   * refused, which is what a non-Chromium browser does — is covered against
+   * a Playwright-shaped page in `src/rendering/runner.test.ts`; this is not
+   * Firefox acceptance.
+   */
+  it("skips the CVD conditions on a page that lacks the capability and still completes", async () => {
+    const real = await browser.newPage();
+    await real.setViewport({ width: 1280, height: 720 });
+
+    try {
+      await real.goto(url("mode.html"), { waitUntil: "networkidle2" });
+
+      // Everything a Puppeteer page exposes except `emulateVisionDeficiency`.
+      const limited = {
+        url: () => real.url(),
+        title: () => real.title(),
+        goto: (target: string) => real.goto(target),
+        screenshot: (options: unknown) =>
+          real.screenshot(options as Parameters<typeof real.screenshot>[0]),
+        evaluate: ((fn: never, arg: never) => real.evaluate(fn, arg)) as BrowserPage["evaluate"],
+        browser: () => real.browser(),
+        viewport: () => real.viewport(),
+        setViewport: (size: { width: number; height: number }) => real.setViewport(size),
+        emulateMediaFeatures: (features: { name: string; value: string }[]) =>
+          real.emulateMediaFeatures(features),
+      } as unknown as BrowserPage;
+
+      const result = await audit(limited, {
+        rendering: { conditions: ["viewport:320", "cvd:protanopia", "cvd:deuteranopia"] },
+      });
+
+      expect(result.renderingMeta?.conditionsRun).toEqual(["viewport:320"]);
+      expect(result.renderingMeta?.conditionsSkipped).toEqual([
+        {
+          condition: "cvd:protanopia",
+          reason: "the browser page cannot emulate visionDeficiency",
+        },
+        {
+          condition: "cvd:deuteranopia",
+          reason: "the browser page cannot emulate visionDeficiency",
+        },
+      ]);
+      expect(result.renderingCaptures).toHaveLength(1);
+      expect(result.documentTitle).toBe("Mode fixture");
+      expect(result.score).toBeGreaterThan(0);
+    } finally {
+      await real.close();
+    }
+  }, 120_000);
 });

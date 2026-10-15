@@ -10,6 +10,7 @@ function toBaselineIssue(issue: Issue): BaselineIssue {
     rule: issue.id,
     selector: issue.selector,
     hash: generateIssueHash(issue),
+    ...(issue.rendering ? { condition: issue.rendering.condition } : {}),
   };
 }
 

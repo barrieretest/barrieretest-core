@@ -69,6 +69,7 @@ npx barrieretest https://example.com -s serious
 npx barrieretest https://example.com -o results.json
 npx barrieretest https://example.com --html report.html
 npx barrieretest https://example.com --engine pa11y
+npx barrieretest https://example.com --rendering
 ```
 
 ### Semantic AI from the CLI
@@ -375,6 +376,7 @@ const pa11yResult = await audit('https://example.com', {
 | `captureScreenshot` | `boolean` | `true` | Capture a page screenshot |
 | `annotate` | `boolean` | `true` | Map issues onto the screenshot (see [Annotations](#annotations)) |
 | `loadLazyContent` | `boolean` | `true` | Scroll the page once before auditing (see [Lazy content](#lazy-content)) |
+| `rendering` | `RenderingOptions \| true` | — | Render the page under named conditions and run geometry checks (see [Rendering checks](#rendering-checks)) |
 | `onProgress` | `function` | — | Progress callback |
 
 Notes:
@@ -399,6 +401,8 @@ Notes:
   timestamp: string
   baseline?: BaselineInfo
   screenshotMeta?: ScreenshotMeta
+  renderingCaptures?: RenderingCapture[]
+  renderingMeta?: RenderingMeta
 }
 ```
 
@@ -455,6 +459,91 @@ Limitations:
 - annotation never fails an audit, and the two failure modes differ: a screenshot whose size cannot be read leaves `annotation` undefined on every issue and omits `screenshotMeta`; a measurement that fails or times out leaves every issue `unresolved` and omits `screenshotMeta`. Either way one warning starting with `Annotation` is logged and the rest of the result is normal
 - `detail: 'fix-ready'` localization scrolls elements into view, so when it runs `screenshotMeta.scroll` can be non-zero and the rects of `anchored` elements may not match where they appear in the capture
 - baseline files and the last-run cache never contain annotations
+
+## Rendering checks
+
+With `rendering` set, `audit()` renders the page under a set of named **rendering conditions** — viewports, media and vision-deficiency emulations, the WCAG text-spacing override — and runs deterministic geometry checks under each. Findings are ordinary issues with ids `render:<check-id>` and an annotation in the coordinate space of their own condition's capture, and the result carries one capture per condition, so a report can show the page as a mobile, dark-mode or colour-blind user sees it.
+
+The pass is opt-in and changes nothing without it. It runs on the page the engine pass already loaded — one browser, one navigation — and applies, measures, captures and reverts each condition in turn, so the semantic pass and the annotations still see the original rendering.
+
+```typescript
+const result = await audit('https://example.com', { rendering: true })
+
+for (const issue of result.issues) {
+  if (!issue.rendering) continue
+  const { checkId, condition, captureIndex, evidence } = issue.rendering
+  const capture = result.renderingCaptures?.[captureIndex]
+  console.log(`${checkId} under ${condition}`, evidence, issue.annotation?.rect, capture?.meta)
+}
+
+console.log(result.renderingMeta)
+// { conditionsRun, conditionsSkipped, checksRun, durationMs }
+// plus restorationFailed, pageUnsafe and truncatedConditions when any happened
+```
+
+```typescript
+await audit('https://example.com', {
+  rendering: {
+    conditions: ['viewport:320', 'viewport:320+text-spacing', 'media:forced-colors'],
+    checks: ['reflow-horizontal-scroll'],
+    captures: false,       // default true
+    conditionTimeout: 8000 // per condition, covering apply, settle, measure and capture
+  },
+})
+```
+
+### Conditions
+
+`rendering: true` means the lean default set: `viewport:1280`, `viewport:320`, `viewport:360`, `media:dark`, `cvd:protanopia`, `cvd:deuteranopia` and `text-spacing`. Pass `conditions` for any other combination; two or more ids joined with `+` compose into one condition, as in `viewport:320+text-spacing`. A composite whose parts contradict each other — `viewport:320+viewport:1280`, `cvd:protanopia+cvd:deuteranopia` — is rejected, in the library and on the CLI, instead of running the last part under the composite's name.
+
+| Id | What it applies |
+|----|-----------------|
+| `viewport:320` | 320×720 CSS px — the WCAG 1.4.10 equivalent of 1280 px at 400% zoom |
+| `viewport:360` | 360×800, phone |
+| `viewport:768` | 768×1024, tablet |
+| `viewport:1280` | 1280×720, the baseline size |
+| `cvd:protanopia`, `cvd:deuteranopia`, `cvd:tritanopia`, `cvd:achromatopsia`, `cvd:reduced-contrast`, `cvd:blurred-vision` | Chromium's vision-deficiency emulation |
+| `media:dark` | `prefers-color-scheme: dark` |
+| `media:forced-colors` | `forced-colors: active` |
+| `media:more-contrast` | `prefers-contrast: more` |
+| `media:reduced-motion` | `prefers-reduced-motion: reduce` |
+| `text-spacing` | WCAG 1.4.12: line height 1.5, letter spacing 0.12em, word spacing 0.16em, paragraph spacing 2em, all `!important` |
+
+Conditions run viewports first, then media, then vision deficiencies, then text spacing and the composites. Each capture is a full-page JPEG at quality 85 with its own `meta` geometry; the audit's own `screenshot` stays PNG.
+
+### Checks
+
+| Check id | Runs under | Finding when |
+|----------|-----------|--------------|
+| `reflow-horizontal-scroll` | viewports of 320 px and narrower | an element extends past the viewport, or the document scrolls horizontally with no single element to blame |
+| `overflow-clipped-text` | every viewport and `text-spacing` | a container with `overflow: hidden` or `clip` cuts off its text — `minor` for a single line truncated with an ellipsis, `serious` otherwise |
+| `overlap-text` | every viewport and `text-spacing` | two text blocks in the same stacking context are drawn on top of each other, covering more than 10% of the smaller box |
+| `content-hidden-at-viewport` | `viewport:1280` compared with `viewport:360` | text that is rendered wide is gone narrow, with no control to reveal it — one finding per hidden region, naming the hidden ancestor, boxed on the ancestor's own rectangle in the wide capture, and counting the text elements it took with it. Needs both conditions in the run; both are in the default set |
+
+Reflow exemptions follow the WCAG text by element type and role, never by heuristics on text content: tables and their parts, `svg`, `math`, `canvas`, `video`, `iframe`, `object`, `embed`, `textarea`, image maps, `contenteditable`, and the roles `table`, `grid`, `treegrid`, `row`, `rowgroup`, `cell`, `gridcell`, `columnheader`, `rowheader`, `toolbar`, `menubar`, `application` and `textbox`, each including everything inside them. Content whose overflow an ancestor clips away is not a reflow failure either, since it cannot be scrolled to. `content-hidden-at-viewport` reports one finding per hidden region: when several text elements go with one hidden ancestor — the links of a collapsed menu, the captions of a row of thumbnails — that ancestor is named once, with its own box in the wide capture and a marker of its own — never a member's, since a member can carry a clipping or overlap finding under the same condition — and `evidence.textElements` says how many text elements there were. It exempts only content a control can actually reveal: content inside a `nav` (element or `role="navigation"`) when the page has a visible disclosure control — an element with `aria-expanded` or `aria-controls`, the hamburger that usually sits next to the `nav` rather than inside it — or when the `nav` has a visible control of its own, content that is or sits inside the `aria-controls` target of a visible control, and content inside a closed `details` whose `summary` is visible. Only navigation regions get the page-wide rule: no other region is exempt for a control elsewhere, and none is exempt for merely containing some control, so a `header` with a search button still reports the opening hours the narrow layout drops. A label hidden inside a link or button that itself stays rendered at the narrow viewport is not reported either — the control keeps its function and its accessible name, and a control without a visible label is a different criterion. Content whose text is rendered somewhere else at the narrow viewport is exempt as well, and the check reports `moderate`, never `critical`. When the narrow measurement hit its element cap (`truncatedConditions` in `renderingMeta`), the check reports nothing rather than call capped-off content missing.
+
+### From the CLI
+
+```bash
+npx barrieretest https://example.com --rendering
+npx barrieretest https://example.com --rendering-conditions viewport:320,viewport:320+text-spacing
+npx barrieretest https://example.com --rendering-checks reflow-horizontal-scroll,overlap-text
+```
+
+Any `--rendering-*` flag enables the pass. The text output gets a block with the findings per condition, the skipped conditions with their reason, the checks that ran and the duration. With `--json` and no `-o`, captures are left out to keep stdout usable; written to a file they are base64 strings.
+
+### Limitations
+
+- The pass needs a page to render on, which is the page the audit already has: one you pass in, or the one `audit()` owns for a URL target with `engine: 'axe'`. It therefore also runs on a page you pass in with `engine: 'pa11y'` — a Puppeteer page, which that engine requires anyway. Only a URL target with `engine: 'pa11y'` has no page left, since that engine manages its own browser: there the pass is skipped with a warning
+- Vision-deficiency emulation is Chromium's (the Machado model Chrome DevTools uses) over a CDP session. On a non-Chromium Playwright browser there is none, so the `cvd:*` conditions land in `renderingMeta.conditionsSkipped` with a reason and the audit completes normally
+- A condition the page cannot apply, or that fails or exceeds its budget, is skipped the same way: one warning starting with `Rendering`, an entry in `conditionsSkipped`, and every emulation reverted before the next condition. A condition that ran out of budget is cancelled cooperatively and the runner waits for it to stop before it reverts, so abandoned work cannot change the page under a later condition
+- The viewport is restored to exactly what the page reported before the pass, device settings (`deviceScaleFactor`, `isMobile`, `hasTouch`, `isLandscape`) included, and every change carries those settings along with the new dimensions, so auditing a mobile or high-DPI page you pass in does not reload it or lose its emulation. A Puppeteer page that had no viewport override keeps having none. On Playwright only the dimensions exist to restore, which is all `setViewportSize` takes — and a Playwright context with `viewport: null` has nothing to restore at all, since `setViewportSize` can only install an override and never clear one, so the viewport conditions (and composites containing one) are skipped with a reason there while media, `cvd:*` and `text-spacing` still run
+- If a revert fails twice, or abandoned work cannot be confirmed stopped, no further condition runs: the condition is named in `renderingMeta.restorationFailed`, every condition that was asked for and will not run any more is listed in `renderingMeta.conditionsSkipped` with that reason, one warning says so, and a full restore is attempted before the pass returns. Its own findings and capture stay — they were measured under the state they report — and no later condition is presented as a result from the original page
+- Every restoration step is bounded from Node as well (2 s each), the final scroll to the top included, so a browser that stops answering costs the pass its remaining conditions and the page's established state, never the audit's return. A step that does not answer in time counts as failed and is not retried while it may still be in flight, because a second call to the same emulation would race it
+- `renderingMeta.pageUnsafe` is set whenever the pass cannot confirm the page is back in its original state: work it gave up waiting for is still outstanding (the 2 s cancellation grace, or a restoration step that did not answer), or the last full restore failed. The pass then does not claim the page is restored, and it restores it once more when the outstanding work finally settles. Because the page may still change, `audit()` skips localization, the semantic pass and the annotation step for that run with a warning starting with `Rendering`. The engine findings, the score and the page screenshot were taken before the pass and stand
+- Findings on `position: fixed` or `sticky` elements carry `annotation.anchored: true`: a full-page capture renders them once, which is not where they follow the user
+- `overlap-text` cannot tell an intentional overlap (text over a hero image) from a broken one; the same stacking context, the 10% threshold and the line boxes of wrapped inline elements limit it, and the rest is the reviewer's call
+- Rendering findings are ordinary issues, so they move the score like any other. The HTML report lists them under its "not located" heading, because their rects belong to their own capture and not to the page screenshot; capture sections come later
 
 ## HTML report
 
@@ -555,6 +644,8 @@ npx barrieretest baseline:update ./baselines
 ```
 
 `results.json` from `-o` is an audit result, not a baseline file.
+
+An issue is identified by its rule id, selector and element tag — and, for a rendering finding, the condition it was found under, which the baseline entry stores as `condition`. The same paragraph clipped at `viewport:320` and under `text-spacing` is therefore two findings: accepting one does not accept the other.
 
 ## Issue formatting helpers
 

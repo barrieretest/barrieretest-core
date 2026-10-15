@@ -19,9 +19,10 @@ export interface CaptureSize {
 /**
  * An element thinner or shorter than this is treated as not visibly rendered:
  * it is the screen-reader-only clipping pattern (`width: 1px; height: 1px`),
- * not something a marker can point at.
+ * not something a marker can point at. The rendering pass applies the same
+ * rule, which is why this is exported.
  */
-const MIN_VISIBLE_SIZE_PX = 2;
+export const MIN_VISIBLE_SIZE_PX = 2;
 
 /** Per-selector outcome, before reading order turns element identity into marks. */
 export interface SelectorAnnotation {
@@ -38,8 +39,20 @@ export function captureSizeFrom(png: PngSize, devicePixelRatio: number): Capture
   return { width: png.width / ratio, height: png.height / ratio };
 }
 
+/**
+ * The page-level numbers the capture geometry is derived from. A
+ * `PageMeasurement` carries them, and so does a rendering-condition
+ * measurement, which is why this is the parameter type.
+ */
+export interface CaptureMeasurement {
+  devicePixelRatio: number;
+  viewport: { width: number; height: number };
+  document: { width: number; height: number };
+  scroll: { x: number; y: number };
+}
+
 /** Capture geometry for the result, so a consumer can place rects on the image. */
-export function screenshotMetaFrom(png: PngSize, measurement: PageMeasurement): ScreenshotMeta {
+export function screenshotMetaFrom(png: PngSize, measurement: CaptureMeasurement): ScreenshotMeta {
   const deviceScaleFactor = measurement.devicePixelRatio > 0 ? measurement.devicePixelRatio : 1;
   const capture = captureSizeFrom(png, deviceScaleFactor);
 
@@ -64,7 +77,7 @@ export function screenshotMetaFrom(png: PngSize, measurement: PageMeasurement): 
  * starts at or past the capture's edge is outside it, however the fractional
  * size rounds.
  */
-function clipRect(rect: MeasuredRect, capture: CaptureSize): AnnotationRect | null {
+export function clipRect(rect: MeasuredRect, capture: CaptureSize): AnnotationRect | null {
   if (
     !Number.isFinite(rect.x) ||
     !Number.isFinite(rect.y) ||
@@ -147,25 +160,29 @@ export function resolveSelectorAnnotations(
   return resolved;
 }
 
+/** One element that is to carry a marker, with the rect a consumer draws. */
+export interface MarkCandidate {
+  /** Identity of the element; candidates sharing it share one mark. */
+  elementIndex: number;
+  /** The clipped, rounded rect, so the numbers follow what is drawn. */
+  rect: AnnotationRect;
+}
+
 /**
  * Number the marked elements in the page's reading order: top edge ascending,
- * then left edge, then first appearance in the issue list for the rare pair
- * that shares a corner. The rect is the clipped, rounded one the annotation
- * carries, so the numbers follow what a consumer draws. Returns a mark per
- * element index.
+ * then left edge, then first appearance in `candidates` for the rare pair
+ * that shares a corner. One number per distinct element, contiguous from 1.
+ * Returns a mark per element index.
+ *
+ * Shared with the rendering pass, which numbers the marks of each condition's
+ * capture the same way.
  */
-function numberMarks(
-  issues: Issue[],
-  resolved: Map<string, SelectorAnnotation>
-): Map<number, number> {
+export function markNumbersInReadingOrder(candidates: MarkCandidate[]): Map<number, number> {
   const marked = new Map<number, { rect: AnnotationRect; first: number }>();
 
-  issues.forEach((issue, index) => {
-    const match = issue.selector === null ? undefined : resolved.get(issue.selector);
-    if (!match?.rect || match.elementIndex === undefined || marked.has(match.elementIndex)) {
-      return;
-    }
-    marked.set(match.elementIndex, { rect: match.rect, first: index });
+  candidates.forEach((candidate, index) => {
+    if (marked.has(candidate.elementIndex)) return;
+    marked.set(candidate.elementIndex, { rect: candidate.rect, first: index });
   });
 
   const ordered = [...marked.entries()].sort(
@@ -176,18 +193,47 @@ function numberMarks(
 }
 
 /**
+ * An issue whose annotation belongs to another capture — a rendering finding
+ * carries its rect and mark in the space of its condition's capture — is left
+ * exactly as it is, and consumes no mark on the page screenshot.
+ */
+export function annotatedElsewhere(issue: Issue): boolean {
+  return issue.rendering !== undefined;
+}
+
+/** The marked elements of the page screenshot, in issue order. */
+function markCandidates(
+  issues: Issue[],
+  resolved: Map<string, SelectorAnnotation>
+): MarkCandidate[] {
+  const candidates: MarkCandidate[] = [];
+
+  for (const issue of issues) {
+    if (annotatedElsewhere(issue)) continue;
+    const match = issue.selector === null ? undefined : resolved.get(issue.selector);
+    if (!match?.rect || match.elementIndex === undefined) continue;
+    candidates.push({ elementIndex: match.elementIndex, rect: match.rect });
+  }
+
+  return candidates;
+}
+
+/**
  * Attach annotations to copies of the issues, numbering marks in the page's
  * reading order: one number per distinct element, shared by every issue on
  * it, contiguous from 1. The order of `issues` itself is unchanged. Issues
- * the measurement never saw (no selector) come out unresolved.
+ * the measurement never saw (no selector) come out unresolved; issues
+ * annotated in another capture's space are returned untouched.
  */
 export function applyAnnotations(
   issues: Issue[],
   resolved: Map<string, SelectorAnnotation>
 ): Issue[] {
-  const marks = numberMarks(issues, resolved);
+  const marks = markNumbersInReadingOrder(markCandidates(issues, resolved));
 
   return issues.map((issue) => {
+    if (annotatedElsewhere(issue)) return issue;
+
     const selector = issue.selector;
     const match = selector === null ? undefined : resolved.get(selector);
 
@@ -214,8 +260,9 @@ export function applyAnnotations(
 
 /** Failure path: every issue unresolved, on copies, with no geometry claimed. */
 export function unresolvedAnnotations(issues: Issue[]): Issue[] {
-  return issues.map((issue) => ({
-    ...issue,
-    annotation: { selector: issue.selector, state: "unresolved" as const },
-  }));
+  return issues.map((issue) =>
+    annotatedElsewhere(issue)
+      ? issue
+      : { ...issue, annotation: { selector: issue.selector, state: "unresolved" as const } }
+  );
 }

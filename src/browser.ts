@@ -17,6 +17,8 @@ export type BrowserPage = {
   goto: (url: string) => Promise<unknown>;
   screenshot: (options?: {
     type?: "png" | "jpeg";
+    /** JPEG quality 0-100; ignored for PNG. */
+    quality?: number;
     fullPage?: boolean;
     clip?: BrowserScreenshotClip;
   }) => Promise<Uint8Array>;

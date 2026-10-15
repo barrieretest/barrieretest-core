@@ -77,6 +77,41 @@ describe("generateIssueHash", () => {
     expect(generateIssueHash(issue1)).not.toBe(generateIssueHash(issue2));
   });
 
+  it("keeps the hash an engine issue already had", () => {
+    // A stored baseline must keep matching after the rendering condition
+    // joined the identity: the literal is what this issue hashed to before.
+    const issue = createIssue({
+      id: "color-contrast",
+      impact: "serious",
+      selector: "button.submit",
+      nodes: [{ html: '<button class="submit">Submit</button>' }],
+    });
+
+    expect(generateIssueHash(issue)).toBe("66d4a36d");
+  });
+
+  it("tells the same rendering finding under two conditions apart", () => {
+    const clipped = (condition: string): Issue =>
+      createIssue({
+        id: "render:overflow-clipped-text",
+        selector: "#intro",
+        nodes: [{ html: '<p id="intro">Text</p>' }],
+        rendering: {
+          checkId: "overflow-clipped-text",
+          condition,
+          captureIndex: 0,
+          evidence: { clippedBy: 24 },
+        },
+      });
+
+    expect(generateIssueHash(clipped("viewport:320"))).not.toBe(
+      generateIssueHash(clipped("text-spacing"))
+    );
+    expect(generateIssueHash(clipped("viewport:320"))).toBe(
+      generateIssueHash(clipped("viewport:320"))
+    );
+  });
+
   it("is deterministic across multiple calls", () => {
     const issue = createIssue();
     const hashes = Array(10)

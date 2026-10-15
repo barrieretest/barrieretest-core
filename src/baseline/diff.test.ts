@@ -18,6 +18,7 @@ const createBaselineIssue = (issue: Issue): BaselineIssue => ({
   rule: issue.id,
   selector: issue.selector,
   hash: generateIssueHash(issue),
+  ...(issue.rendering ? { condition: issue.rendering.condition } : {}),
 });
 
 const createBaseline = (issues: BaselineIssue[] = []): BaselineFile => ({
@@ -104,6 +105,35 @@ describe("diffAgainstBaseline", () => {
 
     expect(result.new).toHaveLength(0);
     expect(result.known).toHaveLength(1);
+  });
+
+  it("counts the same finding under a second rendering condition as new", () => {
+    // One clipped paragraph, accepted at 320 px. Clipping under text
+    // spacing as well is a new failure, not the known one seen twice.
+    const clipped = (condition: string): Issue =>
+      createIssue({
+        id: "render:overflow-clipped-text",
+        impact: "serious",
+        selector: "#intro",
+        nodes: [{ html: '<p id="intro">Text</p>' }],
+        rendering: {
+          checkId: "overflow-clipped-text",
+          condition,
+          captureIndex: 0,
+          evidence: { clippedBy: 24 },
+        },
+      });
+
+    const known = clipped("viewport:320");
+    const baseline = createBaseline([createBaselineIssue(known)]);
+
+    const result = diffAgainstBaseline([known, clipped("text-spacing")], baseline);
+
+    expect(result.new).toHaveLength(1);
+    expect(result.new[0].rendering?.condition).toBe("text-spacing");
+    expect(result.known).toHaveLength(1);
+    expect(result.known[0].rendering?.condition).toBe("viewport:320");
+    expect(result.fixed).toHaveLength(0);
   });
 
   it("handles multiple issues with same rule but different selectors", () => {
