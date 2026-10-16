@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0]
+
 ### Added
 
 - **Deterministic rendering checks (`AuditOptions.rendering`).** `audit(url, { rendering: true })` renders the page under a set of named rendering conditions and runs deterministic geometry checks under each. Findings are ordinary issues with ids `render:<check-id>`, a `rendering` field (check id, condition, capture index, evidence numbers) and an `annotation` in the coordinate space of their own condition's capture; `AuditResult.renderingCaptures` carries one full-page JPEG per condition with its geometry, and `AuditResult.renderingMeta` the conditions run, the conditions skipped with a reason, the checks run, the duration, and — only when it happened — `restorationFailed` (the condition after which the page could not be put back, so the pass stopped) and `truncatedConditions` (the conditions where a cap dropped something eligible: the element walk, a collected group, the axe run, or a check's own finding cap). The pass runs on the page the engine pass already loaded — one browser, one navigation — after lazy content and before the semantic pass, applying, measuring, capturing and reverting each condition in turn, so the semantic pass and the annotation step see the original rendering. Baseline identity of a rendering finding includes its condition, and the baseline entry stores it as `condition`, so the same element clipped at `viewport:320` and under `text-spacing` is two findings and accepting one does not accept the other; the hash of every non-rendering issue is unchanged. An unknown condition or check id, or a composite whose parts contradict each other, is rejected by `audit()` itself rather than warned about as a rendering failure. An audit without the option is unchanged.
@@ -29,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`target-size` now runs in every audit.** The axe rule for WCAG 2.5.8 Target Size (Minimum) ships disabled in axe-core and never ran; the engine pass enables it for every audit, with or without `rendering` (contract decision 2 of 2026-10-14). Pages with touch targets under 24×24 CSS px that have no space around them therefore report `target-size` findings they did not report before, and **their scores go down**; baselines that were taken before this will show those findings as new. Nothing else about the engine pass changes.
 - **Navigation behaviour without the new option is unchanged from 0.8.0.** An error status still logs one warning ("Target returned HTTP <status> for <url>; auditing the served page …") and the served page is still audited with the same score and findings; the only addition is `result.navigation`. The pa11y engine, which navigated without reading the status, now emits that same warning, so every navigating path behaves alike.
 - **Repeated findings of one rule no longer sink the score.** `calculateScore` now deducts once per rule and severity, growing with the logarithm of the occurrences: base (critical 26, serious 10, moderate and minor 3) x (1 + log2(count)). A single occurrence costs what it did; a root cause reported on every element costs a few times its base instead of reaching the floor. Example: a page without `<main>` (67 x `region`, 1 x `landmark-one-main`) scores 76 instead of 5. Scores of pages with repeated rules go up; pages with one occurrence per rule score the same. The floors (5, or 1 above 100 issues) are unchanged.
+
+### Fixed
+
+- **A browser launched by core is closed when its setup fails.** If creating the page, setting the user agent or setting the viewport rejected after the browser had started, the browser stayed open, since the caller never received a reference to close. `launchPuppeteerSession` now closes it best-effort and rethrows the original error.
 
 ## [0.9.0]
 

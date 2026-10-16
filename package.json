@@ -1,6 +1,6 @@
 {
   "name": "@barrieretest/core",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Open-source core for single-page accessibility audits",
   "type": "module",
   "main": "./dist/index.js",
