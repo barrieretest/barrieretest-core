@@ -2,6 +2,8 @@ import type { PuppeteerBrowserLike, PuppeteerPageLike } from "../browser.js";
 import { isPuppeteerPage } from "../browser.js";
 import { dismissCookieBanner } from "../cookie-banner.js";
 import { loadLazyContent } from "../lazy-content.js";
+import { checkNavigationStatus, navigateAndInspect } from "../puppeteer-launch.js";
+import type { NavigationInfo } from "../types.js";
 
 export type Pa11yIssue = {
   code: string;
@@ -67,6 +69,13 @@ export type Pa11yRunnerOptions = {
 
   /** Scroll the page once before auditing so lazy content loads. Default true. */
   loadLazyContent?: boolean;
+
+  /**
+   * Throw a `NavigationHttpError` when the navigation answers with a status
+   * `>= 400`, before any other work on the page. Default false (audit the
+   * served page, warn once).
+   */
+  failOnHttpError?: boolean;
 };
 
 export type Pa11yRunResult = {
@@ -74,6 +83,8 @@ export type Pa11yRunResult = {
   documentTitle: string;
   pageUrl: string;
   screenshot?: Uint8Array;
+  /** What the navigation did. This engine always navigates. */
+  navigation: NavigationInfo;
 };
 
 type PuppeteerLauncher = {
@@ -130,6 +141,7 @@ export async function runPa11y(
     onProgress,
     page: existingPage,
     loadLazyContent: shouldLoadLazyContent = true,
+    failOnHttpError,
   } = options;
 
   let ownsBrowser = false;
@@ -173,11 +185,10 @@ export async function runPa11y(
 
     await onProgress?.({ percent: 30, message: "Loading page" });
 
-    const navigationTimeout = timeout ?? 30_000;
-    await page.goto(url, {
-      waitUntil: "networkidle2",
-      timeout: navigationTimeout,
-    });
+    const outcome = await navigateAndInspect(page, url, { timeout });
+    // Before the banner, the scroll, pa11y and the screenshot: with
+    // `failOnHttpError` an error page must cost no further work.
+    checkNavigationStatus(outcome, { failOnHttpError });
 
     await onProgress?.({ percent: 40, message: "Checking for cookie consent banners" });
     await dismissCookieBanner(page);
@@ -222,6 +233,7 @@ export async function runPa11y(
       documentTitle: result.documentTitle,
       pageUrl: result.pageUrl,
       screenshot,
+      navigation: outcome.navigation,
     };
   } finally {
     if (ownsBrowser) {

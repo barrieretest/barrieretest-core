@@ -11,7 +11,7 @@
  */
 
 import type { AIProviderName, ModelCapabilities } from "../ai/types.js";
-import type { Issue, IssueSeverity, SemanticIssueMeta } from "../types.js";
+import type { Issue, IssueSeverity, NavigationInfo, SemanticIssueMeta } from "../types.js";
 
 export type { SemanticIssueMeta };
 
@@ -184,6 +184,12 @@ export interface SemanticAuditResult {
   meta: SemanticMeta;
   screenshot?: Uint8Array;
   timestamp: string;
+  /**
+   * The facts of the navigation: what `semanticAudit(url)` did, or
+   * `{ navigated: false, status: null }` for a page the caller supplied and
+   * this pass left where it was.
+   */
+  navigation?: NavigationInfo;
 }
 
 /**
@@ -238,6 +244,15 @@ export interface SemanticOptions {
    * @default true
    */
   loadLazyContent?: boolean;
+  /**
+   * Turn a main-document HTTP status `>= 400` into a thrown
+   * `NavigationHttpError` instead of auditing the page the server served.
+   * Only used when the target is a URL, because only then does this entry
+   * point navigate. The error is thrown before the cookie banner, the lazy
+   * scroll, the context extraction, the screenshot and any AI request.
+   * @default false
+   */
+  failOnHttpError?: boolean;
   /** Headless browser launch flag (only used when target is a URL). */
   headless?: boolean;
   /** Viewport for screenshot (only used when target is a URL). */

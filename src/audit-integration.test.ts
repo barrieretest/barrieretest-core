@@ -11,20 +11,124 @@
  */
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
-import puppeteer from "puppeteer";
+import type { Browser, LaunchOptions } from "puppeteer";
 import { measureSelectors, readPngSize } from "./annotate/index.js";
 import type { BrowserPage } from "./browser.js";
 import { dismissCookieBanner } from "./cookie-banner.js";
 import { renderHtmlReport } from "./html-report/index.js";
 import { loadLazyContent } from "./lazy-content.js";
+import { isNavigationHttpError, type NavigationHttpError } from "./puppeteer-launch.js";
 import { SIMULATED_DEFICIENCIES, simulateDeficiency } from "./rendering/color.js";
 import { MAX_ANIMATIONS, MAX_PAINTED } from "./rendering/measure.js";
 import { settleCondition } from "./rendering/page.js";
 import { extractHtmlContext } from "./semantic/context.js";
 import type { Issue } from "./types.js";
+
+// ----- the instrumented Chromium launcher -----
+
+/**
+ * What one watched call opened for itself: the browsers, so their closure
+ * can be asserted, and the work every page they created was asked to do.
+ * Each post-navigation step (cookie banner, lazy scroll, axe, the rendering
+ * pass, the screenshot) goes through `evaluate` or `screenshot`, so two
+ * counters cover "nothing happened after the navigation failed".
+ */
+interface WatchedRun {
+  browsers: Browser[];
+  counts: { evaluate: number; screenshot: number }[];
+}
+
+/** Set while a watched call runs; the launcher below reads it. */
+let watchedLaunches: WatchedRun | null = null;
+
+/** Count what a real page is asked to do, through its real methods. */
+function countPageWork(page: unknown) {
+  const counts = { evaluate: 0, screenshot: 0 };
+  const target = page as {
+    evaluate: (...args: unknown[]) => unknown;
+    screenshot: (...args: unknown[]) => unknown;
+  };
+  const realEvaluate = target.evaluate.bind(target);
+  const realScreenshot = target.screenshot.bind(target);
+
+  target.evaluate = (...args: unknown[]) => {
+    counts.evaluate += 1;
+    return realEvaluate(...args);
+  };
+  target.screenshot = (...args: unknown[]) => {
+    counts.screenshot += 1;
+    return realScreenshot(...args);
+  };
+
+  return counts;
+}
+
+/**
+ * Every path that launches a browser for itself reaches
+ * `import("puppeteer")` — `launchPuppeteerSession` for `audit()` and the
+ * semantic entry point, the pa11y engine for its own launch — so this is the
+ * one place that sees all three. Outside a watched call it is the real
+ * launcher and nothing is instrumented.
+ *
+ * The mock has to be installed before anything imports Puppeteer, because
+ * bun cannot replace an ES module that is already loaded — hence no
+ * `import puppeteer from "puppeteer"` in this file, and hence `require` for
+ * the real launcher: the mock shadows every import of the specifier, the
+ * CommonJS build of the same package it does not.
+ */
+const requirePuppeteer = createRequire(import.meta.url);
+
+async function launchInstrumentedChromium(options?: LaunchOptions): Promise<Browser> {
+  const real = requirePuppeteer("puppeteer") as {
+    launch: (options?: LaunchOptions) => Promise<Browser>;
+  };
+  const browser = await real.launch(options);
+
+  const run = watchedLaunches;
+  if (run) {
+    run.browsers.push(browser);
+    const realNewPage = browser.newPage.bind(browser);
+    browser.newPage = async () => {
+      const page = await realNewPage();
+      run.counts.push(countPageWork(page));
+      return page;
+    };
+  }
+
+  return browser;
+}
+
+mock.module("puppeteer", () => ({ launch: launchInstrumentedChromium }));
+
+/** Stands in for the default export for this file's own browser launches. */
+const puppeteer = { launch: launchInstrumentedChromium };
+
+/** Run `body` with the browsers it launches for itself under observation. */
+async function watchOwnBrowsers<T>(
+  body: () => Promise<T>
+): Promise<{ result: T; run: WatchedRun }> {
+  const run: WatchedRun = { browsers: [], counts: [] };
+  watchedLaunches = run;
+  try {
+    return { result: await body(), run };
+  } finally {
+    watchedLaunches = null;
+  }
+}
+
+/** The call opened a browser, did nothing to its pages, and closed it. */
+function expectNoWorkAndClosed(run: WatchedRun) {
+  expect(run.counts.length).toBeGreaterThan(0);
+  expect(run.counts).toEqual(run.counts.map(() => ({ evaluate: 0, screenshot: 0 })));
+  expect(run.browsers.length).toBeGreaterThan(0);
+  expect(run.browsers.map((candidate) => candidate.connected)).toEqual(
+    run.browsers.map(() => false)
+  );
+}
 
 // ----- shared mock state -----
 
@@ -87,7 +191,23 @@ const axeStubModule = {
 
 mock.module("./engines/axe.js", () => axeStubModule);
 
-mock.module("./semantic/runner.js", () => ({
+/**
+ * The real semantic runner, captured by value before the stub replaces the
+ * module: the navigation-status tests drive `runSemanticAuditOnUrl` itself
+ * (with a stub AI provider) to cover the standalone entry point.
+ */
+const realSemanticRunnerModule = await import("./semantic/runner.js");
+const realSemanticRunner = {
+  runSemanticAudit: realSemanticRunnerModule.runSemanticAudit,
+  runSemanticAuditOnUrl: realSemanticRunnerModule.runSemanticAuditOnUrl,
+  validateFindingsAgainstChecks: realSemanticRunnerModule.validateFindingsAgainstChecks,
+};
+
+/** The real AI module, captured the same way, so only `createProvider` is stubbed. */
+const realAiModule = await import("./ai/index.js");
+const realAi = { ...realAiModule };
+
+const semanticRunnerStubModule = {
   runSemanticAudit: async (runContext: { url: string; pagePrepared?: boolean }) => {
     semanticCalls.push({
       url: runContext.url,
@@ -108,7 +228,9 @@ mock.module("./semantic/runner.js", () => ({
   },
   // Re-export the helper used by other call sites that import it from runner.
   validateFindingsAgainstChecks: () => ({ valid: [], dropped: [] }),
-}));
+};
+
+mock.module("./semantic/runner.js", () => semanticRunnerStubModule);
 
 // Stub localization: it scrolls elements into view and reads the filesystem,
 // so the eligibility tests only need to know whether audit() called it.
@@ -124,7 +246,13 @@ const realPuppeteerLaunchModule = await import("./puppeteer-launch.js");
 const realPuppeteerLaunch = {
   launchPuppeteerSession: realPuppeteerLaunchModule.launchPuppeteerSession,
   closeSession: realPuppeteerLaunchModule.closeSession,
-  navigateTo: realPuppeteerLaunchModule.navigateTo,
+  navigateAndInspect: realPuppeteerLaunchModule.navigateAndInspect,
+  checkNavigationStatus: realPuppeteerLaunchModule.checkNavigationStatus,
+  describeUnnavigatedPage: realPuppeteerLaunchModule.describeUnnavigatedPage,
+  // Pure helpers with nothing to stub, but they have to stay bound while the
+  // module is mocked, because this file imports the guard.
+  isNavigationHttpError: realPuppeteerLaunchModule.isNavigationHttpError,
+  NavigationHttpError: realPuppeteerLaunchModule.NavigationHttpError,
 };
 
 // Stub puppeteer-launch so audit() doesn't try to launch a real browser
@@ -142,7 +270,13 @@ const puppeteerLaunchStubModule = {
     },
   }),
   closeSession: async () => undefined,
-  navigateTo: async () => undefined,
+  navigateAndInspect: realPuppeteerLaunchModule.navigateAndInspect,
+  checkNavigationStatus: realPuppeteerLaunchModule.checkNavigationStatus,
+  describeUnnavigatedPage: realPuppeteerLaunchModule.describeUnnavigatedPage,
+  // Pure helpers with nothing to stub, but they have to stay bound while the
+  // module is mocked, because this file imports the guard.
+  isNavigationHttpError: realPuppeteerLaunchModule.isNavigationHttpError,
+  NavigationHttpError: realPuppeteerLaunchModule.NavigationHttpError,
 };
 
 mock.module("./puppeteer-launch.js", () => puppeteerLaunchStubModule);
@@ -4930,4 +5064,507 @@ describe("renderHtmlReport capture sections (real audit, real browser)", () => {
 
     expect(overflow).toBeLessThanOrEqual(1);
   });
+});
+
+// ----- navigation status (real local server, real browser) -----
+
+/**
+ * The navigation facts and `failOnHttpError` against a real HTTP server, so
+ * the statuses, the `Retry-After` header and the redirect come from a real
+ * Chromium navigation rather than from a stubbed response object.
+ *
+ * The AI provider is a stub (an error page must cost no AI request, and the
+ * success path must not call a real one) and pa11y is stubbed, because what
+ * is under test happens before either of them would run.
+ */
+describe("navigation status (real local server, real browser)", () => {
+  const ERROR_PAGE = (title: string) =>
+    `<!doctype html><html><head><title>${title}</title></head>` +
+    `<body><h1>${title}</h1><img src="data:," /><p>Nothing to see here.</p></body></html>`;
+
+  const OK_PAGE =
+    `<!doctype html><html lang="en"><head><title>Fine</title></head>` +
+    `<body><main><h1>Fine</h1><p>All good.</p></main></body></html>`;
+
+  /** Every path the server was asked for, so the fail path can be shown to stop. */
+  let requestedPaths: string[];
+  let server: import("node:http").Server;
+  let base: string;
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>>;
+
+  /** Calls the stub AI provider received; the fail path must leave it empty. */
+  let providerCalls: number;
+  /** URLs pa11y itself was asked to audit; the fail path must leave it empty. */
+  let pa11yCalls: string[];
+  /** The real pa11y module, so the stub below does not outlive this suite. */
+  let realPa11yModule: Record<string, unknown> | undefined;
+
+  const stubProvider = {
+    name: "stub",
+    model: "stub-model",
+    async analyze() {
+      return { contextualAnalysis: "n/a", suggestedFix: "n/a", confidence: 1 };
+    },
+    async analyzeSemantic() {
+      providerCalls += 1;
+      return {
+        content: JSON.stringify({ issues: [], detectedLanguage: "en" }),
+        model: "stub-model",
+      };
+    },
+  };
+
+  const semanticOptions = {
+    provider: { name: "nebius" as const, apiKey: "stub" },
+    checks: ["aria-mismatch"],
+  };
+
+  /** Catch the navigation error of a promise that must reject with one. */
+  async function expectNavigationHttpError(promise: Promise<unknown>) {
+    let caught: unknown;
+    try {
+      await promise;
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(isNavigationHttpError(caught)).toBe(true);
+    return caught as NavigationHttpError;
+  }
+
+  /**
+   * A real page that counts what it is asked to do, so "no axe run, no
+   * screenshot, no rendering, no cookie banner, no lazy scroll" is one
+   * assertion: every one of those steps goes through `evaluate` or
+   * `screenshot`.
+   */
+  function countingPage(
+    page: Awaited<ReturnType<typeof browser.newPage>>,
+    { asPuppeteerPage = true }: { asPuppeteerPage?: boolean } = {}
+  ) {
+    const counts = { evaluate: 0, screenshot: 0 };
+    const base = {
+      url: () => page.url(),
+      title: () => page.title(),
+      // biome-ignore lint/suspicious/noExplicitAny: the proxy mirrors the overloaded page signatures
+      goto: (url: string, options?: any) => page.goto(url, options),
+      // biome-ignore lint/suspicious/noExplicitAny: the proxy mirrors the overloaded page signatures
+      evaluate: (fn: any, arg?: any) => {
+        counts.evaluate += 1;
+        return arg === undefined ? page.evaluate(fn) : page.evaluate(fn, arg);
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: the proxy mirrors the overloaded page signatures
+      screenshot: (options?: any) => {
+        counts.screenshot += 1;
+        return page.screenshot(options);
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: the proxy mirrors the overloaded page signatures
+      on: (event: any, handler: any) => page.on(event, handler),
+      // biome-ignore lint/suspicious/noExplicitAny: the proxy mirrors the overloaded page signatures
+      off: (event: any, handler: any) => page.off(event, handler),
+      setViewport: (viewport: { width: number; height: number }) => page.setViewport(viewport),
+    };
+
+    // Without `browser()` the object is a generic page (what a Playwright
+    // caller hands in), so the engine takes its non-Puppeteer branch.
+    const proxy = (asPuppeteerPage
+      ? { ...base, browser: () => page.browser() }
+      : base) as unknown as BrowserPage;
+
+    return { proxy, counts };
+  }
+
+  beforeAll(async () => {
+    mock.module("./engines/axe.js", () => realAxe);
+    mock.module("./puppeteer-launch.js", () => realPuppeteerLaunch);
+    mock.module("./ai/index.js", () => ({ ...realAi, createProvider: () => stubProvider }));
+    // The standalone entry point has to run the real pass, not this file's
+    // runner stub, for "no AI request on the fail path" to mean anything.
+    mock.module("./semantic/runner.js", () => realSemanticRunner);
+    // Captured before the stub takes its place, so `afterAll` can put the
+    // real module back for anything that runs after this suite.
+    // A copy, not the live namespace: mock.module rebinds the namespace's
+    // exports, so handing the namespace back would reinstall the stub.
+    realPa11yModule = { ...(await import("pa11y")) } as Record<string, unknown>;
+    // Pa11y itself is not what is under test here, and importing the real one
+    // is what the engine's own unit test avoids as well.
+    mock.module("pa11y", () => ({
+      default: async (url: string) => {
+        pa11yCalls.push(url);
+        return { issues: [], documentTitle: "Forbidden", pageUrl: url };
+      },
+    }));
+
+    const { createServer } = await import("node:http");
+    server = createServer((request, response) => {
+      const path = (request.url ?? "/").split("?")[0];
+      requestedPaths.push(path);
+
+      if (path === "/forbidden") {
+        response.writeHead(403, { "content-type": "text/html" });
+        response.end(ERROR_PAGE("Forbidden"));
+        return;
+      }
+      if (path === "/rate-limited") {
+        response.writeHead(429, { "content-type": "text/html", "retry-after": "30" });
+        response.end(ERROR_PAGE("Too many requests"));
+        return;
+      }
+      if (path === "/unavailable") {
+        response.writeHead(503, { "content-type": "text/html" });
+        response.end(ERROR_PAGE("Service unavailable"));
+        return;
+      }
+      if (path === "/old") {
+        response.writeHead(301, { location: "/new" });
+        response.end();
+        return;
+      }
+      if (path === "/moved") {
+        response.writeHead(302, { location: "/new" });
+        response.end();
+        return;
+      }
+
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end(OK_PAGE);
+    });
+
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Test server did not report a port");
+    }
+    base = `http://127.0.0.1:${address.port}`;
+
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    try {
+      await browser?.close();
+      server?.closeAllConnections?.();
+      await new Promise<void>((resolve) => {
+        if (!server) return resolve();
+        server.close(() => resolve());
+      });
+    } finally {
+      mock.module("./engines/axe.js", () => axeStubModule);
+      mock.module("./puppeteer-launch.js", () => puppeteerLaunchStubModule);
+      mock.module("./ai/index.js", () => realAi);
+      mock.module("./semantic/runner.js", () => semanticRunnerStubModule);
+      if (realPa11yModule) {
+        mock.module("pa11y", () => realPa11yModule);
+      }
+    }
+  });
+
+  beforeEach(() => {
+    requestedPaths = [];
+    providerCalls = 0;
+    pa11yCalls = [];
+  });
+
+  it("reports a 403 on the result and audits the served page by default", async () => {
+    const { result, run } = await watchOwnBrowsers(() => audit(`${base}/forbidden`));
+
+    expect(result.navigation).toEqual({
+      navigated: true,
+      requestedUrl: `${base}/forbidden`,
+      finalUrl: `${base}/forbidden`,
+      status: 403,
+      redirected: false,
+    });
+    // The served error page, audited as usual.
+    expect(result.documentTitle).toBe("Forbidden");
+    expect(result.issues.map((issue) => issue.id)).toContain("image-alt");
+    expect(result.score).toBeLessThan(100);
+
+    // Invariant 1: exactly one warning, with the status and the URL.
+    const warnings = consoleWarnSpy.calls.map((call) => String(call[0]));
+    expect(warnings.filter((message) => message.includes("403"))).toHaveLength(1);
+    expect(warnings[0]).toContain(`${base}/forbidden`);
+
+    // The default path does work on the page and still closes the browser it
+    // launched — so the "nothing happened" assertions below mean something.
+    expect(run.counts.some((counts) => counts.evaluate > 0 && counts.screenshot > 0)).toBe(true);
+    expect(run.browsers.map((candidate) => candidate.connected)).toEqual([false]);
+  }, 60_000);
+
+  it("rejects with a NavigationHttpError and spends nothing else on a 403", async () => {
+    const { result: error, run } = await watchOwnBrowsers(() =>
+      expectNavigationHttpError(
+        audit(`${base}/forbidden`, {
+          failOnHttpError: true,
+          rendering: true,
+          semantic: semanticOptions,
+        })
+      )
+    );
+
+    expect(error.code).toBe("NAVIGATION_HTTP_ERROR");
+    expect(error.status).toBe(403);
+    expect(error.url).toBe(`${base}/forbidden`);
+    expect(error.finalUrl).toBe(`${base}/forbidden`);
+    expect(error.retryable).toBe(false);
+    expect(error.retryAfterSeconds).toBeUndefined();
+    expect(error.message).toContain("403");
+
+    // No AI request, and nothing beyond the document itself was fetched
+    // (Chromium asks for a favicon on its own account).
+    expect(providerCalls).toBe(0);
+    expect(requestedPaths.filter((path) => path !== "/favicon.ico")).toEqual(["/forbidden"]);
+    // Nothing was warned either: the error carries the status.
+    expect(consoleWarnSpy.calls.map((call) => String(call[0]))).toEqual([]);
+    // No axe, no screenshot, no rendering, no banner, no scroll — and the
+    // session audit() owned was closed on the way out (invariant 2).
+    expectNoWorkAndClosed(run);
+  }, 60_000);
+
+  it("runs no axe, no screenshot and no page work at all on the fail path", async () => {
+    const page = await browser.newPage();
+    const { proxy, counts } = countingPage(page);
+
+    try {
+      await expectNavigationHttpError(
+        realAxe.runAxeCore(`${base}/forbidden`, { page: proxy, failOnHttpError: true })
+      );
+
+      expect(counts).toEqual({ evaluate: 0, screenshot: 0 });
+
+      // The same page, same engine, without the option: axe and the
+      // screenshot do run, so the counters above mean something. The page is
+      // sent back to about:blank first, because the engine only navigates a
+      // page that is not already at the target URL.
+      await page.goto("about:blank");
+      const result = await realAxe.runAxeCore(`${base}/forbidden`, { page: proxy });
+      expect(result.navigation.status).toBe(403);
+      expect(counts.evaluate).toBeGreaterThan(0);
+      expect(counts.screenshot).toBeGreaterThan(0);
+
+      // A browser the caller owns is never closed by the failing call.
+      expect(page.isClosed()).toBe(false);
+      expect(browser.connected).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("does the same for a generic page that is not a Puppeteer page", async () => {
+    const page = await browser.newPage();
+    const { proxy, counts } = countingPage(page, { asPuppeteerPage: false });
+
+    try {
+      const error = await expectNavigationHttpError(
+        realAxe.runAxeCore(`${base}/forbidden`, { page: proxy, failOnHttpError: true })
+      );
+      expect(error.status).toBe(403);
+      expect(counts).toEqual({ evaluate: 0, screenshot: 0 });
+      expect(page.isClosed()).toBe(false);
+      expect(browser.connected).toBe(true);
+
+      // And without the option the generic branch reports the status and
+      // audits the served page, like the Puppeteer one.
+      await page.goto("about:blank");
+      const result = await realAxe.runAxeCore(`${base}/forbidden`, { page: proxy });
+      expect(result.navigation).toEqual({
+        navigated: true,
+        requestedUrl: `${base}/forbidden`,
+        finalUrl: `${base}/forbidden`,
+        status: 403,
+        redirected: false,
+      });
+      expect(result.issues.map((issue) => issue.id)).toContain("image-alt");
+      expect(counts.evaluate).toBeGreaterThan(0);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("carries Retry-After and retryable for 429, and retryable for 503", async () => {
+    const rateLimited = await expectNavigationHttpError(
+      audit(`${base}/rate-limited`, { failOnHttpError: true })
+    );
+    expect(rateLimited.status).toBe(429);
+    expect(rateLimited.retryable).toBe(true);
+    expect(rateLimited.retryAfterSeconds).toBe(30);
+
+    const unavailable = await expectNavigationHttpError(
+      audit(`${base}/unavailable`, { failOnHttpError: true })
+    );
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.retryable).toBe(true);
+    expect(unavailable.retryAfterSeconds).toBeUndefined();
+
+    // Default: both are reported on the result instead.
+    const result = await audit(`${base}/rate-limited`);
+    expect(result.navigation?.status).toBe(429);
+  }, 90_000);
+
+  it("reports a redirect with the final URL and the final status", async () => {
+    const permanent = await audit(`${base}/old`);
+
+    expect(permanent.navigation?.redirected).toBe(true);
+    expect(permanent.navigation?.requestedUrl).toBe(`${base}/old`);
+    expect(permanent.navigation?.finalUrl).toBe(`${base}/new`);
+    expect(permanent.navigation?.status).toBe(200);
+    expect(permanent.documentTitle).toBe("Fine");
+
+    const temporary = await audit(`${base}/moved`);
+    expect(temporary.navigation?.redirected).toBe(true);
+    expect(temporary.navigation?.finalUrl).toBe(`${base}/new`);
+    expect(temporary.navigation?.status).toBe(200);
+  }, 90_000);
+
+  it("treats a page it did not navigate as having no response to judge", async () => {
+    const page = await browser.newPage();
+
+    try {
+      await page.goto(`${base}/forbidden`, { waitUntil: "networkidle2" });
+      requestedPaths = [];
+
+      // The option is set and the page is an error page, but core did not
+      // navigate it, so there is nothing to fail on (invariant 4).
+      const result = await audit(page, { failOnHttpError: true });
+
+      expect(result.navigation).toEqual({
+        navigated: false,
+        requestedUrl: `${base}/forbidden`,
+        finalUrl: `${base}/forbidden`,
+        status: null,
+        redirected: false,
+      });
+      expect(result.issues.map((issue) => issue.id)).toContain("image-alt");
+      // Nothing was navigated, so the server saw no second document request
+      // (Chromium's own favicon request does not count).
+      expect(requestedPaths.filter((path) => path !== "/favicon.ico")).toEqual([]);
+      // The caller's page and browser are left as they were.
+      expect(page.isClosed()).toBe(false);
+      expect(browser.connected).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("behaves the same on the pa11y engine", async () => {
+    const { result: served, run: servedRun } = await watchOwnBrowsers(() =>
+      audit(`${base}/forbidden`, { engine: "pa11y" })
+    );
+    expect(served.navigation).toEqual({
+      navigated: true,
+      requestedUrl: `${base}/forbidden`,
+      finalUrl: `${base}/forbidden`,
+      status: 403,
+      redirected: false,
+    });
+    expect(pa11yCalls).toEqual([`${base}/forbidden`]);
+    expect(consoleWarnSpy.calls.map((call) => String(call[0]))[0]).toContain("403");
+    expect(servedRun.counts.some((counts) => counts.evaluate > 0)).toBe(true);
+
+    pa11yCalls = [];
+    const { result: error, run } = await watchOwnBrowsers(() =>
+      expectNavigationHttpError(
+        audit(`${base}/forbidden`, { engine: "pa11y", failOnHttpError: true })
+      )
+    );
+    expect(error.status).toBe(403);
+    expect(error.retryable).toBe(false);
+    // The engine threw before pa11y itself ran, touched nothing on the page,
+    // and the browser it launched for itself is closed.
+    expect(pa11yCalls).toEqual([]);
+    expectNoWorkAndClosed(run);
+  }, 120_000);
+
+  it("behaves the same on the standalone semanticAudit(url)", async () => {
+    const { result: served, run: servedRun } = await watchOwnBrowsers(() =>
+      realSemanticRunner.runSemanticAuditOnUrl(`${base}/forbidden`, semanticOptions)
+    );
+    expect(served.navigation).toEqual({
+      navigated: true,
+      requestedUrl: `${base}/forbidden`,
+      finalUrl: `${base}/forbidden`,
+      status: 403,
+      redirected: false,
+    });
+    // The pass itself ran, so the fail-path assertion below is about the
+    // option and not about a provider that is never called anyway.
+    expect(providerCalls).toBe(1);
+    expect(servedRun.counts.some((counts) => counts.evaluate > 0)).toBe(true);
+
+    providerCalls = 0;
+    const { result: error, run } = await watchOwnBrowsers(() =>
+      expectNavigationHttpError(
+        realSemanticRunner.runSemanticAuditOnUrl(`${base}/forbidden`, {
+          ...semanticOptions,
+          failOnHttpError: true,
+        })
+      )
+    );
+    expect(error.status).toBe(403);
+    expect(providerCalls).toBe(0);
+    expectNoWorkAndClosed(run);
+  }, 120_000);
+
+  it("reports that it navigated nothing for a page handed to semanticAudit()", async () => {
+    const { semanticAudit } = await import("./semantic/index.js");
+    const page = await browser.newPage();
+
+    try {
+      await page.goto(`${base}/forbidden`, { waitUntil: "networkidle2" });
+
+      // The option is set and the page is an error page, but this entry
+      // point navigates nothing, so it runs and says so (invariant 4).
+      const result = await semanticAudit(page as unknown as BrowserPage, {
+        ...semanticOptions,
+        failOnHttpError: true,
+      });
+
+      expect(result.navigation).toEqual({
+        navigated: false,
+        requestedUrl: `${base}/forbidden`,
+        finalUrl: `${base}/forbidden`,
+        status: null,
+        redirected: false,
+      });
+      expect(providerCalls).toBe(1);
+      expect(page.isClosed()).toBe(false);
+      expect(browser.connected).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 120_000);
+
+  it("exits non-zero with the status when the CLI is asked to fail on it", async () => {
+    const { spawn } = await import("node:child_process");
+    const child = spawn(
+      process.execPath,
+      ["src/cli/bin.ts", "audit", `${base}/forbidden`, "--fail-on-http-error"],
+      { cwd: join(import.meta.dir, ".."), stdio: ["ignore", "pipe", "pipe"] }
+    );
+
+    let output = "";
+    child.stdout.on("data", (chunk) => {
+      output += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      output += String(chunk);
+    });
+
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code) => resolve(code ?? 1));
+    });
+
+    expect(exitCode).not.toBe(0);
+    expect(output).toContain("403");
+    // The audit stopped instead of scoring the error page — otherwise the
+    // default path would satisfy the assertions above on its own (it warns
+    // about the 403 and exits 1 because the page has issues).
+    expect(output).not.toContain("Score:");
+  }, 120_000);
 });

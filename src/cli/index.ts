@@ -75,6 +75,7 @@ export interface ParsedArgs {
   json?: boolean;
   html?: string;
   htmlLocale?: HtmlReportLocale;
+  failOnHttpError?: boolean;
   semantic?: boolean;
   semanticProvider?: string;
   semanticModel?: string;
@@ -233,6 +234,8 @@ function parseAuditFlags(args: string[], startIndex: number, result: ParsedArgs)
     } else if (arg === "--headless") {
       result.headless = nextArg !== "false";
       i++;
+    } else if (arg === "--fail-on-http-error") {
+      result.failOnHttpError = true;
     } else if (arg === "--semantic") {
       result.semantic = true;
     } else if (arg === "--semantic-provider") {
@@ -610,6 +613,8 @@ Audit options:
   --html <file>                 Write a static HTML report (screenshot with markers)
   --html-locale <lang>          Report label language: en | de (default: en)
   --headless <bool>             Run headless (default: true)
+  --fail-on-http-error          Stop with an error when the page answers with an
+                                HTTP status >= 400 instead of auditing it
 
 Rendering checks (opt-in; any --rendering-* flag enables the pass):
   --rendering                   Render the page under the default conditions and
@@ -695,6 +700,7 @@ async function runAudit(args: ParsedArgs, deps: RunAuditDeps): Promise<CliResult
     ignore: args.ignore,
     baseline: args.baseline,
     semantic: semanticOptions,
+    failOnHttpError: args.failOnHttpError,
   };
 
   // Any --rendering-* flag enables the pass, like the semantic flags do.

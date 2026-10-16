@@ -199,6 +199,14 @@ describe("parseArgs", () => {
     expect(args.json).toBe(true);
   });
 
+  it("parses --fail-on-http-error as a bare flag, off by default", () => {
+    expect(parseArgs(["https://example.com"]).failOnHttpError).toBeUndefined();
+    expect(parseArgs(["https://example.com", "--fail-on-http-error"]).failOnHttpError).toBe(true);
+    expect(
+      parseArgs(["audit", "https://example.com", "--fail-on-http-error", "--json"]).failOnHttpError
+    ).toBe(true);
+  });
+
   it("parses --semantic flag", () => {
     const args = parseArgs(["https://example.com", "--semantic"]);
 

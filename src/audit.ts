@@ -29,6 +29,7 @@ import type {
   AuditTarget,
   Issue,
   IssueSeverity,
+  NavigationInfo,
   RenderingCapture,
   RenderingMeta,
   RenderingOptions,
@@ -88,6 +89,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     captureScreenshot = true,
     annotate = true,
     loadLazyContent = true,
+    failOnHttpError,
     onProgress,
     detail = "actionable",
     minSeverity,
@@ -163,6 +165,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
       documentTitle: string;
       pageUrl: string;
       screenshot?: Uint8Array;
+      navigation?: NavigationInfo;
     };
 
     if (engine === "axe") {
@@ -173,6 +176,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
         onProgress,
         page,
         loadLazyContent,
+        failOnHttpError,
       });
     } else {
       // pa11y engine — dynamic import so pa11y/puppeteer are optional
@@ -202,6 +206,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
         onProgress,
         page,
         loadLazyContent,
+        failOnHttpError,
       });
 
       const filteredIssues = pa11yResult.issues.filter((issue) => !shouldFilterPa11yIssue(issue));
@@ -211,6 +216,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
         documentTitle: pa11yResult.documentTitle,
         pageUrl: pa11yResult.pageUrl,
         screenshot: pa11yResult.screenshot,
+        navigation: pa11yResult.navigation,
       };
     }
 
@@ -431,6 +437,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
       issues: resultIssues,
       screenshot: captureScreenshot ? engineResult.screenshot : undefined,
       timestamp: new Date().toISOString(),
+      navigation: engineResult.navigation,
       baseline: baselineResult.baseline,
       semanticMeta,
       screenshotMeta,

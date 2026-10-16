@@ -63,7 +63,8 @@ const realCreateProvider = realAi.createProvider;
 const realPuppeteerLaunchModule = await import("../puppeteer-launch.js");
 const realPuppeteerLaunch = {
   launchPuppeteerSession: realPuppeteerLaunchModule.launchPuppeteerSession,
-  navigateTo: realPuppeteerLaunchModule.navigateTo,
+  navigateAndInspect: realPuppeteerLaunchModule.navigateAndInspect,
+  checkNavigationStatus: realPuppeteerLaunchModule.checkNavigationStatus,
   closeSession: realPuppeteerLaunchModule.closeSession,
 };
 
@@ -78,7 +79,6 @@ mock.module("../puppeteer-launch.js", () => ({
     browser: { close: async () => undefined },
     page: stubPage,
   }),
-  navigateTo: async () => undefined,
   closeSession: async () => undefined,
 }));
 

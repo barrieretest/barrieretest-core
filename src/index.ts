@@ -46,6 +46,8 @@ export type {
   LocalizedIssue,
 } from "./localization/index.js";
 export { localizeIssues } from "./localization/index.js";
+export type { NavigationOutcome } from "./puppeteer-launch.js";
+export { isNavigationHttpError, NavigationHttpError } from "./puppeteer-launch.js";
 export type {
   ActionableIssue,
   FixReadyIssue,
@@ -157,6 +159,7 @@ export type {
   Issue,
   IssueAnnotation,
   IssueSeverity,
+  NavigationInfo,
   RenderingCapture,
   RenderingConditionId,
   RenderingIssueMeta,

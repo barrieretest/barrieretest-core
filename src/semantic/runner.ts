@@ -19,7 +19,13 @@ import { createProvider } from "../ai/index.js";
 import { DEFAULT_MAX_TOKENS, SEMANTIC_MIN_MAX_TOKENS } from "../ai/providers/shared.js";
 import type { AIProvider, ModelCapabilities, ModelResponse } from "../ai/types.js";
 import type { BrowserPage } from "../browser.js";
-import { closeSession, launchPuppeteerSession, navigateTo } from "../puppeteer-launch.js";
+import {
+  checkNavigationStatus,
+  closeSession,
+  describeUnnavigatedPage,
+  launchPuppeteerSession,
+  navigateAndInspect,
+} from "../puppeteer-launch.js";
 import type { Issue } from "../types.js";
 import { resolveChecks } from "./checks/index.js";
 import { type ExtractedContext, extractHtmlContext, formatExtractedContext } from "./context.js";
@@ -624,6 +630,10 @@ export async function runSemanticAudit(
     meta,
     screenshot,
     timestamp: new Date().toISOString(),
+    // This entry point never navigates: it is handed a page and audits it
+    // where it is. `runSemanticAuditOnUrl` replaces this with the facts of
+    // the navigation it performed.
+    navigation: describeUnnavigatedPage(url, page.url()),
   };
 }
 
@@ -645,7 +655,11 @@ export async function runSemanticAuditOnUrl(
   });
 
   try {
-    await navigateTo(session.page, url, { timeout: options.timeout });
+    const outcome = await navigateAndInspect(session.page, url, { timeout: options.timeout });
+    // Before the banner, the scroll, the context extraction and the
+    // screenshot: with `failOnHttpError` an error page must cost no further
+    // work and no AI request.
+    checkNavigationStatus(outcome, { failOnHttpError: options.failOnHttpError });
 
     // This path navigated itself, so it prepares the page here instead of
     // leaving banner dismissal to `runSemanticAudit`: lazy content has to be
@@ -663,7 +677,7 @@ export async function runSemanticAuditOnUrl(
       await loadLazyContent(session.page);
     }
 
-    return await runSemanticAudit(
+    const result = await runSemanticAudit(
       {
         url,
         page: session.page,
@@ -672,6 +686,8 @@ export async function runSemanticAuditOnUrl(
       },
       options
     );
+
+    return { ...result, navigation: outcome.navigation };
   } finally {
     await closeSession(session);
   }

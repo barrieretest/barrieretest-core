@@ -7,9 +7,13 @@
  */
 
 import type { BrowserPage, PuppeteerBrowserLike, PuppeteerPageLike } from "../browser.js";
-import { isPuppeteerPage } from "../browser.js";
-import { launchPuppeteerSession, navigateTo } from "../puppeteer-launch.js";
-import type { Issue, IssueSeverity } from "../types.js";
+import {
+  checkNavigationStatus,
+  describeUnnavigatedPage,
+  launchPuppeteerSession,
+  navigateAndInspect,
+} from "../puppeteer-launch.js";
+import type { Issue, IssueSeverity, NavigationInfo } from "../types.js";
 
 export type AxeNodeResult = {
   html: string;
@@ -35,6 +39,12 @@ export type AxeRunnerOptions = {
   page?: BrowserPage;
   /** Scroll the page once before auditing so lazy content loads. Default true. */
   loadLazyContent?: boolean;
+  /**
+   * Throw a `NavigationHttpError` when the navigation this call performs
+   * answers with a status `>= 400`, before any other work on the page.
+   * Default false (audit the served page, warn once).
+   */
+  failOnHttpError?: boolean;
 };
 
 export type AxeRunResult = {
@@ -42,6 +52,8 @@ export type AxeRunResult = {
   documentTitle: string;
   pageUrl: string;
   screenshot?: Uint8Array;
+  /** What the navigation did, or that this run navigated nothing. */
+  navigation: NavigationInfo;
 };
 
 type AxeResults = {
@@ -390,14 +402,14 @@ export async function runAxeCore(
     onProgress,
     page: existingPage,
     loadLazyContent: shouldLoadLazyContent = true,
+    failOnHttpError,
   } = options;
 
   let ownsBrowser = false;
   let browser: PuppeteerBrowserLike | null = null;
   let page: BrowserPage | null = null;
   let ownedPage: PuppeteerPageLike | null = null;
-  let navigationStatus: number | undefined;
-  let navigated = false;
+  let navigation: NavigationInfo | null = null;
   const consoleLines: string[] = [];
   let diagnosticListeners: { event: string; handler: (...args: unknown[]) => void }[] = [];
 
@@ -426,12 +438,13 @@ export async function runAxeCore(
     const currentUrl = page.url();
     if (!currentUrl || currentUrl === "about:blank" || currentUrl !== url) {
       await onProgress?.({ percent: 30, message: "Loading page" });
-      if (isPuppeteerPage(page)) {
-        navigationStatus = await navigateTo(page, url, { timeout });
-      } else {
-        await page.goto(url);
-      }
-      navigated = true;
+      const outcome = await navigateAndInspect(page, url, { timeout });
+      navigation = outcome.navigation;
+      // Before the banner, the scroll, axe and the screenshot: with
+      // `failOnHttpError` an error page must cost no further work.
+      checkNavigationStatus(outcome, { failOnHttpError });
+    } else {
+      navigation = describeUnnavigatedPage(url, currentUrl);
     }
 
     await onProgress?.({ percent: 40, message: "Checking for cookie consent banners" });
@@ -440,7 +453,7 @@ export async function runAxeCore(
 
     // Only a page this call navigated: a caller-supplied page keeps the scroll
     // position its owner chose.
-    if (navigated && shouldLoadLazyContent) {
+    if (navigation.navigated && shouldLoadLazyContent) {
       await onProgress?.({ percent: 45, message: "Loading lazy content" });
       const { loadLazyContent } = await import("../lazy-content.js");
       await loadLazyContent(page);
@@ -469,7 +482,11 @@ export async function runAxeCore(
       if (isAxeLoadFailure(error)) {
         let message = AXE_LOAD_FAILURE_PREFIX;
         try {
-          message = await buildAxeLoadFailureMessageForPage(page, navigationStatus, consoleLines);
+          message = await buildAxeLoadFailureMessageForPage(
+            page,
+            navigation.status ?? undefined,
+            consoleLines
+          );
         } catch {
           // Preserve the original axe-load failure even if diagnostics fail unexpectedly.
         }
@@ -497,7 +514,7 @@ export async function runAxeCore(
 
     await onProgress?.({ percent: 90, message: "Analyzing accessibility issues" });
 
-    return { issues, documentTitle, pageUrl, screenshot };
+    return { issues, documentTitle, pageUrl, screenshot, navigation };
   } finally {
     detachAxeDiagnostics(page, diagnosticListeners);
 

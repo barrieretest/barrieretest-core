@@ -206,6 +206,31 @@ export interface Issue {
 export type AuditTarget = string | BrowserPage;
 
 /**
+ * The facts of the navigation an audit performed, so a consumer can tell a
+ * normal page from a 403 challenge, a 404 or a 503 maintenance page without
+ * parsing log output.
+ *
+ * An object rather than a bare status, so a later signal (e.g. a suspected
+ * 200 challenge page) is an added field instead of a breaking change.
+ */
+export interface NavigationInfo {
+  /** True when core navigated the page itself; false for a caller-supplied page it left where it was. */
+  navigated: boolean;
+  /** The URL core was asked to audit. */
+  requestedUrl: string;
+  /** The page URL after navigation and redirects (`page.url()`). */
+  finalUrl: string;
+  /** HTTP status of the main document response; null when there was none or core did not navigate. */
+  status: number | null;
+  /**
+   * True when `finalUrl` differs from `requestedUrl` after normalisation
+   * (trailing slash, default port, fragment). A fragment-only difference is
+   * not a redirect: the browser requests no new document for it.
+   */
+  redirected: boolean;
+}
+
+/**
  * Options for running an accessibility audit
  */
 export interface AuditOptions {
@@ -281,6 +306,19 @@ export interface AuditOptions {
    * @default true
    */
   loadLazyContent?: boolean;
+
+  /**
+   * Turn a main-document HTTP status `>= 400` into a thrown
+   * `NavigationHttpError` instead of auditing the page the server served.
+   *
+   * The error is thrown right after navigation, before cookie-banner
+   * dismissal, lazy content, the engine, the screenshot, the rendering pass,
+   * annotation and the semantic pass — so no browser work and no AI request
+   * is spent on an error page. A caller-supplied page the audit did not
+   * navigate has no response to judge, so the option has no effect there.
+   * @default false
+   */
+  failOnHttpError?: boolean;
 
   /**
    * Progress callback for tracking audit status
@@ -438,6 +476,8 @@ export interface AuditResult {
   screenshot?: Uint8Array;
   /** Timestamp of the audit */
   timestamp: string;
+  /** The facts of the navigation the engine pass performed (status, final URL) */
+  navigation?: NavigationInfo;
   /** Baseline comparison info (if baseline was provided) */
   baseline?: BaselineInfo;
   /** Semantic-pass metadata (if `semantic` option was set) */

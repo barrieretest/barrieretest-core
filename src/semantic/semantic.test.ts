@@ -683,6 +683,32 @@ describe("runSemanticAudit (with stub provider)", () => {
     expect(result.issues[0].semantic?.confidence).toBe(1);
   });
 
+  // What `semanticAudit(page)` returns: this entry point is handed a page and
+  // audits it where it is, so there is no response to judge.
+  it("reports that it navigated nothing for a caller-supplied page", async () => {
+    const result = await runSemanticAudit(
+      {
+        url: "https://stub.test/page",
+        page: makeStubPage(),
+        ownsBrowser: false,
+        pagePrepared: true,
+        providerOverride: makeStubProvider(sampleResponse),
+      },
+      {
+        provider: { name: "nebius", apiKey: "stub" },
+        checks: ["aria-mismatch"],
+      }
+    );
+
+    expect(result.navigation).toEqual({
+      navigated: false,
+      requestedUrl: "https://stub.test/page",
+      finalUrl: "https://stub.test/page",
+      status: null,
+      redirected: false,
+    });
+  });
+
   it("reads confidence as 0-100 even when the value is below 1", async () => {
     const lowScaleResponse = JSON.stringify({
       issues: [

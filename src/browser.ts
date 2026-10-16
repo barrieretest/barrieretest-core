@@ -29,7 +29,12 @@ export type BrowserPage = {
   removeListener?: (event: string, handler: (...args: unknown[]) => void) => unknown;
 };
 
-export type NavigationResponse = { status: () => number; ok?: () => boolean } | null;
+export type NavigationResponse = {
+  status: () => number;
+  ok?: () => boolean;
+  /** Response headers, lower-cased keys. Read for `Retry-After`. */
+  headers?: () => Record<string, string>;
+} | null;
 
 export type PuppeteerBrowserLike = {
   newPage: () => Promise<PuppeteerPageLike>;

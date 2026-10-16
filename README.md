@@ -70,6 +70,7 @@ npx barrieretest https://example.com -o results.json
 npx barrieretest https://example.com --html report.html
 npx barrieretest https://example.com --engine pa11y
 npx barrieretest https://example.com --rendering
+npx barrieretest https://example.com --fail-on-http-error
 ```
 
 ### Semantic AI from the CLI
@@ -377,6 +378,7 @@ const pa11yResult = await audit('https://example.com', {
 | `annotate` | `boolean` | `true` | Map issues onto the screenshot (see [Annotations](#annotations)) |
 | `loadLazyContent` | `boolean` | `true` | Scroll the page once before auditing (see [Lazy content](#lazy-content)) |
 | `rendering` | `RenderingOptions \| true` | — | Render the page under named conditions and run geometry checks (see [Rendering checks](#rendering-checks)) |
+| `failOnHttpError` | `boolean` | `false` | Throw instead of auditing a page that answered with HTTP >= 400 (see [Navigation status](#navigation-status)) |
 | `onProgress` | `function` | — | Progress callback |
 
 Notes:
@@ -399,12 +401,58 @@ Notes:
   issues: Issue[]
   screenshot?: Uint8Array
   timestamp: string
+  navigation?: NavigationInfo
   baseline?: BaselineInfo
   screenshotMeta?: ScreenshotMeta
   renderingCaptures?: RenderingCapture[]
   renderingMeta?: RenderingMeta
 }
 ```
+
+### Navigation status
+
+Every audit that navigates reports what the navigation did, so a 403 bot-protection challenge, a 404, a 429 or a 503 maintenance page is recognisable without parsing log output:
+
+```typescript
+const result = await audit('https://example.com')
+
+result.navigation = {
+  navigated: true,                    // false for a page you passed in and core left where it was
+  requestedUrl: 'https://example.com',
+  finalUrl: 'https://example.com/en', // page.url() after navigation and redirects
+  status: 200,                        // null when there was no response, or core did not navigate
+  redirected: true,                   // finalUrl differs after normalising trailing slash, default port and fragment
+}
+```
+
+By default an error status is audited as before: one warning is logged and the served page is scored. With `failOnHttpError` a main-document status `>= 400` throws a `NavigationHttpError` right after navigation instead — before cookie-banner dismissal, lazy content, the engine, the screenshot, the rendering pass, annotation and the semantic pass, so no browser work and no AI request is spent on an error page:
+
+```typescript
+import { audit, isNavigationHttpError } from '@barrieretest/core'
+
+try {
+  await audit('https://example.com', { failOnHttpError: true })
+} catch (error) {
+  if (isNavigationHttpError(error)) {
+    error.code              // "NAVIGATION_HTTP_ERROR" — match this, not the message
+    error.status            // 403
+    error.url               // the URL you asked for
+    error.finalUrl          // where the navigation ended
+    error.retryable         // true for 408, 425, 429, 500, 502, 503, 504
+    error.retryAfterSeconds // seconds, when the response sent a usable Retry-After
+  }
+}
+```
+
+Notes:
+
+- the option applies to every path that navigates: the axe engine, the pa11y engine and `semanticAudit(url)` (`SemanticOptions.failOnHttpError`, with `result.navigation` on the standalone result)
+- a page you pass in that core does not navigate has no response to judge, so `navigation.status` is `null` and the option has no effect there
+- a 3xx chain is followed by the browser and judged by its final response; compare `finalUrl` with `requestedUrl` yourself if a redirect to another host matters to you
+- a 200 page that is really a challenge page ("Just a moment…") is not detected
+- a difference in the fragment alone (`/page#a` to `/page#b`) is not a redirect: the browser requests no new document for it, and `finalUrl` still carries the fragment
+- `isNavigationHttpError` also recognises an error thrown by a second, duplicated copy of the package, where `instanceof` does not hold
+- from the CLI: `--fail-on-http-error` prints the error and exits non-zero
 
 ### Annotations
 
@@ -721,7 +769,10 @@ const result = await semanticAudit('https://example.com', {
 
 console.log(result.issues)        // standard core Issue[] with `semantic` metadata
 console.log(result.meta.checksRun)
+console.log(result.navigation)    // the facts of the navigation this call made
 ```
+
+`semanticAudit(url)` takes `failOnHttpError` as well, so an error page costs no AI request (see [Navigation status](#navigation-status)).
 
 Combined with `audit()` so a single browser launch serves both the engine and semantic passes:
 
