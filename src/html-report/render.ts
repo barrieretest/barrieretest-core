@@ -10,7 +10,14 @@
  */
 
 import { Buffer } from "node:buffer";
-import type { AnnotationRect, AuditResult, Issue, IssueSeverity } from "../types.js";
+import type {
+  AnnotationRect,
+  AuditResult,
+  Issue,
+  IssueSeverity,
+  RenderingCapture,
+  ScreenshotMeta,
+} from "../types.js";
 import { escapeHtml, safeLinkHref, truncate } from "./escape.js";
 import { type HtmlReportLocale, REPORT_LABELS, type ReportLabels } from "./labels.js";
 import { REPORT_CSS } from "./styles.js";
@@ -71,16 +78,24 @@ interface Partitioned {
   notLocated: Issue[];
 }
 
-function partitionIssues(issues: Issue[]): Partitioned {
+/**
+ * Group the issues by the marker their annotation places them on.
+ *
+ * `annotatedHere` says whether the annotations belong to the capture this
+ * partition is for. In the main view they do not: a rendering finding is
+ * annotated in the space of its own condition's capture, so its mark and
+ * rect would put a marker on the wrong image, and it is listed as not
+ * located unless a capture section shows it. In a capture section they do,
+ * and the findings of that condition are grouped by their marker exactly as
+ * the main view groups the engine's.
+ */
+function partitionIssues(issues: Issue[], annotatedHere = false): Partitioned {
   const groups = new Map<number, MarkerGroup>();
   const pageLevel: Issue[] = [];
   const notLocated: Issue[] = [];
 
   for (const issue of issues) {
-    // A rendering finding is annotated in the space of its own condition's
-    // capture, not of this screenshot, so it carries no marker here. The
-    // capture sections that show it are a later change.
-    if (issue.rendering) {
+    if (issue.rendering && !annotatedHere) {
       notLocated.push(issue);
       continue;
     }
@@ -271,10 +286,21 @@ function renderIssueList(issues: Issue[], labels: ReportLabels, show: IssueField
     .join("")}</ul>`;
 }
 
-function renderGroup(group: MarkerGroup, labels: ReportLabels, hasMarkers: boolean): string {
+/**
+ * Marker and group ids carry the capture they belong to, so the marks of
+ * several captures — each numbered from 1 in its own reading order — cannot
+ * collide in one document. The main screenshot's scope is empty, which keeps
+ * its ids `marker-1`, `group-1` and so on.
+ */
+function renderGroup(
+  group: MarkerGroup,
+  labels: ReportLabels,
+  hasMarkers: boolean,
+  scope = ""
+): string {
   const parts: string[] = [];
   parts.push(
-    `<h3 class="group__title" id="group-${group.mark}" tabindex="-1">` +
+    `<h3 class="group__title" id="group-${scope}${group.mark}" tabindex="-1">` +
       `<span class="group__mark" aria-hidden="true">${group.mark}</span>` +
       `${escapeHtml(labels.marker(group.mark))}</h3>`
   );
@@ -283,7 +309,7 @@ function renderGroup(group: MarkerGroup, labels: ReportLabels, hasMarkers: boole
   if (group.selector?.trim()) meta.push(codeBlock(group.selector));
   if (hasMarkers) {
     meta.push(
-      `<a class="group__link" href="#marker-${group.mark}">${escapeHtml(
+      `<a class="group__link" href="#marker-${scope}${group.mark}">${escapeHtml(
         labels.showMarker(group.mark)
       )}</a>`
     );
@@ -310,7 +336,8 @@ function renderSection(
 function renderMarker(
   group: MarkerGroup,
   meta: { width: number; height: number },
-  labels: ReportLabels
+  labels: ReportLabels,
+  scope = ""
 ): string {
   const rect = group.rect;
   const classes = ["marker"];
@@ -322,10 +349,39 @@ function renderMarker(
     `width:${percentOf(rect.width, meta.width)};` +
     `height:${percentOf(rect.height, meta.height)}`;
   return (
-    `<a class="${classes.join(" ")}" id="marker-${group.mark}" href="#group-${group.mark}" style="${style}">` +
+    `<a class="${classes.join(" ")}" id="marker-${scope}${group.mark}" href="#group-${scope}${group.mark}" style="${style}">` +
     `<span class="marker__badge" aria-hidden="true">${group.mark}</span>` +
     `<span class="sr-only">${escapeHtml(labels.markerLink(group.mark, group.issues.length))}</span>` +
     `</a>`
+  );
+}
+
+/**
+ * The image as a `data:` URL. The page screenshot is a PNG and the condition
+ * captures are JPEGs, and a result can have been through JSON, so the format
+ * is read from the bytes rather than assumed.
+ */
+function imageSource(bytes: Uint8Array): string {
+  const png =
+    bytes.length >= 4 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47;
+  return `data:image/${png ? "png" : "jpeg"};base64,${Buffer.from(bytes).toString("base64")}`;
+}
+
+/**
+ * The outer box's own geometry: the capture's aspect ratio, which the print
+ * stylesheet sizes by, and its CSS width, which is where the image stops
+ * being enlarged. A 320 px capture shown three times its size is a blurred
+ * claim about what the page looks like. It sits on the clipping box and not
+ * on the frame the markers are positioned in, which stays unbounded.
+ */
+function frameStyle(meta: { width: number; height: number }): string {
+  return (
+    ` style="--shot-ratio:${(meta.width / meta.height).toFixed(4)};` +
+    `--shot-max:${Math.round(meta.width)}px"`
   );
 }
 
@@ -339,12 +395,9 @@ function renderScreenshot(
 
   const meta = result.screenshotMeta;
   const markers = meta ? groups : [];
-  const source = `data:image/png;base64,${Buffer.from(screenshot).toString("base64")}`;
+  const source = imageSource(screenshot);
   const alt = labels.imageAlt(pageName(result, labels), markers.length);
-  const ratio =
-    meta && meta.width > 0 && meta.height > 0
-      ? ` style="--shot-ratio:${(meta.width / meta.height).toFixed(4)}"`
-      : "";
+  const frame = meta && meta.width > 0 && meta.height > 0 ? frameStyle(meta) : "";
 
   const overlay = meta ? markers.map((group) => renderMarker(group, meta, labels)).join("") : "";
 
@@ -355,8 +408,177 @@ function renderScreenshot(
     `<div class="panel__head"><h2 class="panel__title" id="screenshot-heading">${escapeHtml(
       labels.screenshotHeading
     )}</h2></div>` +
-    `<div class="shot__frame"${ratio}><img src="${source}" alt="${escapeHtml(alt)}" />${overlay}</div>` +
+    `<div class="shot__clip"${frame}><div class="shot__frame">` +
+    `<img src="${source}" alt="${escapeHtml(alt)}" />${overlay}</div></div>` +
     `</section>`
+  );
+}
+
+/**
+ * One section per rendering capture: the page as it rendered under that
+ * condition, with the markers and the findings of that condition.
+ *
+ * A rendering finding's annotation is in its own capture's coordinate space,
+ * which is exactly what these sections supply — so the findings of a
+ * condition live here and not in the main view's "not located" group. The
+ * main summary line counts them, and the findings-by-rule table counts every
+ * issue regardless.
+ */
+interface CaptureSection {
+  /** Unique within the document; the scope of this section's marker ids. */
+  id: string;
+  /** The condition in plain words. */
+  title: string;
+  /** One sentence on what the condition simulates; empty for an unknown id. */
+  note: string;
+  capture: RenderingCapture;
+  /** Every issue this section shows, so the main view can leave them out. */
+  issues: Issue[];
+  partitioned: Partitioned;
+  /** Capture geometry, when it is usable for placing markers. */
+  meta?: ScreenshotMeta;
+}
+
+/** A slug for the element ids of one condition's section. */
+function conditionSlug(condition: string): string {
+  const slug = condition
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug === "" ? "condition" : slug;
+}
+
+/**
+ * The condition in plain words: the titles of its parts joined, and their
+ * sentences. A composite reads as "At 320 px width + Text spacing per WCAG
+ * 1.4.12". An id this version does not know — a result from a newer one — is
+ * shown as it is, with no sentence, and is escaped like every other string
+ * that did not come from these labels.
+ */
+function conditionWords(condition: string, labels: ReportLabels): { title: string; note: string } {
+  const parts = condition
+    .split("+")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const known = parts
+    .map((part) => labels.condition[part])
+    .filter((entry): entry is { title: string; note: string } => entry !== undefined);
+  if (parts.length === 0 || known.length !== parts.length) {
+    return { title: condition, note: "" };
+  }
+  return {
+    title: known.map((entry) => entry.title).join(" + "),
+    note: known.map((entry) => entry.note).join(" "),
+  };
+}
+
+/** Capture geometry is usable only when both sides are positive numbers. */
+function usableMeta(value: unknown): ScreenshotMeta | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const meta = value as Record<string, unknown>;
+  for (const side of ["width", "height"] as const) {
+    if (typeof meta[side] !== "number" || !Number.isFinite(meta[side])) return undefined;
+    if ((meta[side] as number) <= 0) return undefined;
+  }
+  return value as ScreenshotMeta;
+}
+
+/**
+ * The sections to render, in capture order. A capture without image bytes
+ * gets no section, and its findings stay in the main view's "not located"
+ * group: the report has to stay usable without the captures.
+ */
+function captureSections(result: AuditResult, labels: ReportLabels): CaptureSection[] {
+  const captures = result.renderingCaptures;
+  if (!Array.isArray(captures) || captures.length === 0) return [];
+
+  const byCondition = new Map<string, Issue[]>();
+  for (const issue of result.issues ?? []) {
+    const condition = issue.rendering?.condition;
+    if (typeof condition !== "string") continue;
+    const existing = byCondition.get(condition);
+    if (existing) existing.push(issue);
+    else byCondition.set(condition, [issue]);
+  }
+
+  const sections: CaptureSection[] = [];
+  const seen = new Set<string>();
+
+  for (const [index, capture] of captures.entries()) {
+    if (!capture || typeof capture.condition !== "string") continue;
+    if (!capture.screenshot || capture.screenshot.length === 0) continue;
+    // One capture per condition is what the pass produces; a second one
+    // would show the same findings twice.
+    if (seen.has(capture.condition)) continue;
+    seen.add(capture.condition);
+
+    const words = conditionWords(capture.condition, labels);
+    const issues = byCondition.get(capture.condition) ?? [];
+    const meta = usableMeta(capture.meta);
+
+    sections.push({
+      // The index makes it unique even when two condition ids slug alike.
+      id: `cap${index}-${conditionSlug(capture.condition)}`,
+      title: words.title,
+      note: words.note,
+      capture,
+      issues,
+      partitioned: partitionIssues(issues, true),
+      ...(meta ? { meta } : {}),
+    });
+  }
+
+  return sections;
+}
+
+function renderCaptureSection(
+  section: CaptureSection,
+  result: AuditResult,
+  labels: ReportLabels
+): string {
+  const { meta, partitioned } = section;
+  const scope = `${section.id}-`;
+  const hasMarkers = meta !== undefined && partitioned.groups.length > 0;
+  const markers = meta
+    ? partitioned.groups.map((group) => renderMarker(group, meta, labels, scope)).join("")
+    : "";
+  const alt = labels.captureImageAlt(
+    pageName(result, labels),
+    section.title,
+    meta ? partitioned.groups.length : 0
+  );
+  const frame = meta ? frameStyle(meta) : "";
+
+  const list: string[] = [];
+  if (section.issues.length === 0) {
+    list.push(`<p class="empty">${escapeHtml(labels.captureNoFindings)}</p>`);
+  } else {
+    for (const group of partitioned.groups) {
+      list.push(renderGroup(group, labels, hasMarkers, scope));
+    }
+    if (partitioned.pageLevel.length > 0) {
+      list.push(renderSection(labels.pageLevelHeading, partitioned.pageLevel, labels, false));
+    }
+    if (partitioned.notLocated.length > 0) {
+      list.push(renderSection(labels.captureNotLocated, partitioned.notLocated, labels, true));
+    }
+  }
+
+  return (
+    `<section class="capture" aria-labelledby="${scope}title">` +
+    `<h2 class="capture__title" id="${scope}title">${escapeHtml(section.title)}</h2>` +
+    (section.note ? `<p class="capture__note">${escapeHtml(section.note)}</p>` : "") +
+    `<div class="columns">` +
+    // Like the main screenshot panel: side by side it scrolls on its own, so
+    // it is a labelled region a keyboard user can focus and scroll.
+    `<section class="panel shot" aria-label="${escapeHtml(
+      labels.capturePanel(section.title)
+    )}" tabindex="0">` +
+    `<div class="shot__clip"${frame}><div class="shot__frame">` +
+    `<img src="${imageSource(section.capture.screenshot)}" alt="${escapeHtml(alt)}" />` +
+    `${markers}</div></div></section>` +
+    `<div class="panel findings">${list.join("")}</div>` +
+    `</div></section>`
   );
 }
 
@@ -518,7 +740,8 @@ function renderFindings(
   partitioned: Partitioned,
   labels: ReportLabels,
   grouped: boolean,
-  hasMarkers: boolean
+  hasMarkers: boolean,
+  underConditions: number
 ): string {
   const parts: string[] = [];
   parts.push(
@@ -530,7 +753,8 @@ function renderFindings(
             labels.summary(
               partitioned.groups.reduce((total, group) => total + group.issues.length, 0),
               partitioned.pageLevel.length,
-              partitioned.notLocated.length
+              partitioned.notLocated.length,
+              underConditions
             )
           )}</p>`
         : "") +
@@ -538,7 +762,14 @@ function renderFindings(
   );
 
   if (issues.length === 0) {
-    parts.push(`<p class="empty">${escapeHtml(labels.noIssues)}</p>`);
+    // The clean-result sentence is about the whole audit. With findings in
+    // the capture sections below it would contradict the severity counts
+    // above it and the sections themselves.
+    parts.push(
+      `<p class="empty">${escapeHtml(
+        underConditions > 0 ? labels.onlyUnderConditions : labels.noIssues
+      )}</p>`
+    );
   } else if (!grouped) {
     parts.push(renderSection(labels.allIssuesHeading, issues, labels, false));
   } else {
@@ -562,23 +793,32 @@ export function renderHtmlReport(result: AuditResult, options: HtmlReportOptions
   const locale: HtmlReportLocale = options.locale === "de" ? "de" : "en";
   const labels = REPORT_LABELS[locale];
   const issues = result.issues ?? [];
+  // One section per rendering capture, each showing that condition's own
+  // findings on its own image; what they show, the main view leaves out.
+  const sections = captureSections(result, labels);
+  const shownInSections = new Set(sections.flatMap((section) => section.issues));
+  const mainIssues = issues.filter((issue) => !shownInSections.has(issue));
   // Marker groups and the "on the screenshot" summary only make sense when
   // there is a screenshot to put the markers on.
   const grouped = result.screenshotMeta !== undefined && result.screenshot !== undefined;
-  const partitioned = partitionIssues(grouped ? issues : []);
+  const partitioned = partitionIssues(grouped ? mainIssues : []);
 
   const screenshot = renderScreenshot(result, partitioned.groups, labels);
   const findings = renderFindings(
-    issues,
+    mainIssues,
     partitioned,
     labels,
     grouped,
-    screenshot !== "" && grouped
+    screenshot !== "" && grouped,
+    shownInSections.size
   );
 
   const body = screenshot
     ? `<div class="columns">${screenshot}${findings}</div>`
     : `<div class="columns columns--single">${findings}</div>`;
+  const captures = sections
+    .map((section) => renderCaptureSection(section, result, labels))
+    .join("");
 
   return `<!doctype html>
 <html lang="${locale}">
@@ -592,7 +832,7 @@ export function renderHtmlReport(result: AuditResult, options: HtmlReportOptions
 <body>
 <div class="page">
 ${renderMasthead(result, issues, labels, locale)}
-<main>${body}</main>
+<main>${body}${captures}</main>
 <footer class="colophon"><p>${escapeHtml(labels.footer)}</p><p>${escapeHtml(
     formatTimestamp(result.timestamp, locale)
   )}</p></footer>

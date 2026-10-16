@@ -7,6 +7,8 @@
 import { describe, expect, it } from "bun:test";
 import { contentHiddenAtViewportCheck } from "./checks/content-hidden-at-viewport.js";
 import { CONTRAST_RULES, contrastUnderModeCheck } from "./checks/contrast-under-mode.js";
+import { cvdLinkDistinctionCheck } from "./checks/cvd-link-distinction.js";
+import { cvdStateByColorCheck } from "./checks/cvd-state-by-color.js";
 import { forcedColorsLossCheck } from "./checks/forced-colors-loss.js";
 import { motionNotReducedCheck } from "./checks/motion-not-reduced.js";
 import { overflowClippedTextCheck } from "./checks/overflow-clipped-text.js";
@@ -20,9 +22,13 @@ import type {
   RenderingAxeNode,
   RenderingAxeResult,
   RenderingElement,
+  RenderingLink,
   RenderingMeasurement,
   RenderingMotion,
   RenderingPaintedElement,
+  RenderingStatePair,
+  RenderingStateStyle,
+  RenderingTextStyle,
 } from "./types.js";
 
 let nextIndex = 0;
@@ -1622,6 +1628,553 @@ describe("motion-not-reduced", () => {
   it("reports nothing when the condition gathered no motion", () => {
     expect(
       motionNotReducedCheck.evaluate({ condition: REDUCED_MOTION, measurement: measurement([]) })
+    ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The vision-deficiency checks
+// ---------------------------------------------------------------------------
+
+const PROTANOPIA = resolveCondition("cvd:protanopia");
+const DEUTERANOPIA = resolveCondition("cvd:deuteranopia");
+const ACHROMATOPSIA = resolveCondition("cvd:achromatopsia");
+const REDUCED_CONTRAST = resolveCondition("cvd:reduced-contrast");
+const BLURRED_VISION = resolveCondition("cvd:blurred-vision");
+
+function textStyle(overrides: Partial<RenderingTextStyle> = {}): RenderingTextStyle {
+  return {
+    color: "rgb(0, 0, 136)",
+    background: "rgb(255, 255, 255)",
+    backgroundImage: false,
+    decoration: "none",
+    border: false,
+    boxShadow: false,
+    fontWeight: 400,
+    fontStyle: "normal",
+    ...overrides,
+  };
+}
+
+/**
+ * A green link in navy text: 3.34:1 as the page is rendered, 2.84:1 under
+ * protanopia and 2.83:1 under deuteranopia. The band where a link passes the
+ * link-in-text-block ratio and fails it under a deficiency is narrow, because
+ * the matrices mostly preserve luminance — these are real colours from it.
+ */
+function link(overrides: Partial<RenderingLink> = {}): RenderingLink {
+  const index = overrides.index ?? nextIndex++;
+  return {
+    index,
+    selector: `#l${index}`,
+    html: "<a>",
+    tag: "a",
+    rect: { x: 10, y: 20, width: 120, height: 18 },
+    anchored: false,
+    text: "a green link",
+    blockSelector: "main > p",
+    link: textStyle({ color: "rgb(0, 136, 0)" }),
+    surrounding: textStyle(),
+    ...overrides,
+  };
+}
+
+function withLinks(links: RenderingLink[]): RenderingMeasurement {
+  return measurement([], { links });
+}
+
+describe("cvd-link-distinction", () => {
+  it("runs under the deficiencies that are a colour transformation, and no other condition", () => {
+    expect(cvdLinkDistinctionCheck.appliesTo(PROTANOPIA)).toBe(true);
+    expect(cvdLinkDistinctionCheck.appliesTo(DEUTERANOPIA)).toBe(true);
+    expect(cvdLinkDistinctionCheck.appliesTo(ACHROMATOPSIA)).toBe(true);
+    // Neither of these is a colour transformation, so there is no matrix.
+    expect(cvdLinkDistinctionCheck.appliesTo(REDUCED_CONTRAST)).toBe(false);
+    expect(cvdLinkDistinctionCheck.appliesTo(BLURRED_VISION)).toBe(false);
+    expect(cvdLinkDistinctionCheck.appliesTo(MEDIA_DARK)).toBe(false);
+    expect(cvdLinkDistinctionCheck.appliesTo(VIEWPORT_320)).toBe(false);
+  });
+
+  it("reports a colour-only link whose contrast collapses under the deficiency", () => {
+    const target = link();
+    const findings = cvdLinkDistinctionCheck.evaluate({
+      condition: PROTANOPIA,
+      measurement: withLinks([target]),
+    });
+
+    expect(findings).toHaveLength(1);
+    const [finding] = findings;
+    expect(finding.checkId).toBe("cvd-link-distinction");
+    expect(finding.impact).toBe("moderate");
+    expect(finding.selector).toBe(target.selector);
+    expect(finding.rect).toEqual(target.rect);
+    expect(finding.elementIndex).toBe(target.index);
+    expect(finding.helpUrl).toContain("use-of-color");
+    expect(finding.evidence.deficiency).toBe("protanopia");
+    expect(finding.evidence.contrast).toBe(3.34);
+    expect(finding.evidence.simulatedContrast).toBe(2.84);
+    expect(finding.evidence.required).toBe(3);
+    expect(finding.evidence.simulatedLinkColor).toBe("rgb(139, 122, 0)");
+    expect(finding.failureSummary).toContain("3.34:1");
+    expect(finding.failureSummary).toContain("2.84:1");
+  });
+
+  it("leaves a link axe already fails on the page as it is rendered", () => {
+    // 2.58:1 normally: that is `link-in-text-block`, which the engine pass
+    // reports, not something the deficiency did.
+    const findings = cvdLinkDistinctionCheck.evaluate({
+      condition: PROTANOPIA,
+      measurement: withLinks([link({ link: textStyle({ color: "rgb(51, 102, 153)" }) })]),
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it("leaves a link whose contrast survives the deficiency", () => {
+    expect(
+      cvdLinkDistinctionCheck.evaluate({
+        condition: ACHROMATOPSIA,
+        measurement: withLinks([link()]),
+      })
+    ).toEqual([]);
+  });
+
+  for (const [what, overrides] of [
+    ["an underline", { decoration: "underline" }],
+    ["a border", { border: true }],
+    ["a box-shadow underline", { boxShadow: true }],
+    ["a heavier font weight", { fontWeight: 700 }],
+    ["an italic style", { fontStyle: "italic" }],
+    ["a background of its own", { background: "rgb(230, 230, 180)" }],
+  ] as [string, Partial<RenderingTextStyle>][]) {
+    it(`leaves a link distinguished by ${what}`, () => {
+      expect(
+        cvdLinkDistinctionCheck.evaluate({
+          condition: PROTANOPIA,
+          measurement: withLinks([
+            link({ link: textStyle({ color: "rgb(0, 136, 0)", ...overrides }) }),
+          ]),
+        })
+      ).toEqual([]);
+    });
+  }
+
+  it("leaves a link whose background is an image, where no colour is the painted one", () => {
+    expect(
+      cvdLinkDistinctionCheck.evaluate({
+        condition: PROTANOPIA,
+        measurement: withLinks([
+          link({ surrounding: textStyle({ backgroundImage: true }) }),
+          link({ link: textStyle({ color: "rgb(0, 136, 0)", backgroundImage: true }) }),
+        ]),
+      })
+    ).toEqual([]);
+  });
+
+  it("leaves a colour it cannot parse rather than guess at it", () => {
+    expect(
+      cvdLinkDistinctionCheck.evaluate({
+        condition: PROTANOPIA,
+        measurement: withLinks([link({ link: textStyle({ color: "oklch(0.7 0.15 250)" }) })]),
+      })
+    ).toEqual([]);
+  });
+
+  it("caps its findings and says so", () => {
+    let truncated = 0;
+    const findings = cvdLinkDistinctionCheck.evaluate({
+      condition: PROTANOPIA,
+      measurement: withLinks(Array.from({ length: 30 }, () => link())),
+      onTruncated: () => {
+        truncated += 1;
+      },
+    });
+
+    expect(findings).toHaveLength(25);
+    expect(truncated).toBe(1);
+  });
+
+  it("reports nothing when the condition gathered no links", () => {
+    expect(
+      cvdLinkDistinctionCheck.evaluate({ condition: PROTANOPIA, measurement: measurement([]) })
+    ).toEqual([]);
+  });
+});
+
+function stateStyle(overrides: Partial<RenderingStateStyle> = {}): RenderingStateStyle {
+  return {
+    selector: "#state",
+    rect: { x: 0, y: 0, width: 80, height: 32 },
+    color: "rgb(51, 51, 51)",
+    background: "rgb(207, 232, 207)",
+    backgroundImage: false,
+    borderColor: "rgb(204, 204, 204)",
+    borderWidths: "1px 1px 1px 1px",
+    outline: false,
+    decoration: "none",
+    fontWeight: 400,
+    fontStyle: "normal",
+    fontFamily: "system-ui",
+    fontSize: 16,
+    text: "",
+    textTruncated: false,
+    childElements: 1,
+    graphics: "svg:7xk1",
+    graphicsReadable: true,
+    pseudoContent: "|",
+    ...overrides,
+  };
+}
+
+/**
+ * A selected icon tab whose only distinction is its background: a green tint
+ * against the grey of its sibling, 16.5 apart (CIE76) normally and 9.8 under
+ * deuteranopia — below the 10 the check asks for. Both sides carry the same
+ * icon and no visible text, which is what makes the colour the only cue:
+ * two labels that merely differ as labels do are a difference this check
+ * cannot tell from a state marker, and it leaves those pairs alone.
+ */
+function statePair(overrides: Partial<RenderingStatePair> = {}): RenderingStatePair {
+  const index = overrides.index ?? nextIndex++;
+  return {
+    index,
+    html: '<button role="tab" aria-selected="true" aria-label="Chart">',
+    tag: "button",
+    role: "tab",
+    anchored: false,
+    state: "aria-selected",
+    stateValue: "true",
+    element: stateStyle({ selector: `#s${index}` }),
+    sibling: stateStyle({
+      selector: `#s${index}-other`,
+      background: "rgb(238, 238, 238)",
+    }),
+    ...overrides,
+  };
+}
+
+function withStates(states: RenderingStatePair[]): RenderingMeasurement {
+  return measurement([], { states });
+}
+
+describe("cvd-state-by-color", () => {
+  it("runs under the deficiencies that are a colour transformation, and no other condition", () => {
+    expect(cvdStateByColorCheck.appliesTo(DEUTERANOPIA)).toBe(true);
+    expect(cvdStateByColorCheck.appliesTo(ACHROMATOPSIA)).toBe(true);
+    expect(cvdStateByColorCheck.appliesTo(REDUCED_CONTRAST)).toBe(false);
+    expect(cvdStateByColorCheck.appliesTo(BLURRED_VISION)).toBe(false);
+    expect(cvdStateByColorCheck.appliesTo(MEDIA_DARK)).toBe(false);
+  });
+
+  it("reports a state whose only cue is a colour the deficiency takes", () => {
+    const pair = statePair();
+    const findings = cvdStateByColorCheck.evaluate({
+      condition: DEUTERANOPIA,
+      measurement: withStates([pair]),
+    });
+
+    expect(findings).toHaveLength(1);
+    const [finding] = findings;
+    expect(finding.checkId).toBe("cvd-state-by-color");
+    expect(finding.impact).toBe("moderate");
+    expect(finding.selector).toBe(pair.element.selector);
+    expect(finding.rect).toEqual(pair.element.rect);
+    expect(finding.elementIndex).toBe(pair.index);
+    expect(finding.helpUrl).toContain("use-of-color");
+    expect(finding.evidence.state).toBe("aria-selected");
+    expect(finding.evidence.property).toBe("background colour");
+    expect(finding.evidence.required).toBe(10);
+    expect(Number(finding.evidence.distance)).toBeGreaterThanOrEqual(10);
+    expect(Number(finding.evidence.simulatedDistance)).toBeLessThan(10);
+    expect(finding.evidence.comparedWith).toBe(pair.sibling.selector);
+    expect(finding.failureSummary).toContain("aria-selected");
+  });
+
+  it("leaves a state whose colour difference survives the deficiency", () => {
+    expect(
+      cvdStateByColorCheck.evaluate({
+        condition: PROTANOPIA,
+        measurement: withStates([statePair()]),
+      })
+    ).toEqual([]);
+  });
+
+  it("leaves a state with no visible colour difference at all", () => {
+    expect(
+      cvdStateByColorCheck.evaluate({
+        condition: DEUTERANOPIA,
+        measurement: withStates([
+          statePair({
+            sibling: stateStyle({ selector: "#other", background: "rgb(205, 230, 205)" }),
+          }),
+        ]),
+      })
+    ).toEqual([]);
+  });
+
+  for (const [what, overrides] of [
+    ["a pseudo-element marker", { pseudoContent: '"✓"|' }],
+    ["a marker in its visible text", { text: "Chart (selected)" }],
+    ["another icon than its sibling", { graphics: "svg:q3zz" }],
+    ["an icon where its sibling has none", { graphics: "" }],
+    ["an extra child element", { childElements: 2 }],
+    ["a heavier font weight", { fontWeight: 700 }],
+    ["an italic style", { fontStyle: "italic" }],
+    ["another font family", { fontFamily: "Georgia" }],
+    ["a larger font size", { fontSize: 18 }],
+    ["an underline", { decoration: "underline" }],
+    ["an outline", { outline: true }],
+    ["a thicker border", { borderWidths: "1px 1px 3px 1px" }],
+    ["a taller box", { rect: { x: 0, y: 0, width: 80, height: 40 } }],
+  ] as [string, Partial<RenderingStateStyle>][]) {
+    it(`leaves a state that also has ${what}`, () => {
+      expect(
+        cvdStateByColorCheck.evaluate({
+          condition: DEUTERANOPIA,
+          measurement: withStates([
+            statePair({ element: stateStyle({ selector: "#state", ...overrides }) }),
+          ]),
+        })
+      ).toEqual([]);
+    });
+  }
+
+  it("leaves a state whose box is a different width, since labels differ in length", () => {
+    const findings = cvdStateByColorCheck.evaluate({
+      condition: DEUTERANOPIA,
+      measurement: withStates([
+        statePair({
+          element: stateStyle({
+            selector: "#state",
+            rect: { x: 0, y: 0, width: 140, height: 32 },
+          }),
+        }),
+      ]),
+    });
+
+    expect(findings).toHaveLength(1);
+  });
+
+  it("keeps a state where one cue collapses and another survives", () => {
+    // The background collapses under deuteranopia, the text colour does not.
+    expect(
+      cvdStateByColorCheck.evaluate({
+        condition: DEUTERANOPIA,
+        measurement: withStates([
+          statePair({
+            element: stateStyle({ selector: "#state", color: "rgb(0, 0, 0)" }),
+            sibling: stateStyle({
+              selector: "#other",
+              background: "rgb(238, 238, 238)",
+              color: "rgb(150, 150, 150)",
+            }),
+          }),
+        ]),
+      })
+    ).toEqual([]);
+  });
+
+  it("leaves a pair whose background is an image, where no colour is the painted one", () => {
+    expect(
+      cvdStateByColorCheck.evaluate({
+        condition: DEUTERANOPIA,
+        measurement: withStates([
+          statePair({ element: stateStyle({ selector: "#state", backgroundImage: true }) }),
+        ]),
+      })
+    ).toEqual([]);
+  });
+
+  it("reports a state whose background is the colour behind a transparent one", () => {
+    // The selected tab paints `#008800`; its sibling paints nothing and
+    // shows the `#747474` behind it. Same appearance as two explicit
+    // backgrounds, and the same finding: 75 apart (CIE76) normally and gone
+    // under achromatopsia.
+    const findings = cvdStateByColorCheck.evaluate({
+      condition: ACHROMATOPSIA,
+      measurement: withStates([
+        statePair({
+          element: stateStyle({ selector: "#state", background: "rgb(0, 136, 0)" }),
+          sibling: stateStyle({ selector: "#other", background: "rgb(116, 116, 116)" }),
+        }),
+      ]),
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].evidence.property).toBe("background colour");
+    expect(findings[0].evidence.stateColor).toBe("rgb(0, 136, 0)");
+    expect(findings[0].evidence.siblingColor).toBe("rgb(116, 116, 116)");
+    expect(Number(findings[0].evidence.distance)).toBeGreaterThan(70);
+  });
+
+  it("leaves a pair whose two backgrounds paint the same colour", () => {
+    // One side sets the colour, the other inherits it from what is behind
+    // it: nothing distinguishes the state at all, which is not a colour that
+    // collapses.
+    expect(
+      cvdStateByColorCheck.evaluate({
+        condition: ACHROMATOPSIA,
+        measurement: withStates([
+          statePair({
+            element: stateStyle({ selector: "#state", background: "rgb(116, 116, 116)" }),
+            sibling: stateStyle({ selector: "#other", background: "rgb(116, 116, 116)" }),
+          }),
+        ]),
+      })
+    ).toEqual([]);
+  });
+
+  it("treats a foreground the element paints nowhere as no cue", () => {
+    // An empty box paints no foreground, and the measurement reports `""`
+    // for it (`RenderingStateStyle.color`): the background is then the only
+    // cue there is, and an unused `color` difference can neither make a
+    // finding nor suppress one.
+    const empty = {
+      element: stateStyle({ selector: "#state", color: "", graphics: "" }),
+      sibling: stateStyle({ selector: "#other", color: "", graphics: "" }),
+    };
+
+    const findings = cvdStateByColorCheck.evaluate({
+      condition: ACHROMATOPSIA,
+      measurement: withStates([
+        statePair({
+          element: stateStyle({ ...empty.element, background: "rgb(0, 136, 0)" }),
+          sibling: stateStyle({ ...empty.sibling, background: "rgb(116, 116, 116)" }),
+        }),
+      ]),
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0].evidence.property).toBe("background colour");
+
+    // The same two boxes painting the same background: nothing is left to
+    // carry the state.
+    expect(
+      cvdStateByColorCheck.evaluate({
+        condition: ACHROMATOPSIA,
+        measurement: withStates([
+          statePair({
+            element: stateStyle({ ...empty.element, background: "rgb(116, 116, 116)" }),
+            sibling: stateStyle({ ...empty.sibling, background: "rgb(116, 116, 116)" }),
+          }),
+        ]),
+      })
+    ).toEqual([]);
+  });
+
+  it("composites a semi-transparent text colour over its background exactly once", () => {
+    const findings = cvdStateByColorCheck.evaluate({
+      condition: ACHROMATOPSIA,
+      measurement: withStates([
+        statePair({
+          element: stateStyle({
+            selector: "#state",
+            color: "rgba(0, 136, 0, 0.5)",
+            background: "rgb(255, 255, 255)",
+          }),
+          sibling: stateStyle({
+            selector: "#other",
+            color: "rgba(187, 0, 0, 0.5)",
+            background: "rgb(255, 255, 255)",
+          }),
+        }),
+      ]),
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].evidence.property).toBe("text colour");
+    // 50% of rgb(0, 136, 0) on white, and no second pass over white.
+    expect(findings[0].evidence.stateColor).toBe("rgb(128, 196, 128)");
+    expect(findings[0].evidence.siblingColor).toBe("rgb(221, 128, 128)");
+  });
+
+  it("leaves a pair whose visible text was cut at its bound", () => {
+    // The two texts match up to the cut and could differ past it, so the
+    // marker question cannot be answered: a missed finding over a made-up one.
+    expect(
+      cvdStateByColorCheck.evaluate({
+        condition: DEUTERANOPIA,
+        measurement: withStates([
+          statePair({
+            element: stateStyle({ selector: "#state", text: "A".repeat(120), textTruncated: true }),
+            sibling: stateStyle({
+              selector: "#other",
+              background: "rgb(238, 238, 238)",
+              text: "A".repeat(120),
+            }),
+          }),
+        ]),
+      })
+    ).toEqual([]);
+  });
+
+  it("leaves a pair holding a graphic it cannot identify", () => {
+    expect(
+      cvdStateByColorCheck.evaluate({
+        condition: DEUTERANOPIA,
+        measurement: withStates([
+          statePair({
+            element: stateStyle({
+              selector: "#state",
+              graphics: "canvas:unknown",
+              graphicsReadable: false,
+            }),
+            sibling: stateStyle({
+              selector: "#other",
+              background: "rgb(238, 238, 238)",
+              graphics: "canvas:unknown",
+              graphicsReadable: false,
+            }),
+          }),
+        ]),
+      })
+    ).toEqual([]);
+  });
+
+  it("reports a border-colour-only state and names the border", () => {
+    const findings = cvdStateByColorCheck.evaluate({
+      condition: ACHROMATOPSIA,
+      measurement: withStates([
+        statePair({
+          state: "aria-invalid",
+          stateValue: "true",
+          element: stateStyle({
+            selector: "#mail",
+            background: "rgb(255, 255, 255)",
+            borderColor: "rgb(0, 136, 0)",
+            graphics: "",
+          }),
+          sibling: stateStyle({
+            selector: "#name",
+            background: "rgb(255, 255, 255)",
+            borderColor: "rgb(187, 0, 0)",
+            graphics: "",
+          }),
+        }),
+      ]),
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].evidence.property).toBe("border colour");
+    expect(findings[0].evidence.state).toBe("aria-invalid");
+  });
+
+  it("caps its findings and says so", () => {
+    let truncated = 0;
+    const findings = cvdStateByColorCheck.evaluate({
+      condition: DEUTERANOPIA,
+      measurement: withStates(Array.from({ length: 30 }, () => statePair())),
+      onTruncated: () => {
+        truncated += 1;
+      },
+    });
+
+    expect(findings).toHaveLength(25);
+    expect(truncated).toBe(1);
+  });
+
+  it("reports nothing when the condition gathered no states", () => {
+    expect(
+      cvdStateByColorCheck.evaluate({ condition: DEUTERANOPIA, measurement: measurement([]) })
     ).toEqual([]);
   });
 });

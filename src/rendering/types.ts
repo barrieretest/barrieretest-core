@@ -205,6 +205,156 @@ export interface RenderingPaintedElement {
 }
 
 /**
+ * Everything that distinguishes one piece of text from another, as the
+ * measurement computes it: the colours, and the cues that are not colour.
+ *
+ * Colours arrive normalised to `rgba(r, g, b, a)` — the measurement paints
+ * the computed value on a canvas, so the browser resolves `oklch()`,
+ * `lab()` and `color(srgb …)` itself and the pure check only ever parses
+ * one syntax.
+ */
+export interface RenderingTextStyle {
+  /** Painted text colour (`-webkit-text-fill-color`, else `color`). */
+  color: string;
+  /** The opaque colour painted behind the text, `rgb(r, g, b)`. */
+  background: string;
+  /**
+   * Whether an image or gradient is painted behind the text, in which case
+   * `background` is not what is on the screen and no colour judgement is
+   * possible — the same case axe reports as `incomplete`.
+   */
+  backgroundImage: boolean;
+  /** Computed `text-decoration-line`, e.g. `"none"` or `"underline"`. */
+  decoration: string;
+  /** A border side that paints: width above 0 and a style that draws. */
+  border: boolean;
+  /** `box-shadow` other than `none` — the box-shadow underline. */
+  boxShadow: boolean;
+  /** Computed `font-weight` as a number. */
+  fontWeight: number;
+  /** Computed `font-style`. */
+  fontStyle: string;
+}
+
+/**
+ * One link inside a text block, with the surrounding text it has to be
+ * distinguishable from (WCAG 1.4.1, the link-in-text-block technique).
+ * `surrounding` is the block the link sits in: the element whose own text
+ * runs alongside the link, which is the colour a reader compares against.
+ */
+export interface RenderingLink {
+  /** Identity within this measurement; what the mark numbering groups by. */
+  index: number;
+  selector: string;
+  html: string;
+  tag: string;
+  /** Rect in CSS px in document space, like `RenderingElement.rect`. */
+  rect: MeasuredRect;
+  anchored: boolean;
+  /** The link's own text, trimmed and bounded. */
+  text: string;
+  /** The block whose other text surrounds the link. */
+  blockSelector: string;
+  link: RenderingTextStyle;
+  surrounding: RenderingTextStyle;
+}
+
+/** The states whose visual cue the colour check judges. */
+export type RenderingStateName = "aria-invalid" | "aria-selected" | "aria-current" | "required";
+
+/**
+ * What the state check compares between a stateful element and a sibling of
+ * the same kind without the state. Colours are normalised like
+ * `RenderingTextStyle`; everything else is a cue that is not colour, and one
+ * of them differing is enough for the state not to be conveyed by colour
+ * alone.
+ */
+export interface RenderingStateStyle {
+  /** Unique CSS path of the element these values were read from. */
+  selector: string;
+  /** Rect in CSS px in document space. */
+  rect: MeasuredRect;
+  /**
+   * The colour the foreground paints, `rgba(r, g, b, a)`, and `""` when it
+   * paints nothing a reader sees: an empty box's `color`, or one whose icon
+   * carries a fill of its own, is a value nobody is shown and no cue. Read
+   * from the element the visible text sits in, so a label in a `span` with
+   * its own colour is that colour.
+   */
+  color: string;
+  /**
+   * The opaque colour the element's box paints, `rgb(r, g, b)`: its own
+   * `background-color` composited over what is behind it, so a transparent
+   * background is the colour that shows through it — which is what a reader
+   * compares the other side's background with.
+   */
+  background: string;
+  /**
+   * Whether an image or gradient is painted on or behind the element, in
+   * which case its colours are not what is on the screen.
+   */
+  backgroundImage: boolean;
+  /** Colour of the widest painted border side; `""` when none paints. */
+  borderColor: string;
+  /** The four border widths — a shape cue, not a colour one. */
+  borderWidths: string;
+  /** Whether an outline paints. */
+  outline: boolean;
+  /** Computed `text-decoration-line`. */
+  decoration: string;
+  fontWeight: number;
+  fontStyle: string;
+  fontFamily: string;
+  fontSize: number;
+  /**
+   * The text a reader can see, trimmed and bounded: text inside a child the
+   * page hides (`display: none`, the screen-reader-only 1 px box) is not a
+   * visual cue and is left out. A marker word like "(selected)" is in here,
+   * which is why the two sides' texts have to match for the state to be
+   * carried by colour alone.
+   */
+  text: string;
+  /** Whether `text` hit its bound, so the two sides cannot be compared. */
+  textTruncated: boolean;
+  /** Element children; an icon or a marker span changes the count. */
+  childElements: number;
+  /**
+   * A signature of the replaced and vector content it holds, in document
+   * order: the tag plus the `src` of an image or a short hash of an SVG's
+   * markup, so a tick and a cross are two different graphics rather than
+   * two graphics. `""` when it holds none.
+   */
+  graphics: string;
+  /**
+   * Whether every graphic in `graphics` could be identified. A `canvas`
+   * paints what no attribute says, so two of them cannot be told apart and
+   * the pair is not judged at all.
+   */
+  graphicsReadable: boolean;
+  /** `::before` and `::after` `content`, joined — the pseudo-element cue. */
+  pseudoContent: string;
+}
+
+/**
+ * One element carrying a state, paired with the sibling of the same kind
+ * that does not carry it: the only comparison that can say whether the state
+ * is visible at all, and whether anything but colour carries it.
+ */
+export interface RenderingStatePair {
+  /** Identity within this measurement; what the mark numbering groups by. */
+  index: number;
+  html: string;
+  tag: string;
+  role: string | null;
+  anchored: boolean;
+  state: RenderingStateName;
+  /** The attribute's value, e.g. `"true"` or `"page"`; `""` for `required`. */
+  stateValue: string;
+  element: RenderingStateStyle;
+  sibling: RenderingStateStyle;
+}
+
+/**
  * One entry of `document.getAnimations()` under the condition, resolved to
  * the element it animates.
  */
@@ -350,6 +500,14 @@ export interface RenderingMeasurement {
   ancestorsTruncated?: boolean;
   /** Only when `collect.motion` asked for it. */
   motion?: RenderingMotion;
+  /** Only when `collect.links` asked for it. */
+  links?: RenderingLink[];
+  /** Whether the link collection hit its cap, so that group is partial. */
+  linksTruncated?: boolean;
+  /** Only when `collect.states` asked for it. */
+  states?: RenderingStatePair[];
+  /** Whether the state collection hit its cap, so that group is partial. */
+  statesTruncated?: boolean;
   /** Only when `collect.axeRules` asked for rules. */
   axe?: RenderingAxeRun;
 }
@@ -380,6 +538,10 @@ export interface RenderingCollect {
   forcedColors?: boolean;
   /** Running animations, autoplaying video and `<marquee>`. */
   motion?: boolean;
+  /** Links inside a text block, with the colours and cues of both. */
+  links?: boolean;
+  /** Stateful elements paired with a sibling of the same kind without the state. */
+  states?: boolean;
   /**
    * Axe rules to run under this condition, on top of the measurement. Axe is
    * already on the page from the engine pass and is re-injected only when it

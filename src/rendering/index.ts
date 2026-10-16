@@ -9,11 +9,24 @@
 export type { DeviceViewport, RenderingCapabilities, ViewportSize } from "./capabilities.js";
 export { createRenderingCapabilities } from "./capabilities.js";
 export { baselineKey, renderingAxeBaseline, runConditionAxe } from "./axe.js";
+export type { Rgb, Rgba, SimulatedDeficiency } from "./color.js";
+export {
+  compositeOver,
+  contrastRatio,
+  deltaE,
+  isSimulatedDeficiency,
+  parseColor,
+  relativeLuminance,
+  SIMULATED_DEFICIENCIES,
+  simulateDeficiency,
+} from "./color.js";
 export {
   BUILT_IN_RENDERING_CHECK_IDS,
   BUILT_IN_RENDERING_CHECKS,
   contentHiddenAtViewportCheck,
   contrastUnderModeCheck,
+  cvdLinkDistinctionCheck,
+  cvdStateByColorCheck,
   forcedColorsLossCheck,
   motionNotReducedCheck,
   overflowClippedTextCheck,
@@ -48,9 +61,14 @@ export type {
   RenderingCondition,
   RenderingElement,
   RenderingFinding,
+  RenderingLink,
   RenderingMeasurement,
   RenderingMotion,
   RenderingMotionElement,
   RenderingPaintedElement,
+  RenderingStateName,
+  RenderingStatePair,
+  RenderingStateStyle,
+  RenderingTextStyle,
   VisionDeficiency,
 } from "./types.js";

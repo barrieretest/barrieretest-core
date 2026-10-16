@@ -9,6 +9,8 @@
 import type { RenderingCheck } from "../types.js";
 import { contentHiddenAtViewportCheck } from "./content-hidden-at-viewport.js";
 import { contrastUnderModeCheck } from "./contrast-under-mode.js";
+import { cvdLinkDistinctionCheck } from "./cvd-link-distinction.js";
+import { cvdStateByColorCheck } from "./cvd-state-by-color.js";
 import { forcedColorsLossCheck } from "./forced-colors-loss.js";
 import { motionNotReducedCheck } from "./motion-not-reduced.js";
 import { overflowClippedTextCheck } from "./overflow-clipped-text.js";
@@ -25,6 +27,8 @@ export const BUILT_IN_RENDERING_CHECKS: readonly RenderingCheck[] = [
   contrastUnderModeCheck,
   forcedColorsLossCheck,
   motionNotReducedCheck,
+  cvdLinkDistinctionCheck,
+  cvdStateByColorCheck,
 ];
 
 export const BUILT_IN_RENDERING_CHECK_IDS: readonly string[] = BUILT_IN_RENDERING_CHECKS.map(
@@ -62,6 +66,8 @@ export function resolveRenderingChecks(requestedIds?: string[]): RenderingCheck[
 
 export { contentHiddenAtViewportCheck } from "./content-hidden-at-viewport.js";
 export { contrastUnderModeCheck } from "./contrast-under-mode.js";
+export { cvdLinkDistinctionCheck } from "./cvd-link-distinction.js";
+export { cvdStateByColorCheck } from "./cvd-state-by-color.js";
 export { forcedColorsLossCheck } from "./forced-colors-loss.js";
 export { motionNotReducedCheck } from "./motion-not-reduced.js";
 export { overflowClippedTextCheck } from "./overflow-clipped-text.js";

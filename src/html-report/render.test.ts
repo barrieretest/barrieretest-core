@@ -630,3 +630,358 @@ describe("renderHtmlReport locales", () => {
     expect(html).toContain("Accessibility report");
   });
 });
+
+/**
+ * One section per rendering capture, with that condition's findings on that
+ * condition's image. A rendering finding's annotation is in its own
+ * capture's coordinate space, so these sections are the only place its
+ * marker can be drawn — and the main view's "not located" group is where it
+ * stays when there is no capture to draw it on.
+ */
+describe("renderHtmlReport capture sections", () => {
+  const CAPTURE = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
+
+  const captureMeta = (width = 800, height = 1600): AuditResult["screenshotMeta"] => ({
+    width,
+    height,
+    deviceScaleFactor: 1,
+    viewport: { width, height: 720 },
+    fullPage: true,
+    document: { width, height },
+    scroll: { x: 0, y: 0 },
+  });
+
+  const capture = (condition: string, width = 800, height = 1600) => {
+    const meta = captureMeta(width, height);
+    if (!meta) throw new Error("meta");
+    return { condition, screenshot: CAPTURE, meta };
+  };
+
+  const renderIssue = (
+    condition: string,
+    overrides: Partial<Issue> = {},
+    annotationOverrides: Partial<IssueAnnotation> = {}
+  ): Issue =>
+    makeIssue({
+      id: "render:cvd-link-distinction",
+      impact: "moderate",
+      help: "Give links in text blocks a distinction that is not colour",
+      selector: "#link",
+      rendering: {
+        checkId: "cvd-link-distinction",
+        condition,
+        captureIndex: 0,
+        evidence: { deficiency: "protanopia" },
+      },
+      annotation: {
+        selector: "#link",
+        state: "resolved",
+        mark: 1,
+        rect: { x: 100, y: 200, width: 300, height: 20 },
+        ...annotationOverrides,
+      },
+      ...overrides,
+    });
+
+  /** The main view only: everything before the first capture section. */
+  const mainOf = (html: string): string => {
+    const start = html.indexOf('class="panel findings"');
+    const end = html.indexOf('<section class="capture"');
+    return html.slice(start, end === -1 ? undefined : end);
+  };
+
+  /** One capture section only, so the next one cannot satisfy an assertion. */
+  const sectionOf = (html: string, id: string): string => {
+    const start = html.indexOf(`<section class="capture" aria-labelledby="${id}-title"`);
+    if (start === -1) throw new Error(`no section ${id}`);
+    const next = html.indexOf('<section class="capture"', start + 1);
+    return html.slice(start, next === -1 ? undefined : next);
+  };
+
+  const resultWithCaptures = (overrides: Partial<AuditResult> = {}): AuditResult =>
+    makeResult({
+      screenshot: SCREENSHOT,
+      screenshotMeta: META,
+      issues: [
+        makeIssue({ id: "image-alt", annotation: annotation() }),
+        renderIssue("cvd:protanopia"),
+        renderIssue("media:dark", { id: "render:contrast-under-mode" }),
+      ],
+      renderingCaptures: [capture("cvd:protanopia"), capture("media:dark")],
+      ...overrides,
+    });
+
+  it("renders one section per capture, each with its condition in plain words", () => {
+    const html = renderHtmlReport(resultWithCaptures());
+
+    expect(html.match(/class="capture"/g)).toHaveLength(2);
+    expect(html).toContain("Protanopia (red-green colour blindness)");
+    expect(html).toContain("Simulates vision without working red cone cells");
+    expect(html).toContain("Dark mode");
+    expect(html).toContain("prefers-color-scheme: dark");
+    // The capture is a JPEG, the page screenshot a PNG; both are inline.
+    expect(html).toContain("data:image/jpeg;base64,");
+    expect(html).toContain("data:image/png;base64,");
+  });
+
+  it("moves rendering findings out of the main view into their condition", () => {
+    const html = renderHtmlReport(resultWithCaptures());
+    const main = mainOf(html);
+
+    // The main list has the engine finding and neither rendering one.
+    expect(main).toContain("image-alt");
+    expect(main).not.toContain("render:cvd-link-distinction");
+    expect(main).not.toContain("render:contrast-under-mode");
+    expect(main).not.toContain("Not located on the screenshot");
+
+    const protanopia = sectionOf(html, "cap0-cvd-protanopia");
+    expect(protanopia).toContain("render:cvd-link-distinction");
+    // And the dark-mode finding is in its own section, not in this one.
+    expect(protanopia).not.toContain("render:contrast-under-mode");
+    expect(sectionOf(html, "cap1-media-dark")).toContain("render:contrast-under-mode");
+  });
+
+  it("counts them in the summary line and in the findings-by-rule table", () => {
+    const html = renderHtmlReport(resultWithCaptures());
+
+    expect(html).toContain(
+      "1 on the screenshot · 0 page-level · 0 not located · 2 under rendering conditions"
+    );
+    // The table is the executive summary of everything the audit found.
+    expect(html).toContain("render:cvd-link-distinction");
+    expect(html).toContain("render:contrast-under-mode");
+  });
+
+  it("places a section's markers in percentages of that capture's own geometry", () => {
+    const html = renderHtmlReport(resultWithCaptures());
+
+    // x 100 of 800 and y 200 of 1600, not of the page screenshot's 1000×2000.
+    expect(html).toContain('id="marker-cap0-cvd-protanopia-1"');
+    expect(html).toContain("left:12.5000%;top:12.5000%;width:37.5000%;height:1.2500%");
+  });
+
+  it("keeps marker and group ids unique across sections", () => {
+    const html = renderHtmlReport(resultWithCaptures());
+    const ids = [...html.matchAll(/ id="([^"]+)"/g)].map((match) => match[1]);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toContain("marker-cap0-cvd-protanopia-1");
+    expect(ids).toContain("group-cap0-cvd-protanopia-1");
+    expect(ids).toContain("marker-cap1-media-dark-1");
+    // The main screenshot keeps its unprefixed ids.
+    expect(ids).toContain("marker-1");
+    expect(ids).toContain("group-1");
+  });
+
+  it("links every section marker to its own group", () => {
+    const html = renderHtmlReport(resultWithCaptures());
+
+    expect(html).toContain('href="#group-cap0-cvd-protanopia-1"');
+    expect(html).toContain('href="#marker-cap0-cvd-protanopia-1"');
+  });
+
+  it("shows a one-line note for a condition with no findings", () => {
+    const html = renderHtmlReport(
+      resultWithCaptures({
+        issues: [makeIssue({ id: "image-alt", annotation: annotation() })],
+      })
+    );
+
+    expect(html.match(/No findings under this condition\./g)).toHaveLength(2);
+  });
+
+  it("groups a condition's page-level and unplaced findings under their own headings", () => {
+    const html = renderHtmlReport(
+      resultWithCaptures({
+        issues: [
+          renderIssue(
+            "cvd:protanopia",
+            { id: "render:reflow-horizontal-scroll", selector: "html" },
+            { state: "page", mark: undefined, rect: undefined }
+          ),
+          renderIssue(
+            "cvd:protanopia",
+            { id: "render:overlap-text" },
+            {
+              state: "unresolved",
+              mark: undefined,
+              rect: undefined,
+            }
+          ),
+        ],
+      })
+    );
+
+    expect(html).toContain("Page-level issues");
+    expect(html).toContain("Not located in this capture");
+  });
+
+  it("names a composite condition by its parts", () => {
+    const html = renderHtmlReport(
+      resultWithCaptures({
+        issues: [],
+        renderingCaptures: [capture("viewport:320+text-spacing")],
+      })
+    );
+
+    expect(html).toContain("At 320 px width + Text spacing per WCAG 1.4.12");
+  });
+
+  it("writes German section labels with proper umlauts", () => {
+    const html = renderHtmlReport(
+      resultWithCaptures({
+        renderingCaptures: [
+          capture("viewport:320"),
+          capture("media:dark"),
+          capture("cvd:protanopia"),
+          capture("text-spacing"),
+        ],
+      }),
+      { locale: "de" }
+    );
+
+    expect(html).toContain("Bei 320 px Breite");
+    expect(html).toContain("Dunkelmodus");
+    expect(html).toContain("Protanopie (Rot-Grün-Sehschwäche)");
+    expect(html).toContain("Textabstände nach WCAG 1.4.12");
+    expect(html).toContain("unter Darstellungsbedingungen");
+    expect(html).toContain("Keine Befunde unter dieser Bedingung.");
+    expect(html).not.toMatch(/Rot-Gruen|Textabstaende/);
+  });
+
+  it("shows an unknown condition id as escaped text, with no sentence", () => {
+    const hostile = '<script>alert(1)</script>"><img src=x>';
+    const html = renderHtmlReport(
+      resultWithCaptures({
+        // A finding under that condition, so the id reaches the panel label,
+        // the image's text alternative and the issue card as well as the
+        // heading.
+        issues: [renderIssue(hostile)],
+        renderingCaptures: [capture(hostile)],
+      })
+    );
+
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    // The slug of a hostile id carries none of it into an attribute.
+    expect(html).toContain('id="cap0-script-alert-1-script-img-src-x-title"');
+
+    const section = sectionOf(html, "cap0-script-alert-1-script-img-src-x");
+    expect(section).toContain("render:cvd-link-distinction");
+    // Every attribute the condition's words land in parses as one value,
+    // and none of them opens a tag or an event handler.
+    const attributes = [...section.matchAll(/(aria-label|alt)="([^"]*)"/g)].map(
+      (match) => match[2]
+    );
+    expect(attributes.length).toBeGreaterThanOrEqual(2);
+    expect(attributes.some((value) => value.includes("&lt;script&gt;"))).toBe(true);
+    for (const value of attributes) {
+      expect(value).not.toContain("<");
+      expect(value).not.toContain(">");
+    }
+    expect(section).not.toContain("<img src=x>");
+    expect(section).not.toMatch(/onerror=/);
+  });
+
+  it("does not claim a clean result when every finding is under a condition", () => {
+    const html = renderHtmlReport(
+      resultWithCaptures({
+        issues: [renderIssue("cvd:protanopia")],
+      })
+    );
+    const main = mainOf(html);
+
+    expect(main).not.toContain("No accessibility issues were found.");
+    expect(main).toContain("Every finding appears under one of the rendering conditions below.");
+    expect(sectionOf(html, "cap0-cvd-protanopia")).toContain("render:cvd-link-distinction");
+  });
+
+  it("claims a clean result only when the audit found nothing at all", () => {
+    const html = renderHtmlReport(resultWithCaptures({ issues: [] }));
+
+    expect(mainOf(html)).toContain("No accessibility issues were found.");
+  });
+
+  it("says in German that the findings are under the conditions", () => {
+    const html = renderHtmlReport(resultWithCaptures({ issues: [renderIssue("cvd:protanopia")] }), {
+      locale: "de",
+    });
+
+    expect(mainOf(html)).toContain(
+      "Alle Befunde treten unter den Darstellungsbedingungen weiter unten auf."
+    );
+    expect(mainOf(html)).not.toContain("Es wurden keine Barrieren gefunden.");
+  });
+
+  it("clips the capture on an outer box and leaves the markers' own box unbounded", () => {
+    const html = renderHtmlReport(resultWithCaptures());
+
+    // The geometry the print stylesheet bounds is on `.shot__clip`; the
+    // frame the markers are positioned in percentages of carries none of it.
+    expect(html).toContain('<div class="shot__clip" style="--shot-ratio:0.5000;--shot-max:800px">');
+    expect(html).toContain(
+      '<div class="shot__clip" style="--shot-ratio:0.5000;--shot-max:800px"><div class="shot__frame">'
+    );
+    expect(html).not.toMatch(/<div class="shot__frame" style=/);
+    expect(/\.capture \.shot__clip \{[^}]*max-height: 215mm/.test(html)).toBe(true);
+  });
+
+  it("leaves rendering findings in the main view when there is no capture", () => {
+    const html = renderHtmlReport(resultWithCaptures({ renderingCaptures: [] }));
+
+    expect(html).not.toContain('class="capture"');
+    const main = findingsOf(html);
+    expect(main).toContain("Not located on the screenshot");
+    expect(main).toContain("render:cvd-link-distinction");
+  });
+
+  it("leaves the findings of a capture without image bytes in the main view", () => {
+    const html = renderHtmlReport(
+      resultWithCaptures({
+        renderingCaptures: [
+          { ...capture("cvd:protanopia"), screenshot: new Uint8Array() },
+          capture("media:dark"),
+        ],
+      })
+    );
+
+    expect(html.match(/class="capture"/g)).toHaveLength(1);
+    expect(mainOf(html)).toContain("render:cvd-link-distinction");
+    expect(mainOf(html)).not.toContain("render:contrast-under-mode");
+  });
+
+  it("renders a section without markers when the capture geometry is unusable", () => {
+    const html = renderHtmlReport(
+      resultWithCaptures({
+        renderingCaptures: [
+          {
+            condition: "cvd:protanopia",
+            screenshot: CAPTURE,
+            meta: { ...captureMeta(), width: 0 } as NonNullable<AuditResult["screenshotMeta"]>,
+          },
+        ],
+      })
+    );
+
+    expect(html).toContain("Protanopia (red-green colour blindness)");
+    expect(html).not.toContain('id="marker-cap0-cvd-protanopia-1"');
+    // The finding is still shown in its section, just without a marker.
+    expect(sectionOf(html, "cap0-cvd-protanopia")).toContain("render:cvd-link-distinction");
+  });
+
+  it("renders capture sections for a result with no page screenshot at all", () => {
+    const html = renderHtmlReport(
+      resultWithCaptures({ screenshot: undefined, screenshotMeta: undefined })
+    );
+
+    expect(html.match(/class="capture"/g)).toHaveLength(2);
+    // Ungrouped main list, and the rendering findings are not repeated there.
+    expect(html).toContain("All issues");
+    expect(mainOf(html)).not.toContain("render:cvd-link-distinction");
+  });
+
+  it("is deterministic with captures", () => {
+    const result = resultWithCaptures();
+    expect(renderHtmlReport(result)).toBe(renderHtmlReport(result));
+  });
+});

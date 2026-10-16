@@ -20,6 +20,7 @@ import type { BrowserPage } from "./browser.js";
 import { dismissCookieBanner } from "./cookie-banner.js";
 import { renderHtmlReport } from "./html-report/index.js";
 import { loadLazyContent } from "./lazy-content.js";
+import { SIMULATED_DEFICIENCIES, simulateDeficiency } from "./rendering/color.js";
 import { MAX_ANIMATIONS, MAX_PAINTED } from "./rendering/measure.js";
 import { settleCondition } from "./rendering/page.js";
 import { extractHtmlContext } from "./semantic/context.js";
@@ -2756,6 +2757,173 @@ describe("rendering checks (real audit, real browser)", () => {
   <h1>Colour patch</h1>
 </body></html>`;
 
+  /**
+   * A column of solid patches, for measuring the colour simulation against
+   * the browser's own vision-deficiency emulation. Each patch is 120 by 120
+   * CSS px and is sampled at its centre, far from any JPEG block edge.
+   */
+  const SIMULATION_PATCHES: [string, [number, number, number]][] = [
+    ["red", [255, 0, 0]],
+    ["green", [0, 255, 0]],
+    ["blue", [0, 0, 255]],
+    ["orange", [230, 120, 20]],
+    ["teal", [0, 140, 140]],
+    ["link", [26, 85, 177]],
+  ];
+
+  const PATCHES_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Patches fixture</title>
+<style>body { margin: 0 } div { width: 240px; height: 120px }</style></head>
+<body>
+${SIMULATION_PATCHES.map(
+  ([name, [r, g, b]]) => `  <div id="${name}" style="background: rgb(${r}, ${g}, ${b})"></div>`
+).join("\n")}
+  <h1>Colour patches</h1>
+</body></html>`;
+
+  /**
+   * The two CVD checks, with the cases they must not report next to the ones
+   * they must.
+   *
+   * The colours are not decorative. The band where a link passes the
+   * link-in-text-block ratio of 3:1 and fails it under a deficiency is
+   * narrow, because the Machado matrices mostly preserve luminance: the
+   * green link in navy text is 3.34:1 normally, 2.84:1 under protanopia and
+   * 2.83:1 under deuteranopia, and the brick-red link in near-black text is
+   * 3.26:1 normally and 2.56:1 under protanopia — while under deuteranopia
+   * red gets *brighter*, so that one keeps its distance there. No red link
+   * collapses under both, which is a property of the model, not of the
+   * fixture.
+   *
+   * The link cases cover what each side of the comparison is: `#modern`
+   * authors the same two colours in `color(srgb …)`, which Chromium
+   * serialises in that space, so it only has a finding when the measurement
+   * normalises colours in the page; `#span-neighbour` has navy spans around
+   * it in a near-black block and `#nested-neighbour` near-black spans in a
+   * navy block, so reading the block instead of the text beside the link
+   * would miss the first and invent the second; `#mixed` has two colours in
+   * its own text and `#between` disagreeing text on its two sides, and
+   * neither can be judged. `#hidden-neighbour`, `#transparent-neighbour`
+   * and `#sr-only-neighbour` have near-black text nobody sees between the
+   * navy copy and the link, and `#hidden-inside` carries all three kinds
+   * inside itself: text a reader is not shown is no neighbour and no second
+   * style of the link's own text, so all four are the same finding
+   * `#colour-only` is. Reading the hidden runs instead would compare the
+   * link with near-black — 4.5:1 and no collapse — and judge the link with
+   * the hidden words in it as text in two styles.
+   *
+   * The state pairs carry the same visible text and the same icon on both
+   * sides, which is what leaves colour as the only cue: two labels that
+   * merely read differently are a difference the check cannot tell from a
+   * state marker, and it leaves those pairs alone. `#dot-one` is the
+   * wrapper case — its comparison is the button in the next `<li>`, like
+   * `<li><a aria-current="page">` — and the `select` is the only one of its
+   * kind on the page, so nothing says what a valid one looks like.
+   * `#empty-one` and `#collapse-one` are the two sides of a foreground that
+   * paints nothing: the first pair paints the same grey and differs only in
+   * a `color` an empty button shows nowhere, which is no cue at all, and the
+   * second carries its state in a background that collapses while that
+   * unused `color` survives, which must not stand in for the cue that is
+   * gone.
+   */
+  /** The one icon both sides of a state pair carry, byte for byte. */
+  const CVD_ICON =
+    '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" fill="currentColor" /></svg>';
+
+  const CVD_FIXTURE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>CVD fixture</title>
+<style>
+  body { background: #fff; color: #1a1a1a; font-family: system-ui, sans-serif; margin: 0; padding: 24px }
+  .navy { color: #000088 }
+  .ink { color: #1a1a1a }
+  a { text-decoration: none }
+  #colour-only, #span-neighbour, #nested-neighbour, #mixed, #between { color: #008800 }
+  #hidden-neighbour, #transparent-neighbour, #sr-only-neighbour, #hidden-inside { color: #008800 }
+  .gone { display: none }
+  .transparent { opacity: 0 }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap }
+  #underlined { color: #008800; text-decoration: underline }
+  #baseline-fail { color: #336699 }
+  #brick { color: #b94600 }
+  .tab { padding: 4px 8px; border: 1px solid #ccc; background: #eee; color: #333; min-width: 44px; min-height: 44px }
+  .tab[aria-selected="true"] { background: #cfe8cf }
+  .marked[aria-selected="true"]::after { content: " \\2713" }
+  .dots { list-style: none; display: flex; gap: 8px; margin: 0; padding: 0 }
+  .dot { width: 44px; height: 44px; border: 0; border-radius: 50%; background: #747474 }
+  .dot[aria-current="true"] { background: #008800 }
+  /* Two empty dots that paint the same and differ in a colour nobody sees. */
+  .plain-dot { width: 44px; height: 44px; border: 0; border-radius: 50%; background: #747474; color: #008800 }
+  .plain-dot[aria-current="true"] { color: #bb0000 }
+  /* The background carries the state; the unused colour survives the deficiency. */
+  .collapse-dot { width: 44px; height: 44px; border: 0; border-radius: 50%; background: #747474; color: #000088 }
+  .collapse-dot[aria-current="true"] { background: #008800; color: #bb0000 }
+  /* Icon dots: the svg root passes currentColor down, but its only shape
+     paints black, so the differing colour is painted nowhere. */
+  .icon-dot { width: 44px; height: 44px; border: 0; border-radius: 50%; background: #747474; color: #008800 }
+  .icon-dot[aria-current="true"] { color: #bb0000 }
+  /* A framed paragraph: its border and shadow belong to both sides alike,
+     while the link carries a cue of its own. */
+  .framed { border: 1px solid #000088; padding: 4px; box-shadow: 0 0 4px #888888 }
+  #border-cue { color: #008800; border-bottom: 1px solid #008800 }
+  #shadow-cue { color: #008800; box-shadow: inset 0 -1px 0 #008800 }
+</style></head>
+<body>
+  <main>
+    <h1>Links and states</h1>
+    <p class="navy">Some copy with <a id="colour-only" href="https://example.com/1">a green link with no underline</a> inside a block of navy text that goes on for a while.</p>
+    <p class="navy">Some copy with <a id="underlined" href="https://example.com/2">an underlined green link</a> inside a block of navy text that goes on for a while.</p>
+    <p class="navy">Some copy with <a id="baseline-fail" href="https://example.com/3">a link that already fails the ratio</a> inside a block of navy text that goes on for a while.</p>
+    <p>Some copy with <a id="brick" href="https://example.com/4">a brick-red link with no underline</a> inside a block of near-black text that goes on for a while.</p>
+    <p id="modern-block" style="color: color(srgb 0 0 0.533333)">Some copy with <a id="modern" href="https://example.com/5" style="color: color(srgb 0 0.533333 0)">a green link written in a modern colour space</a> inside a block of navy text that goes on for a while.</p>
+    <p class="ink"><span class="navy">Some navy copy with </span><a id="span-neighbour" href="https://example.com/6">a green link with no underline</a><span class="navy"> around it, in a block whose own colour is near-black.</span></p>
+    <p class="navy"><span class="ink">Some near-black copy with </span><a id="nested-neighbour" href="https://example.com/7">a green link with no underline</a><span class="ink"> around it, in a block whose own colour is navy.</span></p>
+    <p class="navy">Some copy with <a id="mixed" href="https://example.com/8">a green link <span class="ink">with a near-black word in it</span></a> inside a block of navy text that goes on for a while.</p>
+    <p class="navy">Some navy copy with <a id="between" href="https://example.com/9">a green link</a><span class="ink"> and near-black copy after it, so the two sides disagree.</span></p>
+    <p class="navy">Some navy copy with <span class="ink gone">near-black copy nobody sees</span><a id="hidden-neighbour" href="https://example.com/10">a green link with no underline</a><span class="ink gone">more near-black copy nobody sees</span> and navy copy after it.</p>
+    <p class="navy">Some navy copy with <span class="ink transparent">near-black copy nobody sees</span><a id="transparent-neighbour" href="https://example.com/11">a green link with no underline</a><span class="ink transparent">more near-black copy nobody sees</span> and navy copy after it.</p>
+    <p class="navy">Some navy copy with <span class="ink sr-only">near-black copy nobody sees</span><a id="sr-only-neighbour" href="https://example.com/12">a green link with no underline</a><span class="ink sr-only"><span>more near-black copy nobody sees</span></span> and navy copy after it.</p>
+    <p class="navy">Some copy with <a id="hidden-inside" href="https://example.com/13">a green link <span class="ink gone">with a word nobody sees</span><span class="ink transparent">and a transparent one</span><span class="ink sr-only">and one only a screen reader reads</span></a> inside a block of navy text that goes on for a while.</p>
+    <div role="tablist" aria-label="Colour only">
+      <button class="tab" role="tab" aria-selected="true" id="tab-one" aria-label="Chart">${CVD_ICON}</button>
+      <button class="tab" role="tab" aria-selected="false" id="tab-two" aria-label="Table">${CVD_ICON}</button>
+    </div>
+    <div role="tablist" aria-label="With a marker">
+      <button class="tab marked" role="tab" aria-selected="true" id="tab-marked" aria-label="Map">${CVD_ICON}</button>
+      <button class="tab marked" role="tab" aria-selected="false" id="tab-plain" aria-label="List">${CVD_ICON}</button>
+    </div>
+    <nav aria-label="Slides">
+      <ul class="dots">
+        <li><button type="button" class="dot" id="dot-one" aria-current="true" aria-label="Slide 1"></button></li>
+        <li><button type="button" class="dot" id="dot-two" aria-label="Slide 2"></button></li>
+      </ul>
+    </nav>
+    <nav aria-label="Pages">
+      <ul class="dots">
+        <li><button type="button" class="plain-dot" id="empty-one" aria-current="true" aria-label="Page 1"></button></li>
+        <li><button type="button" class="plain-dot" id="empty-two" aria-label="Page 2"></button></li>
+      </ul>
+    </nav>
+    <nav aria-label="Steps">
+      <ul class="dots">
+        <li><button type="button" class="collapse-dot" id="collapse-one" aria-current="true" aria-label="Step 1"></button></li>
+        <li><button type="button" class="collapse-dot" id="collapse-two" aria-label="Step 2"></button></li>
+      </ul>
+    </nav>
+    <nav aria-label="Icons">
+      <ul class="dots">
+        <li><button type="button" class="icon-dot" id="icon-dot-one" aria-current="true" aria-label="Icon 1"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="2" width="12" height="12" fill="black" /></svg></button></li>
+        <li><button type="button" class="icon-dot" id="icon-dot-two" aria-label="Icon 2"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="2" width="12" height="12" fill="black" /></svg></button></li>
+      </ul>
+    </nav>
+    <p class="navy framed">Some copy with <a id="border-cue" href="https://example.com/14">a green link with a border underline</a> inside a framed block of navy text that goes on for a while.</p>
+    <p class="navy framed">Some copy with <a id="shadow-cue" href="https://example.com/15">a green link with a shadow underline</a> inside a framed block of navy text that goes on for a while.</p>
+    <form>
+      <label for="lonely">Pick a region</label>
+      <select id="lonely" aria-invalid="true"><option>Styria</option></select>
+    </form>
+  </main>
+</body></html>`;
+
   /** The same menu, with no disclosure control anywhere on the page. */
   const HIDDEN_NAV_FIXTURE = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8" /><title>Hidden nav fixture</title>
@@ -3161,6 +3329,8 @@ ${Array.from({ length: MAX_ANIMATIONS + 20 }, () => '      <span class="dot"></s
     writeFileSync(join(fixtureDir, "hidden-clipped.html"), HIDDEN_CLIPPED_FIXTURE);
     writeFileSync(join(fixtureDir, "spacing.html"), SPACING_FIXTURE);
     writeFileSync(join(fixtureDir, "patch.html"), PATCH_FIXTURE);
+    writeFileSync(join(fixtureDir, "patches.html"), PATCHES_FIXTURE);
+    writeFileSync(join(fixtureDir, "cvd.html"), CVD_FIXTURE);
     writeFileSync(join(fixtureDir, "hidden-nav.html"), HIDDEN_NAV_FIXTURE);
     writeFileSync(join(fixtureDir, "disclosure.html"), DISCLOSURE_FIXTURE);
     writeFileSync(join(fixtureDir, "target.html"), TARGET_FIXTURE);
@@ -3638,6 +3808,332 @@ ${Array.from({ length: MAX_ANIMATIONS + 20 }, () => '      <span class="dot"></s
     }
   }, 120_000);
 
+  /**
+   * The colour simulation the CVD checks reason with, against the browser
+   * that renders the capture. The checks read computed colours and apply the
+   * Machado matrices themselves (contract amendment of 2026-10-14), so the
+   * two have to agree — if they did not, a check would judge colours nobody
+   * is shown.
+   *
+   * Measured 2026-10-15 and 2026-10-16: every channel of every patch within
+   * 2 of 255 under all four simulated deficiencies, with the JPEG capture
+   * its own small source of error (the pure implementation matches a PNG
+   * capture exactly, or by one on four of 28 channels).
+   */
+  it("simulates the colours Chromium's own emulation renders", async () => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+    const probe = await browser.newPage();
+
+    /** The colour of one pixel of a JPEG, decoded in the browser itself. */
+    const colourAt = (image: Uint8Array, x: number, y: number) =>
+      probe.evaluate(
+        async (input: { data: string; x: number; y: number }) => {
+          const binary = atob(input.data);
+          const bytes = new Uint8Array(binary.length);
+          for (let index = 0; index < binary.length; index++) {
+            bytes[index] = binary.charCodeAt(index);
+          }
+          const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+          const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+          const context = canvas.getContext("2d") as OffscreenCanvasRenderingContext2D;
+          context.drawImage(bitmap, 0, 0);
+          const [r, g, b] = context.getImageData(input.x, input.y, 1, 1).data;
+          return { r, g, b };
+        },
+        { data: Buffer.from(image).toString("base64"), x, y }
+      );
+
+    try {
+      await page.goto(url("patches.html"), { waitUntil: "networkidle2" });
+
+      const result = await audit(page, {
+        rendering: {
+          conditions: ["cvd:protanopia", "cvd:deuteranopia", "cvd:tritanopia", "cvd:achromatopsia"],
+        },
+      });
+
+      expect(result.renderingMeta?.conditionsRun).toEqual([
+        "cvd:protanopia",
+        "cvd:deuteranopia",
+        "cvd:tritanopia",
+        "cvd:achromatopsia",
+      ]);
+
+      let worst = 0;
+      for (const deficiency of SIMULATED_DEFICIENCIES) {
+        const capture = result.renderingCaptures?.find(
+          (entry) => entry.condition === `cvd:${deficiency}`
+        );
+        if (!capture) throw new Error(`the ${deficiency} condition needs its capture`);
+
+        for (const [index, [name, [r, g, b]]] of SIMULATION_PATCHES.entries()) {
+          const rendered = await colourAt(capture.screenshot, 120, index * 120 + 60);
+          const expected = simulateDeficiency({ r, g, b }, deficiency);
+          const delta = Math.max(
+            Math.abs(rendered.r - expected.r),
+            Math.abs(rendered.g - expected.g),
+            Math.abs(rendered.b - expected.b)
+          );
+          worst = Math.max(worst, delta);
+          if (delta > 4) {
+            throw new Error(
+              `${deficiency} ${name}: the browser rendered rgb(${rendered.r}, ${rendered.g}, ${rendered.b}), the simulation says rgb(${expected.r}, ${expected.g}, ${expected.b})`
+            );
+          }
+        }
+      }
+
+      // Not only "no patch is far off": the agreement is pixel-level.
+      expect(worst).toBeLessThanOrEqual(4);
+    } finally {
+      await probe.close();
+      await page.close();
+    }
+  }, 120_000);
+
+  it("reports a colour-only link whose distinction the deficiency takes", async () => {
+    const result = await audit(url("cvd.html"), {
+      rendering: {
+        conditions: ["cvd:protanopia", "cvd:deuteranopia", "cvd:achromatopsia"],
+        checks: ["cvd-link-distinction"],
+      },
+    });
+
+    const findings = renderIssues(result, "cvd-link-distinction");
+    expect(
+      findings.map((issue) => `${issue.rendering?.condition} ${issue.selector}`).sort()
+    ).toEqual([
+      "cvd:deuteranopia #colour-only",
+      "cvd:deuteranopia #hidden-inside",
+      "cvd:deuteranopia #hidden-neighbour",
+      "cvd:deuteranopia #modern",
+      "cvd:deuteranopia #span-neighbour",
+      "cvd:deuteranopia #sr-only-neighbour",
+      "cvd:deuteranopia #transparent-neighbour",
+      "cvd:protanopia #brick",
+      "cvd:protanopia #colour-only",
+      "cvd:protanopia #hidden-inside",
+      "cvd:protanopia #hidden-neighbour",
+      "cvd:protanopia #modern",
+      "cvd:protanopia #span-neighbour",
+      "cvd:protanopia #sr-only-neighbour",
+      "cvd:protanopia #transparent-neighbour",
+    ]);
+
+    const [first] = findings;
+    expect(first.id).toBe("render:cvd-link-distinction");
+    expect(first.impact).toBe("moderate");
+    expect(first.helpUrl).toContain("use-of-color");
+    expect(Number(first.rendering?.evidence.contrast)).toBeGreaterThanOrEqual(3);
+    expect(Number(first.rendering?.evidence.simulatedContrast)).toBeLessThan(3);
+    // Drawn on its own condition's capture.
+    expect(first.annotation?.state).toBe("resolved");
+    expect(first.annotation?.mark).toBe(1);
+
+    // The underlined link is distinguished without colour, under every
+    // deficiency; the link that already fails the ratio is axe's finding on
+    // the page as it is normally rendered, and the engine pass reports it.
+    expect(findings.some((issue) => issue.selector === "#underlined")).toBe(false);
+    expect(findings.some((issue) => issue.selector === "#baseline-fail")).toBe(false);
+    expect(
+      result.issues.some(
+        (issue) => issue.id === "link-in-text-block" && issue.selector?.includes("baseline-fail")
+      )
+    ).toBe(true);
+
+    // The page authors its colours in `color(srgb …)`, which Chromium
+    // serialises in that space: the measurement normalises it in the page,
+    // and the finding is the same one its hex counterpart gets. Without the
+    // normalisation the check parses nothing and reports nothing.
+    const modern = findings.find((issue) => issue.selector === "#modern");
+    expect(modern?.rendering?.evidence.linkColor).toBe("rgb(0, 136, 0)");
+    expect(modern?.rendering?.evidence.textColor).toBe("rgb(0, 0, 136)");
+    const hex = findings.find((issue) => issue.selector === "#colour-only");
+    expect(modern?.rendering?.evidence.contrast).toBe(hex?.rendering?.evidence.contrast);
+    expect(modern?.rendering?.evidence.simulatedContrast).toBe(
+      hex?.rendering?.evidence.simulatedContrast
+    );
+  }, 120_000);
+
+  /**
+   * The comparison is the text that actually runs alongside the link, not
+   * the block's own computed colour: a block whose text sits in spans of
+   * its own paints none of it, and reading the block would judge a colour
+   * pair nobody is shown.
+   */
+  it("judges a link against the text beside it, not against its block's own colour", async () => {
+    const result = await audit(url("cvd.html"), {
+      rendering: {
+        conditions: ["cvd:protanopia", "cvd:deuteranopia", "cvd:achromatopsia"],
+        checks: ["cvd-link-distinction"],
+      },
+    });
+
+    const findings = renderIssues(result, "cvd-link-distinction");
+    const selectors = findings.map((issue) => issue.selector);
+
+    // Navy spans around a green link in a near-black block: the surrounding
+    // text is navy, the collapse is real, and the block's own colour would
+    // have hidden it.
+    const span = findings.find((issue) => issue.selector === "#span-neighbour");
+    expect(span?.rendering?.evidence.textColor).toBe("rgb(0, 0, 136)");
+    expect(Number(span?.rendering?.evidence.contrast)).toBeGreaterThanOrEqual(3);
+    expect(Number(span?.rendering?.evidence.simulatedContrast)).toBeLessThan(3);
+
+    // Near-black spans around a green link in a navy block: 4.5:1 against
+    // the text beside it and no collapse. The block's navy would have made
+    // this a finding that is not there.
+    expect(selectors).not.toContain("#nested-neighbour");
+    // The link's own text is in two colours, so there is no one colour to
+    // judge; and one with navy before it and near-black after it has no
+    // surrounding colour the two sides agree on.
+    expect(selectors).not.toContain("#mixed");
+    expect(selectors).not.toContain("#between");
+  }, 120_000);
+
+  /**
+   * Text a reader is not shown carries no colour anything is compared with.
+   * A `display: none`, transparent or screen-reader-only span between the
+   * copy and the link would otherwise be the surrounding text, and one
+   * inside the link would make its own text look like two styles — either
+   * way the verdict is about a colour pair nobody is shown.
+   */
+  it("skips hidden, transparent and screen-reader-only text beside and inside a link", async () => {
+    const result = await audit(url("cvd.html"), {
+      rendering: {
+        conditions: ["cvd:protanopia", "cvd:deuteranopia", "cvd:achromatopsia"],
+        checks: ["cvd-link-distinction"],
+      },
+    });
+
+    const findings = renderIssues(result, "cvd-link-distinction");
+    const reference = findings.find(
+      (issue) =>
+        issue.selector === "#colour-only" && issue.rendering?.condition === "cvd:protanopia"
+    );
+
+    for (const selector of [
+      "#hidden-neighbour",
+      "#transparent-neighbour",
+      "#sr-only-neighbour",
+      "#hidden-inside",
+    ]) {
+      const finding = findings.find(
+        (issue) => issue.selector === selector && issue.rendering?.condition === "cvd:protanopia"
+      );
+      // The same verdict the link without the hidden text gets: the navy
+      // copy beside it is the surrounding colour, not the near-black words
+      // nobody sees.
+      expect(finding?.rendering?.evidence.textColor).toBe("rgb(0, 0, 136)");
+      expect(finding?.rendering?.evidence.linkColor).toBe("rgb(0, 136, 0)");
+      expect(finding?.rendering?.evidence.contrast).toBe(reference?.rendering?.evidence.contrast);
+      expect(finding?.rendering?.evidence.simulatedContrast).toBe(
+        reference?.rendering?.evidence.simulatedContrast
+      );
+    }
+
+    // The hidden words inside the link are not in the text the finding
+    // quotes either.
+    const inside = findings.find((issue) => issue.selector === "#hidden-inside");
+    expect(inside?.failureSummary).toContain('"a green link"');
+  }, 120_000);
+
+  it("reports a state only colour conveys, and not one with a marker", async () => {
+    const result = await audit(url("cvd.html"), {
+      rendering: {
+        conditions: ["cvd:protanopia", "cvd:deuteranopia", "cvd:achromatopsia"],
+        checks: ["cvd-state-by-color"],
+      },
+    });
+
+    const findings = renderIssues(result, "cvd-state-by-color");
+    expect(
+      findings.map((issue) => `${issue.rendering?.condition} ${issue.selector}`).sort()
+    ).toEqual([
+      "cvd:achromatopsia #collapse-one",
+      "cvd:achromatopsia #dot-one",
+      "cvd:achromatopsia #tab-one",
+      "cvd:deuteranopia #tab-one",
+    ]);
+
+    const tab = findings.find((issue) => issue.selector === "#tab-one");
+    expect(tab?.id).toBe("render:cvd-state-by-color");
+    expect(tab?.impact).toBe("moderate");
+    expect(tab?.rendering?.evidence.state).toBe("aria-selected");
+    expect(tab?.rendering?.evidence.property).toBe("background colour");
+    expect(tab?.rendering?.evidence.comparedWith).toBe("#tab-two");
+    expect(Number(tab?.rendering?.evidence.simulatedDistance)).toBeLessThan(10);
+    expect(tab?.annotation?.state).toBe("resolved");
+
+    // The tab pair with a pseudo-element tick has a cue that is not colour.
+    expect(findings.some((issue) => issue.selector === "#tab-marked")).toBe(false);
+
+    // The carousel dot has no sibling of its own: its comparison is the
+    // button in the next `<li>`, found a wrapper level up — the shape
+    // `<li><a aria-current="page">` has too.
+    const dot = findings.find((issue) => issue.selector === "#dot-one");
+    expect(dot?.rendering?.evidence.state).toBe("aria-current");
+    expect(dot?.rendering?.evidence.comparedWith).toBe("#dot-two");
+    expect(dot?.rendering?.evidence.property).toBe("background colour");
+
+    // The invalid `select` is the only one of its kind on the page, so
+    // nothing says what a valid one looks like and nothing is reported.
+    expect(findings.some((issue) => issue.selector === "#lonely")).toBe(false);
+  }, 120_000);
+
+  /**
+   * A colour is a cue only where it paints something. Two empty dots whose
+   * `color` differs look identical, and an unused `color` that survives the
+   * deficiency says nothing about the background cue that is gone.
+   */
+  it("compares a state's foreground only where it paints visible text or a graphic", async () => {
+    const result = await audit(url("cvd.html"), {
+      rendering: {
+        conditions: ["cvd:protanopia", "cvd:deuteranopia", "cvd:achromatopsia"],
+        checks: ["cvd-state-by-color"],
+      },
+    });
+
+    const findings = renderIssues(result, "cvd-state-by-color");
+
+    // Identical paint, and a `color` an empty button shows nowhere: nothing
+    // sets the state apart, so there is no colour that collapsed.
+    expect(findings.some((issue) => issue.selector === "#empty-one")).toBe(false);
+
+    // The background carries the state and is gone under achromatopsia; the
+    // unused `color` difference survives it and must not stand in for the
+    // cue that is gone.
+    const collapse = findings.filter((issue) => issue.selector === "#collapse-one");
+    expect(collapse.map((issue) => issue.rendering?.condition)).toEqual(["cvd:achromatopsia"]);
+    expect(collapse[0]?.rendering?.evidence.property).toBe("background colour");
+    expect(collapse[0]?.rendering?.evidence.stateColor).toBe("rgb(0, 136, 0)");
+    expect(collapse[0]?.rendering?.evidence.siblingColor).toBe("rgb(116, 116, 116)");
+    expect(collapse[0]?.rendering?.evidence.comparedWith).toBe("#collapse-two");
+  }, 120_000);
+
+  it("ignores an svg root's unused fill and a framed block's own border and shadow", async () => {
+    const result = await audit(url("cvd.html"), {
+      rendering: {
+        conditions: ["cvd:protanopia", "cvd:deuteranopia", "cvd:achromatopsia"],
+        checks: ["cvd-state-by-color", "cvd-link-distinction"],
+      },
+    });
+
+    expect(result.renderingMeta?.conditionsSkipped).toEqual([]);
+    expect(result.renderingMeta?.checksRun).toEqual(
+      expect.arrayContaining(["cvd-state-by-color", "cvd-link-distinction"])
+    );
+    // The root's currentColor fill reaches no shape that paints with it.
+    expect(
+      renderIssues(result, "cvd-state-by-color").some((issue) => issue.selector === "#icon-dot-one")
+    ).toBe(false);
+    // The frame is on both sides; the link's own border or shadow sets it apart.
+    const links = renderIssues(result, "cvd-link-distinction").map((issue) => issue.selector);
+    expect(links).not.toContain("#border-cue");
+    expect(links).not.toContain("#shadow-cue");
+  }, 120_000);
+
   it("applies and removes the vision-deficiency emulation, seen in the pixels", async () => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 720 });
@@ -4086,4 +4582,352 @@ ${Array.from({ length: MAX_ANIMATIONS + 20 }, () => '      <span class="dot"></s
       await real.close();
     }
   }, 120_000);
+});
+
+/**
+ * The capture sections of the HTML report, end to end: a real audit with the
+ * rendering pass, a real report, loaded in a real browser.
+ *
+ * The sections are the only place a rendering finding's marker can be drawn,
+ * because its annotation is in its own condition's capture space — so this
+ * measures those markers against those rects, the way the main view's
+ * geometry test does, and runs axe over the whole document (with
+ * `setBypassCSP(true)`, since the report's own policy blocks the injection).
+ */
+describe("renderHtmlReport capture sections (real audit, real browser)", () => {
+  const FIXTURE = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Capture sections fixture</title>
+  <style>
+    body { margin: 0; font: 16px/1.5 system-ui, sans-serif; color: #1a1a1a; padding: 24px }
+    a { text-decoration: none }
+    .navy { color: #000088 }
+    #colour-only { color: #008800 }
+    #wide { width: 400px; background: #cfe }
+    /* Long enough that a 320 px capture of it cannot fit a printed page. */
+    #tall { height: 3000px; background: #f4f6f8 }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Capture sections fixture</h1>
+    <p class="navy">Some copy with <a id="colour-only" href="https://example.com/1">a green link with no underline</a> inside a block of navy text that goes on for a while.</p>
+    <div id="wide">A fixed 400 px wide block of text.</div>
+    <div id="tall">A tall block, so the capture is taller than one printed page.</div>
+  </main>
+</body></html>`;
+
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>>;
+  let fixtureDir: string;
+  let auditResult: Awaited<ReturnType<typeof audit>>;
+  let reportPage: Awaited<ReturnType<typeof browser.newPage>>;
+
+  beforeAll(async () => {
+    mock.module("./engines/axe.js", () => realAxe);
+
+    fixtureDir = mkdtempSync(join(tmpdir(), "barrieretest-capture-sections-"));
+    const fixturePath = join(fixtureDir, "fixture.html");
+    writeFileSync(fixturePath, FIXTURE);
+
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    const fixturePage = await browser.newPage();
+    await fixturePage.setViewport({ width: 1280, height: 720 });
+    await fixturePage.goto(`file://${fixturePath}`);
+
+    auditResult = await audit(fixturePage, {
+      rendering: { conditions: ["viewport:320", "cvd:protanopia", "media:dark"] },
+    });
+
+    reportPage = await browser.newPage();
+    await reportPage.setViewport({ width: 1440, height: 900 });
+    await reportPage.setBypassCSP(true);
+    await reportPage.setContent(renderHtmlReport(auditResult), { waitUntil: "load" });
+  }, 180_000);
+
+  afterAll(async () => {
+    try {
+      await browser?.close();
+      if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
+    } finally {
+      // A browser that refuses to close must not leave the real module
+      // mocked in for whatever runs next in this process.
+      mock.module("./engines/axe.js", () => axeStubModule);
+    }
+  });
+
+  it("gives every capture its own section, in capture order", async () => {
+    expect(auditResult.renderingCaptures?.map((capture) => capture.condition)).toEqual([
+      "viewport:320",
+      "media:dark",
+      "cvd:protanopia",
+    ]);
+
+    const sections = await reportPage.evaluate(() =>
+      [...document.querySelectorAll("section.capture")].map((element) => ({
+        title: element.querySelector("h2")?.textContent ?? "",
+        note: element.querySelector(".capture__note")?.textContent ?? "",
+        images: element.querySelectorAll(".shot__frame img").length,
+      }))
+    );
+
+    expect(sections.map((section) => section.title)).toEqual([
+      "At 320 px width",
+      "Dark mode",
+      "Protanopia (red-green colour blindness)",
+    ]);
+    expect(sections.every((section) => section.images === 1)).toBe(true);
+    expect(sections[2].note).toContain("red cone cells");
+  });
+
+  /** Every section's image box and marker boxes, in document coordinates. */
+  const measureSections = () =>
+    reportPage.evaluate(() =>
+      [...document.querySelectorAll("section.capture")].map((section) => {
+        const image = section.querySelector(".shot__frame img") as HTMLImageElement;
+        const box = image.getBoundingClientRect();
+        return {
+          title: section.querySelector("h2")?.textContent ?? "",
+          // `cap<index>-<slug>-title`: the capture this section shows.
+          captureIndex: Number(
+            (section.getAttribute("aria-labelledby") ?? "").replace(/^cap/, "").split("-")[0]
+          ),
+          image: {
+            left: box.left + window.scrollX,
+            top: box.top + window.scrollY,
+            width: box.width,
+            height: box.height,
+          },
+          markers: [...section.querySelectorAll(".marker")].map((element) => {
+            const rect = element.getBoundingClientRect();
+            return {
+              id: element.id,
+              left: rect.left + window.scrollX,
+              top: rect.top + window.scrollY,
+              width: rect.width,
+              height: rect.height,
+            };
+          }),
+        };
+      })
+    );
+
+  /** The marks a condition's findings were annotated with, in mark order. */
+  const expectedMarks = (condition: string): number[] =>
+    [
+      ...new Set(
+        auditResult.issues
+          .filter(
+            (issue) =>
+              issue.rendering?.condition === condition &&
+              typeof issue.annotation?.mark === "number" &&
+              issue.annotation?.rect !== undefined
+          )
+          .map((issue) => issue.annotation?.mark as number)
+      ),
+    ].sort((a, b) => a - b);
+
+  it("draws a marker for every annotated mark of its condition, and no other", async () => {
+    const measured = await measureSections();
+    expect(measured).toHaveLength(auditResult.renderingCaptures?.length ?? 0);
+
+    let drawn = 0;
+    for (const section of measured) {
+      const capture = auditResult.renderingCaptures?.[section.captureIndex];
+      if (!capture) throw new Error(`no capture for ${section.title}`);
+      const marks = section.markers
+        .map((marker) => Number(marker.id.split("-").at(-1)))
+        .sort((a, b) => a - b);
+
+      // Equality, not "the ones that are there are right": a dropped marker
+      // is a finding the report does not show on its capture.
+      expect(marks).toEqual(expectedMarks(capture.condition));
+      drawn += marks.length;
+    }
+
+    // And the sections together carry every annotated rendering finding.
+    expect(drawn).toBe(
+      (auditResult.renderingCaptures ?? []).reduce(
+        (total, capture) => total + expectedMarks(capture.condition).length,
+        0
+      )
+    );
+    expect(drawn).toBeGreaterThan(0);
+  });
+
+  it("places every section marker on its finding's rect within a pixel", async () => {
+    const measured = await measureSections();
+
+    const renderingFindings = auditResult.issues.filter((issue) => issue.rendering);
+    expect(renderingFindings.length).toBeGreaterThan(0);
+    expect(measured.flatMap((section) => section.markers).length).toBeGreaterThan(0);
+
+    for (const section of measured) {
+      for (const marker of section.markers) {
+        // `marker-cap<index>-<slug>-<mark>`: the capture the mark belongs to
+        // and the mark itself.
+        const parts = marker.id.split("-");
+        const mark = Number(parts[parts.length - 1]);
+        const captureIndex = Number(parts[1].replace("cap", ""));
+        const capture = auditResult.renderingCaptures?.[captureIndex];
+        if (!capture) throw new Error(`no capture for ${marker.id}`);
+
+        const issue = renderingFindings.find(
+          (candidate) =>
+            candidate.rendering?.condition === capture.condition &&
+            candidate.annotation?.mark === mark
+        );
+        const rect = issue?.annotation?.rect;
+        if (!rect) throw new Error(`no rect for ${marker.id}`);
+
+        const scale = section.image.width / capture.meta.width;
+        expect(Math.abs(marker.left - section.image.left - rect.x * scale)).toBeLessThanOrEqual(1);
+        expect(Math.abs(marker.top - section.image.top - rect.y * scale)).toBeLessThanOrEqual(1);
+        expect(Math.abs(marker.width - rect.width * scale)).toBeLessThanOrEqual(1);
+        expect(Math.abs(marker.height - rect.height * scale)).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  /**
+   * Print bounds a capture to one page tall, and a 320 px capture of a long
+   * page does not fit: it is clipped. The clipping is on the outer box, so
+   * the box the markers are positioned in percentages of keeps the
+   * capture's full geometry — capping that box instead would pull every
+   * marker up into the visible crop, onto content it has nothing to do with.
+   */
+  it("keeps every marker on its element where print clips a tall capture", async () => {
+    await reportPage.emulateMediaType("print");
+    const measured = await measureSections();
+    const clipped = await reportPage.evaluate(() =>
+      [...document.querySelectorAll("section.capture")].map((section) => {
+        const clip = section.querySelector(".shot__clip") as HTMLElement;
+        const frame = section.querySelector(".shot__frame") as HTMLElement;
+        return {
+          clipHeight: clip.getBoundingClientRect().height,
+          frameHeight: frame.getBoundingClientRect().height,
+          overflow: getComputedStyle(clip).overflowY,
+        };
+      })
+    );
+    await reportPage.emulateMediaType(null);
+
+    let checked = 0;
+    for (const [index, section] of measured.entries()) {
+      const capture = auditResult.renderingCaptures?.[section.captureIndex];
+      if (!capture) throw new Error(`no capture for ${section.title}`);
+      const scale = section.image.width / capture.meta.width;
+
+      // The frame keeps the capture's whole height, clipped or not.
+      expect(Math.abs(section.image.height - capture.meta.height * scale)).toBeLessThanOrEqual(1);
+      expect(clipped[index].overflow).toBe("hidden");
+      expect(clipped[index].clipHeight).toBeLessThanOrEqual(clipped[index].frameHeight + 1);
+
+      for (const marker of section.markers) {
+        const mark = Number(marker.id.split("-").at(-1));
+        const rect = auditResult.issues.find(
+          (issue) =>
+            issue.rendering?.condition === capture.condition && issue.annotation?.mark === mark
+        )?.annotation?.rect;
+        if (!rect) throw new Error(`no rect for ${marker.id}`);
+        expect(Math.abs(marker.left - section.image.left - rect.x * scale)).toBeLessThanOrEqual(1);
+        expect(Math.abs(marker.top - section.image.top - rect.y * scale)).toBeLessThanOrEqual(1);
+        checked += 1;
+      }
+    }
+
+    // At least one capture is actually clipped: the 320 px one of a page
+    // that is far taller than one printed page.
+    expect(clipped.some((entry) => entry.clipHeight < entry.frameHeight - 1)).toBe(true);
+    expect(checked).toBeGreaterThan(0);
+  });
+
+  it("shows each rendering finding in its condition's section and nowhere else", async () => {
+    const placement = await reportPage.evaluate(() => {
+      const main = document.querySelector("main > .columns") as HTMLElement;
+      return {
+        mainText: main.textContent ?? "",
+        sections: [...document.querySelectorAll("section.capture")].map((section) => ({
+          title: section.querySelector("h2")?.textContent ?? "",
+          rules: [...section.querySelectorAll("dd code")].map(
+            (element) => element.textContent ?? ""
+          ),
+          empty: section.querySelector(".empty")?.textContent ?? "",
+        })),
+        summary: document.querySelector(".summary")?.textContent ?? "",
+        ruleTable: [...document.querySelectorAll(".rules__id")].map(
+          (element) => element.textContent ?? ""
+        ),
+      };
+    });
+
+    // The main view has none of them, and does not keep a "not located" group
+    // for them either.
+    expect(placement.mainText).not.toContain("render:");
+    expect(placement.mainText).not.toContain("Not located on the screenshot");
+
+    const reflow = placement.sections.find((section) => section.title === "At 320 px width");
+    const protanopia = placement.sections.find((section) => section.title.startsWith("Protanopia"));
+    const dark = placement.sections.find((section) => section.title === "Dark mode");
+    expect(reflow?.rules).toContain("render:reflow-horizontal-scroll");
+    expect(protanopia?.rules).toContain("render:cvd-link-distinction");
+    // Nothing broke in dark mode on this fixture, and the section says so.
+    expect(dark?.rules).toEqual([]);
+    expect(dark?.empty).toBe("No findings under this condition.");
+
+    // The summary line and the findings-by-rule table still count them.
+    expect(placement.summary).toContain("under rendering conditions");
+    expect(placement.ruleTable).toContain("render:cvd-link-distinction");
+  });
+
+  it("keeps every element id unique across the sections", async () => {
+    const duplicates = await reportPage.evaluate(() => {
+      const counts = new Map<string, number>();
+      for (const element of document.querySelectorAll("[id]")) {
+        counts.set(element.id, (counts.get(element.id) ?? 0) + 1);
+      }
+      return [...counts].filter(([, count]) => count > 1).map(([id]) => id);
+    });
+
+    expect(duplicates).toEqual([]);
+  });
+
+  it("passes its own axe audit with zero violations, with the sections in it", async () => {
+    const axeModule = (await import("axe-core")) as unknown as {
+      source?: string;
+      default?: { source: string };
+    };
+    const axeSource = axeModule.source ?? axeModule.default?.source;
+    if (!axeSource) throw new Error("Unable to load axe-core source.");
+
+    await reportPage.evaluate((source: string) => {
+      const script = document.createElement("script");
+      script.textContent = source;
+      (document.head ?? document.documentElement).appendChild(script);
+    }, axeSource);
+
+    const violations = await reportPage.evaluate(async () => {
+      const runtime = globalThis as unknown as {
+        axe: { run: (context: Document) => Promise<{ violations: { id: string }[] }> };
+      };
+      const results = await runtime.axe.run(document);
+      return results.violations.map((violation) => violation.id);
+    });
+
+    expect(violations).toEqual([]);
+  });
+
+  it("reflows at 320 CSS px without horizontal scrolling", async () => {
+    await reportPage.setViewport({ width: 320, height: 800 });
+    const overflow = await reportPage.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth
+    );
+    await reportPage.setViewport({ width: 1440, height: 900 });
+
+    expect(overflow).toBeLessThanOrEqual(1);
+  });
 });

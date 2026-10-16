@@ -372,6 +372,8 @@ export async function runRenderingChecks(
           run.measurement.paintedTruncated === true ||
           run.measurement.ancestorsTruncated === true ||
           run.measurement.motion?.truncated === true ||
+          run.measurement.linksTruncated === true ||
+          run.measurement.statesTruncated === true ||
           run.measurement.axe?.truncated
         ) {
           markTruncated(condition.id);

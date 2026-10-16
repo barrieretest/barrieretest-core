@@ -267,6 +267,18 @@ a:focus-visible,
 
 /* ---------- screenshot ---------- */
 
+/*
+ * Two boxes on purpose. The outer one carries the width the capture may be
+ * shown at and, in print, the height it may take; the inner one is the
+ * capture itself and is never bounded, because the markers are positioned in
+ * percentages of it. Capping the box the markers are measured against would
+ * move every marker up into the visible crop, onto content it has nothing to
+ * do with.
+ */
+.shot__clip {
+  /* Never enlarged past the CSS size it was captured at. */
+  max-width: var(--shot-max, none);
+}
 .shot__frame {
   position: relative;
   border: 1px solid var(--line);
@@ -321,6 +333,24 @@ a:focus-visible,
 .marker:focus-visible { outline: 3px solid var(--link); outline-offset: 4px; }
 
 .shot__note { margin-top: 12px; font-size: 13px; color: var(--muted); }
+
+/* ---------- capture sections ---------- */
+
+/*
+ * One section per rendering condition, below the main view: the heading and
+ * its sentence, then the capture and that condition's findings in the same
+ * two columns the main view uses.
+ */
+.capture { margin-top: 36px; }
+.capture__title { color: var(--navy); font-size: 20px; }
+.capture__note {
+  margin-top: 6px;
+  max-width: 80ch;
+  font-size: 14px;
+  color: var(--muted);
+  overflow-wrap: break-word;
+}
+.capture .columns { margin-top: 16px; }
 
 /* ---------- findings ---------- */
 
@@ -421,11 +451,36 @@ code, .code, pre {
   .panel { border: 0; padding: 0; }
   .shot { position: static; max-height: none; overflow: visible; margin-bottom: 24px; }
   .findings { margin-top: 24px; }
-  .shot__frame { max-width: max(70mm, min(100%, calc(230mm * var(--shot-ratio, 1)))); }
+  .shot__clip {
+    max-width: min(var(--shot-max, 100%), max(70mm, min(100%, calc(230mm * var(--shot-ratio, 1)))));
+  }
   .marker { box-shadow: inset 0 0 0 2px var(--navy), 0 0 0 2px #fff; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
   .marker__badge, .group__mark, .pill { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
   .issue, .panel__head { break-inside: avoid; }
   h2, h3 { break-after: avoid; }
+  /* Each condition starts a page, with its heading and sentence attached. */
+  .capture { break-before: page; margin-top: 0; }
+  .capture__title, .capture__note { break-after: avoid; }
+  .capture .columns { margin-top: 12px; }
+  .capture .findings { margin-top: 16px; }
+  /*
+   * A capture is one page tall at most. A browser cannot split an image
+   * across printed pages, so without this a tall narrow capture (a phone
+   * viewport of a long page) is moved to a page of its own, leaves the
+   * heading behind on an empty one, and still runs off the bottom. The
+   * width formula already keeps a capture within that height wherever its
+   * aspect ratio allows; one that would need to go below the 70 mm floor to
+   * manage it is shown from the top and cut off, and its findings carry
+   * their evidence either way. The clipping is on the outer box, so the
+   * capture and its markers keep their full geometry inside it and a marker
+   * below the cut is cut off with the part of the page it points at.
+   */
+  .capture .shot__clip {
+    max-width: min(var(--shot-max, 100%), max(70mm, min(100%, calc(215mm * var(--shot-ratio, 1)))));
+    max-height: 215mm;
+    overflow: hidden;
+    break-inside: avoid;
+  }
   a { text-decoration: none; }
 }
 `;

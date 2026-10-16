@@ -21,9 +21,14 @@ import type {
   RenderingAnimation,
   RenderingCollect,
   RenderingElement,
+  RenderingLink,
   RenderingMeasurement,
   RenderingMotion,
   RenderingPaintedElement,
+  RenderingStateName,
+  RenderingStatePair,
+  RenderingStateStyle,
+  RenderingTextStyle,
 } from "./types.js";
 
 /** Upper bound for the measurement round trip, independent of the audit timeout. */
@@ -48,6 +53,12 @@ export const MAX_PAINTED = 400;
 /** Most running animations and self-moving elements the motion group carries. */
 export const MAX_ANIMATIONS = 100;
 
+/** Most links inside text blocks the link group carries. */
+export const MAX_LINKS = 200;
+
+/** Most stateful elements the state group carries. */
+export const MAX_STATES = 50;
+
 /** Everything the in-page function needs; it cannot see Node scope. */
 interface MeasureArgs {
   collect: RenderingCollect;
@@ -62,6 +73,10 @@ interface MeasureArgs {
   maxPainted: number;
   /** Most animations and self-moving elements the motion group carries. */
   maxAnimations: number;
+  /** Most links inside text blocks the link group carries. */
+  maxLinks: number;
+  /** Most stateful elements the state group carries. */
+  maxStates: number;
 }
 
 function isSize(value: unknown): value is { width: number; height: number } {
@@ -136,6 +151,48 @@ function isMotion(value: unknown): value is RenderingMotion {
   );
 }
 
+function isTextStyle(value: unknown): value is RenderingTextStyle {
+  if (!value || typeof value !== "object") return false;
+  const style = value as Record<string, unknown>;
+  return (
+    typeof style.color === "string" &&
+    typeof style.background === "string" &&
+    typeof style.decoration === "string" &&
+    typeof style.border === "boolean" &&
+    typeof style.boxShadow === "boolean" &&
+    Number.isFinite(style.fontWeight)
+  );
+}
+
+function isLink(value: unknown): value is RenderingLink {
+  if (!value || typeof value !== "object") return false;
+  const link = value as Record<string, unknown>;
+  if (!Number.isInteger(link.index) || typeof link.selector !== "string") return false;
+  if (!isSize(link.rect) || !isPoint(link.rect)) return false;
+  return isTextStyle(link.link) && isTextStyle(link.surrounding);
+}
+
+function isStateStyle(value: unknown): value is RenderingStateStyle {
+  if (!value || typeof value !== "object") return false;
+  const style = value as Record<string, unknown>;
+  if (typeof style.selector !== "string") return false;
+  if (!isSize(style.rect) || !isPoint(style.rect)) return false;
+  return (
+    typeof style.color === "string" &&
+    typeof style.background === "string" &&
+    typeof style.borderColor === "string" &&
+    typeof style.text === "string" &&
+    Number.isInteger(style.childElements)
+  );
+}
+
+function isStatePair(value: unknown): value is RenderingStatePair {
+  if (!value || typeof value !== "object") return false;
+  const pair = value as Record<string, unknown>;
+  if (!Number.isInteger(pair.index) || typeof pair.state !== "string") return false;
+  return isStateStyle(pair.element) && isStateStyle(pair.sibling);
+}
+
 /**
  * Validates what came back from the browser. A page object that is not a real
  * browser page (or one that returned something unexpected) must degrade to
@@ -157,6 +214,14 @@ export function isRenderingMeasurement(value: unknown): value is RenderingMeasur
     if (!measurement.painted.every(isPainted)) return false;
   }
   if (measurement.motion !== undefined && !isMotion(measurement.motion)) return false;
+  if (measurement.links !== undefined) {
+    if (!Array.isArray(measurement.links)) return false;
+    if (!measurement.links.every(isLink)) return false;
+  }
+  if (measurement.states !== undefined) {
+    if (!Array.isArray(measurement.states)) return false;
+    if (!measurement.states.every(isStatePair)) return false;
+  }
   return measurement.elements.every(isElement);
 }
 
@@ -183,6 +248,8 @@ export async function measureRendering(
     maxFragments: MAX_FRAGMENTS,
     maxPainted: MAX_PAINTED,
     maxAnimations: MAX_ANIMATIONS,
+    maxLinks: MAX_LINKS,
+    maxStates: MAX_STATES,
   };
 
   const run = () =>
@@ -326,6 +393,138 @@ export async function measureRendering(
             Number.parseFloat(width) > 0 && borderStyle !== "none" && borderStyle !== "hidden"
         );
       };
+
+      /**
+       * Every computed colour the CVD groups report, normalised to
+       * `rgba(r, g, b, a)`: the value is painted on a 1 by 1 canvas and read
+       * back, so the browser itself resolves the syntax. Chromium serialises
+       * a computed colour in the space it was authored in — a page built
+       * with Tailwind 4 has every colour as `oklch()` — and the pure check
+       * must not have to parse colour spaces. A value the canvas cannot
+       * parse stays fully transparent, which the check reads as nothing
+       * painted. Memoised: a page has few distinct colours and many
+       * elements.
+       */
+      let colourContext: CanvasRenderingContext2D | null | undefined;
+      const colourCanvas = (): CanvasRenderingContext2D | null => {
+        // Only a condition whose checks read colours pays for the canvas.
+        if (colourContext !== undefined) return colourContext;
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = 1;
+          canvas.height = 1;
+          colourContext = canvas.getContext("2d", { willReadFrequently: true });
+        } catch {
+          colourContext = null;
+        }
+        return colourContext;
+      };
+      const colourMemo = new Map<string, string>();
+      const normaliseColour = (value: string | null | undefined): string => {
+        const trimmed = (value ?? "").trim();
+        if (trimmed === "") return "";
+        if (/^rgba?\(/i.test(trimmed)) return trimmed;
+        const cached = colourMemo.get(trimmed);
+        if (cached !== undefined) return cached;
+        let normalised = trimmed;
+        const context = colourCanvas();
+        if (context) {
+          try {
+            context.clearRect(0, 0, 1, 1);
+            // An unparsable value leaves the previous one in place, so the
+            // fallback is transparent rather than whatever came before.
+            context.fillStyle = "rgba(0, 0, 0, 0)";
+            context.fillStyle = trimmed;
+            context.fillRect(0, 0, 1, 1);
+            const pixel = context.getImageData(0, 0, 1, 1).data;
+            normalised = `rgba(${pixel[0]}, ${pixel[1]}, ${pixel[2]}, ${(pixel[3] / 255).toFixed(3)})`;
+          } catch {
+            /* Keep the computed value; the check reports nothing for it. */
+          }
+        }
+        colourMemo.set(trimmed, normalised);
+        return normalised;
+      };
+
+      /** A normalised `rgba()` as numbers; null when it is not that form. */
+      const parseColour = (
+        value: string
+      ): { r: number; g: number; b: number; a: number } | null => {
+        const match = /^rgba?\(([^)]*)\)$/i.exec(value);
+        if (!match) return null;
+        const parts = match[1].split(/[,/\s]+/).filter((part) => part !== "");
+        if (parts.length < 3) return null;
+        const numbers = parts.map((part) => Number.parseFloat(part));
+        if (numbers.slice(0, 3).some((number) => !Number.isFinite(number))) return null;
+        const alpha = parts.length > 3 && Number.isFinite(numbers[3]) ? numbers[3] : 1;
+        return { r: numbers[0], g: numbers[1], b: numbers[2], a: alpha };
+      };
+
+      /**
+       * The opaque colour painted behind an element, and whether an image or
+       * a gradient is painted there too. Walks up compositing the background
+       * colours until one is opaque; the canvas under the page is white,
+       * which is what a page without a background colour paints on. A
+       * background image means the colour is not what is on the screen, and
+       * then no colour judgement is possible at all — the case axe reports
+       * as `incomplete`.
+       */
+      const behindMemo = new Map<Element, { background: string; backgroundImage: boolean }>();
+      const backgroundBehind = (
+        element: Element
+      ): { background: string; backgroundImage: boolean } => {
+        const cached = behindMemo.get(element);
+        if (cached) return cached;
+
+        const layers: { r: number; g: number; b: number; a: number }[] = [];
+        let backgroundImage = false;
+        let base = { r: 255, g: 255, b: 255 };
+        let node: Element | null = element;
+        while (node) {
+          const style = getComputedStyle(node);
+          if (style.backgroundImage !== "none") backgroundImage = true;
+          const colour = parseColour(normaliseColour(style.backgroundColor));
+          if (colour && colour.a > 0) {
+            if (colour.a >= 1) {
+              base = { r: colour.r, g: colour.g, b: colour.b };
+              break;
+            }
+            layers.push(colour);
+          }
+          node = node.parentElement;
+        }
+        // From the opaque base upwards, so each layer lands on what is
+        // already there.
+        for (let index = layers.length - 1; index >= 0; index--) {
+          const layer = layers[index];
+          const mix = (over: number, under: number) =>
+            Math.round(over * layer.a + under * (1 - layer.a));
+          base = {
+            r: mix(layer.r, base.r),
+            g: mix(layer.g, base.g),
+            b: mix(layer.b, base.b),
+          };
+        }
+
+        const behind = {
+          background: `rgb(${base.r}, ${base.g}, ${base.b})`,
+          backgroundImage,
+        };
+        behindMemo.set(element, behind);
+        return behind;
+      };
+
+      /** The painted text colour: the fill colour is what a browser draws with. */
+      const textColourOf = (style: CSSStyleDeclaration): string =>
+        normaliseColour(style.getPropertyValue("-webkit-text-fill-color") || style.color);
+
+      const numberOf = (value: string, fallback: number): number => {
+        const number = Number.parseFloat(value);
+        return Number.isFinite(number) ? number : fallback;
+      };
+
+      const decorationOf = (style: CSSStyleDeclaration): string =>
+        style.textDecorationLine || style.textDecoration || "none";
 
       /**
        * Content that keeps rendering when the system forces its own colours:
@@ -1040,6 +1239,571 @@ export async function measureRendering(
         };
       }
 
+      /**
+       * Links inside a text block, with the text that runs alongside them.
+       * The comparison is the link's own text runs against the nearest
+       * rendered text before and after it in the same block, each read with
+       * the style of the element that paints it: the block's own computed
+       * colour is not what a reader sees when the text around the link sits
+       * in a `span` of its own. A link whose two sides disagree with each
+       * other, or whose own text is in several styles, is not judged at all
+       * — the comparison axe's `link-in-text-block` makes needs one colour
+       * on each side.
+       */
+      let links: RenderingLink[] | undefined;
+      let linksTruncated = false;
+      if (input.collect.links) {
+        links = [];
+        const linkSelector = 'a[href], [role="link"]';
+
+        /** The nearest ancestor that is a block container, not an inline run. */
+        const blockOf = (element: Element): Element | null => {
+          let node: Element | null = element.parentElement;
+          while (node) {
+            const display = getComputedStyle(node).display;
+            if (display !== "inline" && display !== "contents") return node;
+            node = node.parentElement;
+          }
+          return null;
+        };
+
+        /**
+         * Whether a box between a text run and the block clips the run out
+         * of sight: the screen-reader-only pattern, a `width: 1px;
+         * height: 1px; overflow: hidden` wrapper whose text keeps a box of
+         * its own — `<span class="sr-only"><em>…</em></span>` measures the
+         * `em` at its full size, and it is on no screen all the same. The
+         * run's own box is covered by `isRenderedBox`; only an ancestor's
+         * clip needs its own look, and only a box that clips counts, since
+         * a `display: contents` wrapper has no box and hides nothing.
+         */
+        const clippedAway = (parent: Element, block: Element): boolean => {
+          let node: Element | null = parent;
+          for (let depth = 0; node && depth < 20; depth++) {
+            const rect = rectOf(node);
+            if (rect.width < input.minVisiblePx || rect.height < input.minVisiblePx) {
+              const style = getComputedStyle(node);
+              const clip = style.clip;
+              const clipPath = style.clipPath;
+              if (
+                clipsOverflow(style.overflowX) ||
+                clipsOverflow(style.overflowY) ||
+                (clip !== "" && clip !== "auto") ||
+                (clipPath !== "" && clipPath !== "none")
+              ) {
+                return true;
+              }
+            }
+            if (node === block) break;
+            node = node.parentElement;
+          }
+          return false;
+        };
+
+        /**
+         * The block's rendered text runs in reading order, each with the
+         * link it belongs to or `null` for the text that surrounds them.
+         * Whitespace between two elements is no run: it carries no colour a
+         * reader compares anything with. Nor is text a reader is not shown
+         * — a `display: none` tooltip, a transparent or off-canvas run, a
+         * screen-reader-only label — which is neither the link's own colour
+         * nor the colour beside it: a hidden span next to a link would
+         * otherwise supply the surrounding colour, and one inside it would
+         * make the link's own text look like two styles. Memoised, so a
+         * paragraph with three links is walked once.
+         */
+        const runsMemo = new Map<Element, { node: Node; inLink: Element | null }[]>();
+        const runsOf = (block: Element): { node: Node; inLink: Element | null }[] => {
+          const cached = runsMemo.get(block);
+          if (cached) return cached;
+          const runs: { node: Node; inLink: Element | null }[] = [];
+          const walk = (node: Node, inLink: Element | null): void => {
+            for (const child of Array.from(node.childNodes)) {
+              if (child.nodeType === 3) {
+                if ((child.nodeValue ?? "").trim() === "") continue;
+                const parent = child.parentElement;
+                if (!parent) continue;
+                if (!isRenderedBox(parent, rectOf(parent), getComputedStyle(parent))) continue;
+                if (clippedAway(parent, block)) continue;
+                runs.push({ node: child, inLink });
+                continue;
+              }
+              if (child.nodeType !== 1) continue;
+              const element = child as Element;
+              if (skipTags.includes(element.tagName.toLowerCase())) continue;
+              walk(element, matchesSelector(element, linkSelector) ? element : inLink);
+            }
+          };
+          walk(block, null);
+          runsMemo.set(block, runs);
+          return runs;
+        };
+
+        /**
+         * One text run as it is painted: the colour and font of the element
+         * the text sits in, and the decoration, border and box-shadow of
+         * any box between that element and the block the two sides share. A
+         * decoration is propagated down from the box that declares it and
+         * cannot be cancelled below, so `<a>` carrying the underline leaves
+         * a `span` inside it with a computed `text-decoration-line` of
+         * `none` — reading the run's own element alone would lose the
+         * underline and report a link that is plainly distinguished.
+         */
+        const runStyleOf = (run: Node, block: Element): RenderingTextStyle | null => {
+          const parent = run.parentElement;
+          if (!parent) return null;
+          const own = getComputedStyle(parent);
+          const behind = backgroundBehind(parent);
+
+          let decoration = "none";
+          let border = false;
+          let boxShadow = false;
+          let node: Element | null = parent;
+          for (let depth = 0; node && depth < 20; depth++) {
+            const style = node === parent ? own : getComputedStyle(node);
+            if (decoration === "none") {
+              const line = decorationOf(style);
+              if (line !== "none" && line !== "") decoration = line;
+            }
+            // A decoration propagates from the block down, so the block's
+            // counts; its border and shadow frame both sides alike and are
+            // not a cue that tells the link apart, so only boxes below it do.
+            if (node !== block) {
+              if (paintsBorder(style)) border = true;
+              if (style.boxShadow !== "none" && style.boxShadow !== "") boxShadow = true;
+            }
+            if (node === block) break;
+            node = node.parentElement;
+          }
+
+          return {
+            color: textColourOf(own),
+            background: behind.background,
+            backgroundImage: behind.backgroundImage,
+            decoration,
+            border,
+            boxShadow,
+            fontWeight: numberOf(own.fontWeight, 400),
+            fontStyle: own.fontStyle,
+          };
+        };
+
+        const sameTextStyle = (a: RenderingTextStyle, b: RenderingTextStyle): boolean =>
+          a.color === b.color &&
+          a.background === b.background &&
+          a.backgroundImage === b.backgroundImage &&
+          a.decoration === b.decoration &&
+          a.border === b.border &&
+          a.boxShadow === b.boxShadow &&
+          a.fontWeight === b.fontWeight &&
+          a.fontStyle === b.fontStyle;
+
+        for (const anchor of Array.from(document.querySelectorAll(linkSelector))) {
+          const style = getComputedStyle(anchor);
+          const rect = rectOf(anchor);
+          if (!isRenderedBox(anchor, rect, style)) continue;
+          const text = (anchor.textContent ?? "").replace(/\s+/g, " ").trim();
+          // A link with no text of its own — an image or an icon link — is
+          // not a link in a text block.
+          if (text === "") continue;
+          const block = blockOf(anchor);
+          if (!block) continue;
+
+          const runs = runsOf(block);
+          const own = runs.filter((run) => run.inLink === anchor);
+          // Nothing of the link's text is rendered: an icon link with a
+          // screen-reader-only label is no link in a text block either.
+          if (own.length === 0) continue;
+          // The text the comparison was made on, which is the text a reader
+          // sees: a hidden label inside the link is not part of it.
+          const ownText = own
+            .map((run) => run.node.nodeValue ?? "")
+            .join("")
+            .replace(/\s+/g, " ")
+            .trim();
+          const first = runs.indexOf(own[0]);
+          const last = runs.indexOf(own[own.length - 1]);
+
+          // The link's own text in more than one style: there is no single
+          // colour to judge, and guessing one is how a finding gets made up.
+          const ownStyle = runStyleOf(own[0].node, block);
+          if (!ownStyle) continue;
+          if (
+            own.some((run) => {
+              const style = runStyleOf(run.node, block);
+              return !style || !sameTextStyle(style, ownStyle);
+            })
+          ) {
+            continue;
+          }
+
+          // The nearest text that is not in a link, before and after.
+          const neighbours: RenderingTextStyle[] = [];
+          for (let index = first - 1; index >= 0; index--) {
+            if (runs[index].inLink !== null) continue;
+            const style = runStyleOf(runs[index].node, block);
+            if (style) neighbours.push(style);
+            break;
+          }
+          for (let index = last + 1; index < runs.length; index++) {
+            if (runs[index].inLink !== null) continue;
+            const style = runStyleOf(runs[index].node, block);
+            if (style) neighbours.push(style);
+            break;
+          }
+          // Nothing surrounds the link: it is the block's only text, so
+          // there is no surrounding colour to be distinguished from.
+          if (neighbours.length === 0) continue;
+          // The two sides do not agree with each other, so neither of them
+          // is "the surrounding text" this link has to stand out from.
+          if (neighbours.length === 2 && !sameTextStyle(neighbours[0], neighbours[1])) continue;
+
+          // Asked after the filters, so it is only truncation when what the
+          // cap drops could have been a finding.
+          if (links.length >= input.maxLinks) {
+            linksTruncated = true;
+            break;
+          }
+
+          links.push({
+            index: identityOf(anchor),
+            selector: cssPath(anchor),
+            html: openingTag(anchor),
+            tag: anchor.tagName.toLowerCase(),
+            rect,
+            anchored: anchoredOf(anchor),
+            text: ownText.slice(0, input.textLimit),
+            blockSelector: cssPath(block),
+            link: ownStyle,
+            surrounding: neighbours[0],
+          });
+        }
+      }
+
+      /**
+       * Stateful elements, each paired with a sibling of the same kind that
+       * does not carry the state. Only that pair can say whether the state is
+       * visible at all and whether anything but colour carries it: an
+       * `aria-current` link on its own tells nobody what the other links
+       * look like.
+       */
+      let states: RenderingStatePair[] | undefined;
+      let statesTruncated = false;
+      if (input.collect.states) {
+        states = [];
+        const stateSelector =
+          '[aria-invalid]:not([aria-invalid="false"]), [aria-selected="true"], [aria-current]:not([aria-current="false"]), [required], [aria-required="true"]';
+
+        /** Whether the element carries this one state. */
+        const carries = (element: Element, state: RenderingStateName): boolean => {
+          if (state === "required") {
+            return (
+              element.hasAttribute("required") ||
+              (element.getAttribute("aria-required") ?? "").trim().toLowerCase() === "true"
+            );
+          }
+          const value = (element.getAttribute(state) ?? "").trim().toLowerCase();
+          if (value === "" || value === "false") return false;
+          // `aria-selected` is a boolean; `aria-current` and `aria-invalid`
+          // carry tokens (`page`, `spelling`) that all mean "set".
+          return state === "aria-selected" ? value === "true" : true;
+        };
+
+        const stateOrder: RenderingStateName[] = [
+          "aria-invalid",
+          "aria-selected",
+          "aria-current",
+          "required",
+        ];
+
+        /** Same element type, same explicit role, same input type. */
+        const sameKind = (a: Element, b: Element): boolean => {
+          if (a.tagName !== b.tagName) return false;
+          const attribute = (element: Element, name: string) =>
+            (element.getAttribute(name) ?? "").trim().toLowerCase();
+          return (
+            attribute(a, "role") === attribute(b, "role") &&
+            attribute(a, "type") === attribute(b, "type")
+          );
+        };
+
+        /**
+         * The nearest rendered element of the same kind without the state.
+         * The state element's own level first, then up to three levels of
+         * wrapper: `<li><a aria-current="page">` next to `<li><a>` is the
+         * common navigation markup, and the `a` has no sibling of its own.
+         */
+        const siblingFor = (element: Element, state: RenderingStateName): Element | null => {
+          const kind = element.tagName.toLowerCase();
+          let root: Element | null = element;
+          for (let depth = 0; depth < 4 && root; depth++) {
+            const parent: Element | null = root.parentElement;
+            if (!parent) return null;
+            for (const sibling of Array.from(parent.children).slice(0, 40)) {
+              if (sibling === root) continue;
+              const pool = sameKind(sibling, element)
+                ? [sibling]
+                : Array.from(sibling.querySelectorAll(kind)).slice(0, 10);
+              for (const candidate of pool) {
+                if (!sameKind(candidate, element)) continue;
+                if (carries(candidate, state)) continue;
+                const style = getComputedStyle(candidate);
+                const rect = rectOf(candidate);
+                if (!isRenderedBox(candidate, rect, style)) continue;
+                return candidate;
+              }
+            }
+            root = parent;
+          }
+          return null;
+        };
+
+        const sides = [
+          ["border-top-width", "border-top-style", "border-top-color"],
+          ["border-right-width", "border-right-style", "border-right-color"],
+          ["border-bottom-width", "border-bottom-style", "border-bottom-color"],
+          ["border-left-width", "border-left-style", "border-left-color"],
+        ];
+
+        /**
+         * The text a reader can see. `textContent` would carry a
+         * `display: none` tooltip and a screen-reader-only marker, and
+         * neither is a visual cue — while a visible "(selected)" is exactly
+         * the cue that makes a state more than its colour.
+         */
+        const visibleText = (element: Element): string => {
+          let text = "";
+          const walk = (node: Element): void => {
+            for (const child of Array.from(node.childNodes)) {
+              if (child.nodeType === 3) {
+                text += child.nodeValue ?? "";
+                continue;
+              }
+              if (child.nodeType !== 1) continue;
+              const candidate = child as Element;
+              if (skipTags.includes(candidate.tagName.toLowerCase())) continue;
+              if (hidesOwnContent(candidate)) continue;
+              walk(candidate);
+            }
+          };
+          walk(element);
+          return text.replace(/\s+/g, " ").trim();
+        };
+
+        /** FNV-1a, base 36: a short, stable identity for one graphic. */
+        const hashOf = (value: string): string => {
+          let hash = 0x811c9dc5;
+          for (let index = 0; index < value.length; index++) {
+            hash ^= value.charCodeAt(index);
+            hash = Math.imul(hash, 0x01000193);
+          }
+          return (hash >>> 0).toString(36);
+        };
+
+        /** Most graphics one side is identified by; past it the pair is not judged. */
+        const maxGraphics = 10;
+
+        /**
+         * *Which* graphics the element holds, not only that it holds some: a
+         * tick and a cross are both an `svg`, and reading them as "a graphic
+         * either way" is what let a pair with two different icons count as
+         * conveyed by colour alone. An image is its source, an SVG a hash of
+         * its markup. A `canvas` paints what no attribute says and a
+         * `picture` is a wrapper around the `img` that is counted anyway, so
+         * the first makes the side unreadable and the second is skipped.
+         */
+        const graphicsOf = (element: Element): { graphics: string; readable: boolean } => {
+          const found = [
+            ...(matchesSelector(element, graphicSelector) ? [element] : []),
+            ...Array.from(element.querySelectorAll(graphicSelector)),
+          ].filter((graphic) => graphic.tagName.toLowerCase() !== "picture");
+          let readable = found.length <= maxGraphics;
+          const tokens = found.slice(0, maxGraphics).map((graphic) => {
+            const tag = graphic.tagName.toLowerCase();
+            if (tag === "svg") return `svg:${hashOf(graphic.outerHTML.slice(0, 5_000))}`;
+            const source =
+              (graphic as Partial<HTMLImageElement>).currentSrc ||
+              graphic.getAttribute("src") ||
+              graphic.getAttribute("data") ||
+              "";
+            if (source === "") {
+              readable = false;
+              return `${tag}:unknown`;
+            }
+            return `${tag}:${hashOf(source)}`;
+          });
+          return { graphics: tokens.join(" "), readable };
+        };
+
+        /**
+         * The colour the element's foreground paints, or `""` when it paints
+         * nothing a reader sees. A `color` on a box with no visible text and
+         * no icon of its own — a carousel dot, a swatch — is a value nobody
+         * is shown: comparing it both invented a cue, where two empty dots
+         * differed only in an unused `color` that collapses, and hid one,
+         * where an unused difference that survives stood in for a background
+         * cue that is gone.
+         *
+         * The colour is read from the element the text sits in rather than
+         * from the state element, since a label in a `span` with a colour of
+         * its own is painted in that colour. A graphic the element's own
+         * foreground paints — an icon with `fill: currentColor`, which
+         * Chromium resolves to the colour itself — counts as painted too.
+         */
+        const foregroundOf = (element: Element, style: CSSStyleDeclaration): string => {
+          let onText = "";
+          const walk = (node: Element, own: CSSStyleDeclaration): void => {
+            for (const child of Array.from(node.childNodes)) {
+              if (onText !== "") return;
+              if (child.nodeType === 3) {
+                if ((child.nodeValue ?? "").trim() !== "") onText = textColourOf(own);
+                continue;
+              }
+              if (child.nodeType !== 1) continue;
+              const candidate = child as Element;
+              if (skipTags.includes(candidate.tagName.toLowerCase())) continue;
+              if (hidesOwnContent(candidate)) continue;
+              walk(candidate, getComputedStyle(candidate));
+            }
+          };
+          walk(element, style);
+          if (onText !== "") return onText;
+
+          const foreground = textColourOf(style);
+          const colour = parseColour(foreground);
+          if (!colour) return "";
+          const svgs = [
+            ...(element.tagName.toLowerCase() === "svg" ? [element] : []),
+            ...Array.from(element.querySelectorAll("svg")),
+          ].slice(0, maxGraphics);
+          for (const svg of svgs) {
+            if (hidesOwnContent(svg)) continue;
+            // Only shapes paint. The root and groups merely pass an inherited
+            // `fill` down, so `<svg fill="currentColor"><path fill="black">`
+            // paints black, not the element's colour; definitions, clip
+            // paths and masks paint nothing on their own. The first 20
+            // shapes is every icon and no whole chart.
+            const shapes = Array.from(
+              svg.querySelectorAll(
+                "path, circle, rect, ellipse, line, polyline, polygon, text, use"
+              )
+            )
+              .filter(
+                (shape) =>
+                  shape.closest("defs, clipPath, mask, symbol, pattern, marker") === null &&
+                  !hidesOwnContent(shape)
+              )
+              .slice(0, 20);
+            const paintsForeground = shapes.some((node) => {
+              const own = getComputedStyle(node);
+              if (own.display === "none" || own.visibility === "hidden") return false;
+              return [own.getPropertyValue("fill"), own.getPropertyValue("stroke")].some(
+                (value) => {
+                  const paint = parseColour(normaliseColour(value));
+                  return (
+                    paint !== null &&
+                    paint.a > 0 &&
+                    paint.r === colour.r &&
+                    paint.g === colour.g &&
+                    paint.b === colour.b
+                  );
+                }
+              );
+            });
+            if (paintsForeground) return foreground;
+          }
+          return "";
+        };
+
+        const stateStyleOf = (
+          element: Element,
+          style: CSSStyleDeclaration,
+          rect: ReturnType<typeof rectOf>
+        ): RenderingStateStyle => {
+          const behind = backgroundBehind(element);
+
+          // The widest painted side is the indicator one: a 2 px bottom
+          // border that says "current" against three sides of nothing.
+          let widest = 0;
+          let borderColor = "";
+          for (const [widthProperty, styleProperty, colorProperty] of sides) {
+            const width = numberOf(style.getPropertyValue(widthProperty), 0);
+            const drawn = !["none", "hidden", ""].includes(style.getPropertyValue(styleProperty));
+            if (drawn && width > widest) {
+              widest = width;
+              borderColor = normaliseColour(style.getPropertyValue(colorProperty));
+            }
+          }
+
+          const pseudoContent = (which: string): string => {
+            try {
+              const content = getComputedStyle(element, which).content;
+              return content === "none" || content === "normal" ? "" : content;
+            } catch {
+              return "";
+            }
+          };
+
+          const text = visibleText(element);
+          const graphics = graphicsOf(element);
+
+          return {
+            selector: cssPath(element),
+            rect,
+            color: foregroundOf(element, style),
+            background: behind.background,
+            backgroundImage: behind.backgroundImage,
+            borderColor,
+            borderWidths: sides
+              .map(([widthProperty]) => style.getPropertyValue(widthProperty))
+              .join(" "),
+            outline:
+              numberOf(style.outlineWidth, 0) > 0 &&
+              !["none", "hidden", ""].includes(style.outlineStyle),
+            decoration: decorationOf(style),
+            fontWeight: numberOf(style.fontWeight, 400),
+            fontStyle: style.fontStyle,
+            fontFamily: style.fontFamily.slice(0, input.textLimit),
+            fontSize: numberOf(style.fontSize, 0),
+            text: text.slice(0, input.textLimit),
+            textTruncated: text.length > input.textLimit,
+            childElements: element.children.length,
+            graphics: graphics.graphics,
+            graphicsReadable: graphics.readable,
+            pseudoContent: `${pseudoContent("::before")}|${pseudoContent("::after")}`,
+          };
+        };
+
+        for (const element of Array.from(document.querySelectorAll(stateSelector))) {
+          const state = stateOrder.find((candidate) => carries(element, candidate));
+          if (!state) continue;
+          const style = getComputedStyle(element);
+          const rect = rectOf(element);
+          if (!isRenderedBox(element, rect, style)) continue;
+          const sibling = siblingFor(element, state);
+          if (!sibling) continue;
+          if (states.length >= input.maxStates) {
+            statesTruncated = true;
+            break;
+          }
+
+          const role = (element.getAttribute("role") ?? "").trim().toLowerCase();
+          states.push({
+            index: identityOf(element),
+            html: openingTag(element),
+            tag: element.tagName.toLowerCase(),
+            role: role === "" ? null : role,
+            anchored: anchoredOf(element),
+            state,
+            stateValue: (state === "required" ? "" : (element.getAttribute(state) ?? ""))
+              .trim()
+              .slice(0, 40),
+            element: stateStyleOf(element, style, rect),
+            sibling: stateStyleOf(sibling, getComputedStyle(sibling), rectOf(sibling)),
+          });
+        }
+      }
+
       return {
         elements,
         truncated,
@@ -1065,6 +1829,10 @@ export async function measureRendering(
         ...(paintedTruncated ? { paintedTruncated: true } : {}),
         ...(ancestorsTruncated ? { ancestorsTruncated: true } : {}),
         ...(motion ? { motion } : {}),
+        ...(links ? { links } : {}),
+        ...(linksTruncated ? { linksTruncated: true } : {}),
+        ...(states ? { states } : {}),
+        ...(statesTruncated ? { statesTruncated: true } : {}),
       };
     }, args);
 
@@ -1096,6 +1864,8 @@ export function nextMeasurementIdentity(measurement: RenderingMeasurement): numb
     ...(measurement.painted ?? []),
     ...(measurement.motion?.animations ?? []),
     ...(measurement.motion?.elements ?? []),
+    ...(measurement.links ?? []),
+    ...(measurement.states ?? []),
   ];
   for (const entry of seen) next = Math.max(next, entry.index + 1);
   return next;
@@ -1116,6 +1886,8 @@ export function unionCollect(collects: RenderingCollect[]): RenderingCollect {
     if (collect.ancestors) union.ancestors = true;
     if (collect.forcedColors) union.forcedColors = true;
     if (collect.motion) union.motion = true;
+    if (collect.links) union.links = true;
+    if (collect.states) union.states = true;
     for (const rule of collect.axeRules ?? []) axeRules.add(rule);
   }
   if (axeRules.size > 0) union.axeRules = [...axeRules].sort();
