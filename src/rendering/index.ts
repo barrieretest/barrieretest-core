@@ -2,8 +2,8 @@
  * Deterministic rendering checks.
  *
  * `audit(url, { rendering: true })` renders the page under a set of named
- * rendering conditions and runs geometry checks under each. See
- * `docs/plans/rendering-checks.md` for the contract.
+ * rendering conditions and runs geometry checks under each. README:
+ * "Rendering checks".
  */
 
 export type { DeviceViewport, RenderingCapabilities, ViewportSize } from "./capabilities.js";

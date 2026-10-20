@@ -2704,8 +2704,8 @@ describe("lazy content (real audit, real browser)", () => {
 
 /**
  * Rendering pass against real pages in a real browser: the conditions are
- * applied, captured and reverted by Chromium, so the acceptance criteria of
- * `docs/plans/rendering-checks.md` can only be checked here. Fixtures are
+ * applied, captured and reverted by Chromium, so the rendering acceptance
+ * criteria can only be checked here. Fixtures are
  * `file://` pages, one per criterion.
  */
 describe("rendering checks (real audit, real browser)", () => {
