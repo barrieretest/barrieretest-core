@@ -1,10 +1,33 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import * as realAuditModule from "../audit.js";
 import { saveLastRun } from "../baseline/cache.js";
 import { writeBaseline } from "../baseline/write.js";
-import type { Issue } from "../types.js";
+import { getScoreInterpretation } from "../scoring.js";
+import type { AuditOptions, AuditResult, AuditTarget, Issue } from "../types.js";
 import { CLI_COMMANDS, parseArgs, runCli } from "./index.js";
+
+/**
+ * The audit the CLI runs for the next test, set by the forwarding tests at
+ * the bottom of this file. Without one the real audit runs, as it always
+ * has, so no other test in this file is affected.
+ */
+let auditOverride: ((target: AuditTarget, options: AuditOptions) => Promise<AuditResult>) | null =
+  null;
+
+/**
+ * Captured by value before the mock is installed: the namespace object's
+ * `audit` binding is live, and `mock.module` replaces it with the mock below,
+ * so going through the namespace in the fallback would re-enter the mock.
+ */
+const realAudit = realAuditModule.audit;
+
+mock.module("../audit.js", () => ({
+  ...realAuditModule,
+  audit: async (target: AuditTarget, options: AuditOptions = {}) =>
+    auditOverride ? auditOverride(target, options) : realAudit(target, options),
+}));
 
 const TEST_DIR = "/tmp/barrieretest-cli-test";
 const TEST_BASELINE = join(TEST_DIR, "baseline.json");
@@ -205,6 +228,29 @@ describe("parseArgs", () => {
     expect(
       parseArgs(["audit", "https://example.com", "--fail-on-http-error", "--json"]).failOnHttpError
     ).toBe(true);
+  });
+
+  it("parses the proxy flags, with a value each, off by default", () => {
+    expect(parseArgs(["https://example.com"]).proxyServer).toBeUndefined();
+    expect(parseArgs(["https://example.com"]).proxyErrorHeader).toBeUndefined();
+
+    const args = parseArgs([
+      "audit",
+      "https://example.com",
+      "--proxy-server",
+      "http://127.0.0.1:4750",
+      "--proxy-error-header",
+      "X-Smokescreen-Error",
+    ]);
+    expect(args.proxyServer).toBe("http://127.0.0.1:4750");
+    expect(args.proxyErrorHeader).toBe("X-Smokescreen-Error");
+
+    expect(() => parseArgs(["https://example.com", "--proxy-server"])).toThrow(
+      "Flag --proxy-server requires a value"
+    );
+    expect(() => parseArgs(["https://example.com", "--proxy-error-header", "--json"])).toThrow(
+      "Flag --proxy-error-header requires a value"
+    );
   });
 
   it("parses --semantic flag", () => {
@@ -732,6 +778,9 @@ describe("runCli help", () => {
     for (const flag of ["--rendering", "--rendering-conditions", "--rendering-checks"]) {
       expect(help).toContain(flag);
     }
+    for (const flag of ["--proxy-server <url>", "--proxy-error-header <name>"]) {
+      expect(help).toContain(flag);
+    }
     expect(help).toContain("MISTRAL_API_KEY");
     expect(help).toContain("OPENAI_COMPATIBLE_API_KEY");
     expect(help).toContain("OPENAI_COMPATIBLE_BASE_URL");
@@ -805,5 +854,96 @@ describe("runCli baseline:accept", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("No recent audit run found");
+  });
+});
+
+describe("runCli audit forwarding", () => {
+  /** The options the CLI handed to `audit()`, per call. */
+  let auditOptions: AuditOptions[];
+
+  beforeEach(() => {
+    auditOptions = [];
+    auditOverride = async (_target, options) => {
+      auditOptions.push(options);
+      return {
+        url: "https://example.com",
+        documentTitle: "Example",
+        score: 100,
+        severityLevel: getScoreInterpretation(100).level,
+        scoreInterpretation: getScoreInterpretation(100),
+        issues: [],
+        timestamp: new Date(0).toISOString(),
+      };
+    };
+  });
+
+  afterEach(() => {
+    auditOverride = null;
+  });
+
+  it("passes the proxy flags on to the audit", async () => {
+    const result = await runCli(
+      parseArgs([
+        "audit",
+        "https://example.com",
+        "--proxy-server",
+        "http://127.0.0.1:4750",
+        "--proxy-error-header",
+        "X-Smokescreen-Error",
+        "--json",
+      ])
+    );
+
+    expect(result.success).toBe(true);
+    expect(auditOptions).toHaveLength(1);
+    expect(auditOptions[0].browser).toEqual({
+      proxyServer: "http://127.0.0.1:4750",
+      proxyErrorHeader: "X-Smokescreen-Error",
+    });
+  });
+
+  it("keeps an empty --proxy-server, so the audit rejects it instead of running unproxied", async () => {
+    await runCli(parseArgs(["audit", "https://example.com", "--proxy-server", "", "--json"]));
+
+    // The value reaches the launch validation, which fails the run; dropping
+    // it here would launch a browser with no proxy at all.
+    expect(auditOptions[0].browser?.proxyServer).toBe("");
+  });
+
+  it("leaves the audit alone without the flags", async () => {
+    await runCli(parseArgs(["audit", "https://example.com", "--json"]));
+
+    expect(auditOptions[0].browser).toBeUndefined();
+  });
+});
+
+/**
+ * Every test outside the forwarding block relies on the mock falling through
+ * to the audit it captured, so one test exercises that branch. The proxy
+ * value is one core's launch validation rejects before it starts a browser.
+ *
+ * The rejection message is deliberately not pinned: `mock.module` is
+ * process-wide and persists across test files, so in a full-suite run a
+ * sibling CLI test file already owns `../audit.js` when this file loads and
+ * its stub is what the fallback captured. What is asserted either way is that
+ * the fallback does not call the mock again — through the live namespace
+ * binding it did, until the stack ran out.
+ */
+describe("runCli without an audit override", () => {
+  it("falls through to the captured audit instead of re-entering the mock", async () => {
+    const outcome = await runCli(
+      parseArgs([
+        "audit",
+        "https://example.com",
+        "--proxy-server",
+        "http://proxy/,direct://",
+        "--json",
+      ])
+    ).then(
+      () => "the audit answered",
+      (error: unknown) => (error instanceof Error ? error.message : String(error))
+    );
+
+    expect(outcome).not.toContain("Maximum call stack");
   });
 });

@@ -47,7 +47,12 @@ export type {
 } from "./localization/index.js";
 export { localizeIssues } from "./localization/index.js";
 export type { NavigationOutcome } from "./puppeteer-launch.js";
-export { isNavigationHttpError, NavigationHttpError } from "./puppeteer-launch.js";
+export {
+  isNavigationHttpError,
+  isNavigationNetworkError,
+  NavigationHttpError,
+  NavigationNetworkError,
+} from "./puppeteer-launch.js";
 export type {
   ActionableIssue,
   FixReadyIssue,
@@ -154,6 +159,7 @@ export type {
   AuditOptions,
   AuditResult,
   AuditTarget,
+  BrowserLaunchOptions,
   BrowserPage,
   DetailLevel,
   Issue,

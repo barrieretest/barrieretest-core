@@ -13,7 +13,7 @@ import {
   launchPuppeteerSession,
   navigateAndInspect,
 } from "../puppeteer-launch.js";
-import type { Issue, IssueSeverity, NavigationInfo } from "../types.js";
+import type { BrowserLaunchOptions, Issue, IssueSeverity, NavigationInfo } from "../types.js";
 
 export type AxeNodeResult = {
   html: string;
@@ -45,6 +45,11 @@ export type AxeRunnerOptions = {
    * Default false (audit the served page, warn once).
    */
   failOnHttpError?: boolean;
+  /**
+   * Proxy and extra Chromium arguments for a browser this call launches. A
+   * page passed in through `page` keeps the configuration its owner gave it.
+   */
+  browser?: BrowserLaunchOptions;
 };
 
 export type AxeRunResult = {
@@ -403,6 +408,7 @@ export async function runAxeCore(
     page: existingPage,
     loadLazyContent: shouldLoadLazyContent = true,
     failOnHttpError,
+    browser: browserOptions,
   } = options;
 
   let ownsBrowser = false;
@@ -423,7 +429,7 @@ export async function runAxeCore(
       await onProgress?.({ percent: 20, message: "Launching browser" });
       ownsBrowser = true;
 
-      const session = await launchPuppeteerSession({ headless, viewport });
+      const session = await launchPuppeteerSession({ headless, viewport, browser: browserOptions });
       browser = session.browser;
       ownedPage = session.page;
       page = ownedPage;
@@ -438,7 +444,7 @@ export async function runAxeCore(
     const currentUrl = page.url();
     if (!currentUrl || currentUrl === "about:blank" || currentUrl !== url) {
       await onProgress?.({ percent: 30, message: "Loading page" });
-      const outcome = await navigateAndInspect(page, url, { timeout });
+      const outcome = await navigateAndInspect(page, url, { timeout, browser: browserOptions });
       navigation = outcome.navigation;
       // Before the banner, the scroll, axe and the screenshot: with
       // `failOnHttpError` an error page must cost no further work.

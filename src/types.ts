@@ -231,6 +231,51 @@ export interface NavigationInfo {
 }
 
 /**
+ * How core launches the browsers it owns.
+ *
+ * Only launches core performs are affected: a browser page you pass in keeps
+ * the network configuration its owner gave it, because core does not
+ * reconfigure a browser it did not launch.
+ */
+export interface BrowserLaunchOptions {
+  /**
+   * Proxy every request of the launched browser goes through, as
+   * `http://host:port`, `https://host:port` or `socks5://host:port`.
+   *
+   * Loopback is not exempt (`--proxy-bypass-list=<-loopback>`) and WebRTC may
+   * not open direct UDP, so a page cannot reach the host the browser runs on,
+   * or anything else, behind the proxy's back. A main-document navigation
+   * that fails at the network level throws a `NavigationNetworkError`.
+   *
+   * Exactly one proxy endpoint: Chromium reads the value as a list of proxy
+   * rules, so anything beyond a scheme, host and port — a second rule, a
+   * per-scheme rule, credentials, a path, a query, a fragment — is rejected
+   * instead of possibly leaving a direct route open.
+   */
+  proxyServer?: string;
+
+  /**
+   * Response header a filtering proxy sets on its own error answers, e.g.
+   * `X-Smokescreen-Error`. For an `http://` target a proxy answers the
+   * browser with an HTTP response rather than failing the tunnel, which would
+   * otherwise be indistinguishable from the site's own 403: a main-document
+   * response carrying this header throws a `NavigationNetworkError` instead
+   * of being audited, regardless of `failOnHttpError`.
+   */
+  proxyErrorHeader?: string;
+
+  /**
+   * Extra Chromium arguments, appended after core's own. Arguments that would
+   * undo the proxy (`--proxy-server`, `--proxy-bypass-list`,
+   * `--no-proxy-server`, `--proxy-pac-url`, `--proxy-auto-detect`,
+   * `--host-resolver-rules`, `--host-rules`,
+   * `--force-webrtc-ip-handling-policy`) and a bare `--`, which would make
+   * core's own switches positional, are rejected while `proxyServer` is set.
+   */
+  extraArgs?: string[];
+}
+
+/**
  * Options for running an accessibility audit
  */
 export interface AuditOptions {
@@ -319,6 +364,13 @@ export interface AuditOptions {
    * @default false
    */
   failOnHttpError?: boolean;
+
+  /**
+   * Proxy and extra Chromium arguments for the browsers this audit launches
+   * (README: "Running behind an egress proxy"). Without it nothing about
+   * launching changes.
+   */
+  browser?: BrowserLaunchOptions;
 
   /**
    * Progress callback for tracking audit status

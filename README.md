@@ -379,6 +379,7 @@ const pa11yResult = await audit('https://example.com', {
 | `loadLazyContent` | `boolean` | `true` | Scroll the page once before auditing (see [Lazy content](#lazy-content)) |
 | `rendering` | `RenderingOptions \| true` | — | Render the page under named conditions and run geometry checks (see [Rendering checks](#rendering-checks)) |
 | `failOnHttpError` | `boolean` | `false` | Throw instead of auditing a page that answered with HTTP >= 400 (see [Navigation status](#navigation-status)) |
+| `browser` | `{ proxyServer?, proxyErrorHeader?, extraArgs? }` | — | Route every browser the audit launches through an egress proxy (see [Running behind an egress proxy](#running-behind-an-egress-proxy)) |
 | `onProgress` | `function` | — | Progress callback |
 
 Notes:
@@ -453,6 +454,70 @@ Notes:
 - a difference in the fragment alone (`/page#a` to `/page#b`) is not a redirect: the browser requests no new document for it, and `finalUrl` still carries the fragment
 - `isNavigationHttpError` also recognises an error thrown by a second, duplicated copy of the package, where `instanceof` does not hold
 - from the CLI: `--fail-on-http-error` prints the error and exits non-zero
+
+### Running behind an egress proxy
+
+If you audit URLs other people submit, the browser follows redirects and loads iframes, images, scripts and fetches wherever the page points — including `localhost`, your Docker network and the cloud metadata service — and the screenshot, the HTML snippets and the AI context then carry whatever came back. Validating the URL in Node cannot close that: Chrome resolves DNS itself, so a host that answers publicly to your check and privately to Chrome slips through.
+
+Put a filtering egress proxy (for example [Smokescreen](https://github.com/stripe/smokescreen)) in front of it and point `browser.proxyServer` at it. Every browser core launches then reaches the network only through it:
+
+```typescript
+const result = await audit('https://example.com', {
+  browser: {
+    proxyServer: 'http://127.0.0.1:4750',
+    // Smokescreen sets this header on its own error answers.
+    proxyErrorHeader: 'X-Smokescreen-Error',
+  },
+})
+```
+
+Core launches with `--proxy-server=<url>`, `--proxy-bypass-list=<-loopback>` (Chromium exempts `localhost`, `127.0.0.1` and `[::1]` from a proxy by default; this removes that exemption) and `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` (WebRTC would otherwise open direct UDP sockets no HTTP proxy sees). `browser.extraArgs` is appended to that list, and an argument that would undo the proxy (`--proxy-server`, `--proxy-bypass-list`, `--no-proxy-server`, `--proxy-pac-url`, `--proxy-auto-detect`, `--host-resolver-rules`, `--host-rules`, `--force-webrtc-ip-handling-policy`), however it is spelled, or a bare `--`, which would make core's own switches positional, is rejected with an error instead of silently reopening the hole. The same check covers the pa11y engine's `chromeArgs`, and a `proxyServer` that is supplied but empty is rejected rather than treated as "no proxy". `proxyServer` must name a single proxy endpoint as scheme, host and port: Chromium reads the switch value as a list of proxy rules, so a second rule (`http://proxy:4750/,direct://`), a per-scheme rule, credentials, a path, a query or a fragment is rejected, and the value Chromium gets is rebuilt from the parsed scheme and host.
+
+**A browser page you pass in is yours.** Core does not reconfigure a browser it did not launch, so `browser` only applies to the launches core performs: `audit(url)`, the axe engine, the pa11y engine (on top of its `chromeArgs`) and `semanticAudit(url)` (`SemanticOptions.browser`). If you bring your own page, launch its browser with the proxy yourself.
+
+A main-document navigation that fails at the network level, or that the proxy answers itself, throws a `NavigationNetworkError` before anything is done on the page — no axe run, no screenshot, no rendering pass, no AI request:
+
+```typescript
+import { audit, isNavigationNetworkError } from '@barrieretest/core'
+
+try {
+  await audit('https://example.com', { browser: { proxyServer: 'http://127.0.0.1:4750' } })
+} catch (error) {
+  if (isNavigationNetworkError(error)) {
+    error.code           // "NAVIGATION_NETWORK_ERROR" — match this, not the message
+    error.netError       // "ERR_TUNNEL_CONNECTION_FAILED" — null when the proxy answered with HTTP itself
+    error.url            // the URL you asked for
+    error.failedUrl      // set only when the browser blamed a different URL
+    error.retryable      // true for timeouts, resets and an unreachable proxy
+    error.refusedByProxy // set only with a proxy configured: did the proxy refuse the destination?
+    error.proxyStatus    // the status of the proxy's own answer, when it sent one
+  }
+}
+```
+
+What the values mean behind a proxy:
+
+| Situation | `netError` | `proxyStatus` | `refusedByProxy` | `retryable` |
+| --- | --- | --- | --- | --- |
+| `https` destination the proxy refused (it answered `CONNECT` with 407) | `ERR_PROXY_AUTH_UNSUPPORTED` (or `ERR_INVALID_AUTH_CREDENTIALS`) | — | `true` | `false` |
+| `https` tunnel the proxy did not open: it refused the destination with a status the browser cannot see (403, say), or could not reach it — no such host, refused, timed out, tunnel limit (502/504/429/403 on `CONNECT`) | `ERR_TUNNEL_CONNECTION_FAILED` | — | absent | `false` |
+| `http` request the proxy refused (407 with the header) | `null` | `407` | `true` | `false` |
+| `http` request the proxy could not deliver (502 with the header) | `null` | `502` | `false` | `false` |
+| `http` request the proxy declined for now (429 or 504 with the header) | `null` | `429` / `504` | `false` | `true` |
+| proxy not reachable | `ERR_PROXY_CONNECTION_FAILED` | — | `false` | `true` |
+| certificate error at the destination | `ERR_CERT_*` | — | `false` | `false` |
+
+Notes:
+
+- behind a proxy the browser never resolves names itself, so a destination the proxy refused, a hostname that does not exist and a connection the destination refused all arrive as the same tunnel failure for `https` targets. `ERR_NAME_NOT_RESOLVED` and `ERR_CONNECTION_REFUSED` only occur without a proxy, and a typo'd domain is therefore never reported as `refusedByProxy: true`
+- `refusedByProxy` is absent for that tunnel failure, in both directions: nothing behind the tunnel — status, body or header — reaches the browser, and a proxy other than Smokescreen may refuse a `CONNECT` with 403, which looks exactly like a destination it could not reach. With Smokescreen, which refuses with 407, a tunnel failure means the proxy could not reach the destination
+- `refusedByProxy` is absent when no proxy is configured as well — it is never guessed
+- `proxyErrorHeader` matters because for an `http://` target a proxy answers with an HTTP response rather than failing the tunnel: without the header name, the proxy's 407 would be audited as the site's own error page (or reported as the site's status under `failOnHttpError`). A response carrying that header is the proxy's answer, never the site's, so it throws regardless of `failOnHttpError`
+- core never configures proxy authentication, so a proxy demanding it on the tunnel is refusing the destination (or is misconfigured, which the error message says)
+- a navigation timeout is not a network error: the page may well have loaded, so it keeps the driver's timeout error
+- a refused image, script, iframe or fetch does not fail the audit — the page is audited as rendered
+- `isNavigationNetworkError` also recognises an error thrown by a second, duplicated copy of the package, where `instanceof` does not hold
+- from the CLI: `--proxy-server <url>` and `--proxy-error-header <name>`
 
 ### Annotations
 
@@ -772,7 +837,7 @@ console.log(result.meta.checksRun)
 console.log(result.navigation)    // the facts of the navigation this call made
 ```
 
-`semanticAudit(url)` takes `failOnHttpError` as well, so an error page costs no AI request (see [Navigation status](#navigation-status)).
+`semanticAudit(url)` takes `failOnHttpError` as well, so an error page costs no AI request (see [Navigation status](#navigation-status)), and `browser` for the browser it launches itself (see [Running behind an egress proxy](#running-behind-an-egress-proxy)).
 
 Combined with `audit()` so a single browser launch serves both the engine and semantic passes:
 

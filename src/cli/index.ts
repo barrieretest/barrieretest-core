@@ -76,6 +76,8 @@ export interface ParsedArgs {
   html?: string;
   htmlLocale?: HtmlReportLocale;
   failOnHttpError?: boolean;
+  proxyServer?: string;
+  proxyErrorHeader?: string;
   semantic?: boolean;
   semanticProvider?: string;
   semanticModel?: string;
@@ -236,6 +238,12 @@ function parseAuditFlags(args: string[], startIndex: number, result: ParsedArgs)
       i++;
     } else if (arg === "--fail-on-http-error") {
       result.failOnHttpError = true;
+    } else if (arg === "--proxy-server") {
+      result.proxyServer = requireFlagValue(arg, nextArg);
+      i++;
+    } else if (arg === "--proxy-error-header") {
+      result.proxyErrorHeader = requireFlagValue(arg, nextArg);
+      i++;
     } else if (arg === "--semantic") {
       result.semantic = true;
     } else if (arg === "--semantic-provider") {
@@ -615,6 +623,11 @@ Audit options:
   --headless <bool>             Run headless (default: true)
   --fail-on-http-error          Stop with an error when the page answers with an
                                 HTTP status >= 400 instead of auditing it
+  --proxy-server <url>          Route every browser the audit launches through
+                                this proxy, loopback included
+  --proxy-error-header <name>   Response header the proxy sets on its own error
+                                answers (e.g. X-Smokescreen-Error), so its
+                                refusal is not audited as the site's page
 
 Rendering checks (opt-in; any --rendering-* flag enables the pass):
   --rendering                   Render the page under the default conditions and
@@ -702,6 +715,15 @@ async function runAudit(args: ParsedArgs, deps: RunAuditDeps): Promise<CliResult
     semantic: semanticOptions,
     failOnHttpError: args.failOnHttpError,
   };
+
+  // Whether a flag was supplied at all, not whether it has content: an empty
+  // --proxy-server must reach the validation and fail, not launch unproxied.
+  if (args.proxyServer !== undefined || args.proxyErrorHeader !== undefined) {
+    options.browser = {
+      proxyServer: args.proxyServer,
+      proxyErrorHeader: args.proxyErrorHeader,
+    };
+  }
 
   // Any --rendering-* flag enables the pass, like the semantic flags do.
   if (args.rendering || args.renderingConditions || args.renderingChecks) {

@@ -11,7 +11,13 @@
  */
 
 import type { AIProviderName, ModelCapabilities } from "../ai/types.js";
-import type { Issue, IssueSeverity, NavigationInfo, SemanticIssueMeta } from "../types.js";
+import type {
+  BrowserLaunchOptions,
+  Issue,
+  IssueSeverity,
+  NavigationInfo,
+  SemanticIssueMeta,
+} from "../types.js";
 
 export type { SemanticIssueMeta };
 
@@ -253,6 +259,12 @@ export interface SemanticOptions {
    * @default false
    */
   failOnHttpError?: boolean;
+  /**
+   * Proxy and extra Chromium arguments for the browser this pass launches.
+   * Only used when the target is a URL, because only then does this entry
+   * point launch one.
+   */
+  browser?: BrowserLaunchOptions;
   /** Headless browser launch flag (only used when target is a URL). */
   headless?: boolean;
   /** Viewport for screenshot (only used when target is a URL). */

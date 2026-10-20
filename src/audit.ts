@@ -90,6 +90,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
     annotate = true,
     loadLazyContent = true,
     failOnHttpError,
+    browser: browserOptions,
     onProgress,
     detail = "actionable",
     minSeverity,
@@ -154,7 +155,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
       (semanticOptions || renderingEffective || annotationEffective) &&
       engine === "axe"
     ) {
-      ownedSession = await launchPuppeteerSession({ headless, viewport });
+      ownedSession = await launchPuppeteerSession({ headless, viewport, browser: browserOptions });
       page = ownedSession.page;
     }
 
@@ -177,6 +178,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
         page,
         loadLazyContent,
         failOnHttpError,
+        browser: browserOptions,
       });
     } else {
       // pa11y engine — dynamic import so pa11y/puppeteer are optional
@@ -207,6 +209,7 @@ export async function audit(target: AuditTarget, options: AuditOptions = {}): Pr
         page,
         loadLazyContent,
         failOnHttpError,
+        browser: browserOptions,
       });
 
       const filteredIssues = pa11yResult.issues.filter((issue) => !shouldFilterPa11yIssue(issue));

@@ -2,8 +2,8 @@ import type { PuppeteerBrowserLike, PuppeteerPageLike } from "../browser.js";
 import { isPuppeteerPage } from "../browser.js";
 import { dismissCookieBanner } from "../cookie-banner.js";
 import { loadLazyContent } from "../lazy-content.js";
-import { checkNavigationStatus, navigateAndInspect } from "../puppeteer-launch.js";
-import type { NavigationInfo } from "../types.js";
+import { buildLaunchArgs, checkNavigationStatus, navigateAndInspect } from "../puppeteer-launch.js";
+import type { BrowserLaunchOptions, NavigationInfo } from "../types.js";
 
 export type Pa11yIssue = {
   code: string;
@@ -58,8 +58,15 @@ export type Pa11yRunnerOptions = {
   /** Audit timeout in milliseconds. */
   timeout?: number;
 
-  /** Custom Chrome launch arguments. */
+  /** Custom Chrome launch arguments, replacing this engine's defaults. */
   chromeArgs?: string[];
+
+  /**
+   * Proxy and extra Chromium arguments for a browser this call launches,
+   * applied on top of `chromeArgs`. A page passed in through `page` keeps the
+   * configuration its owner gave it.
+   */
+  browser?: BrowserLaunchOptions;
 
   /** Optional progress callback. */
   onProgress?: (data: { percent: number; message: string }) => void | Promise<void>;
@@ -142,6 +149,7 @@ export async function runPa11y(
     page: existingPage,
     loadLazyContent: shouldLoadLazyContent = true,
     failOnHttpError,
+    browser: browserOptions,
   } = options;
 
   let ownsBrowser = false;
@@ -177,7 +185,7 @@ export async function runPa11y(
       const puppeteer = resolvePuppeteerLauncher(puppeteerModule);
       browser = await puppeteer.launch({
         headless,
-        args: chromeArgs,
+        args: buildLaunchArgs(browserOptions, chromeArgs),
       });
       page = await browser.newPage();
       await page.setViewport?.(viewport);
@@ -185,7 +193,7 @@ export async function runPa11y(
 
     await onProgress?.({ percent: 30, message: "Loading page" });
 
-    const outcome = await navigateAndInspect(page, url, { timeout });
+    const outcome = await navigateAndInspect(page, url, { timeout, browser: browserOptions });
     // Before the banner, the scroll, pa11y and the screenshot: with
     // `failOnHttpError` an error page must cost no further work.
     checkNavigationStatus(outcome, { failOnHttpError });

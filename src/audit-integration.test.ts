@@ -21,7 +21,12 @@ import type { BrowserPage } from "./browser.js";
 import { dismissCookieBanner } from "./cookie-banner.js";
 import { renderHtmlReport } from "./html-report/index.js";
 import { loadLazyContent } from "./lazy-content.js";
-import { isNavigationHttpError, type NavigationHttpError } from "./puppeteer-launch.js";
+import {
+  isNavigationHttpError,
+  isNavigationNetworkError,
+  type NavigationHttpError,
+  type NavigationNetworkError,
+} from "./puppeteer-launch.js";
 import { SIMULATED_DEFICIENCIES, simulateDeficiency } from "./rendering/color.js";
 import { MAX_ANIMATIONS, MAX_PAINTED } from "./rendering/measure.js";
 import { settleCondition } from "./rendering/page.js";
@@ -40,6 +45,8 @@ import type { Issue } from "./types.js";
 interface WatchedRun {
   browsers: Browser[];
   counts: { evaluate: number; screenshot: number }[];
+  /** The Chromium argument list of every browser the call launched. */
+  args: string[][];
 }
 
 /** Set while a watched call runs; the launcher below reads it. */
@@ -91,6 +98,7 @@ async function launchInstrumentedChromium(options?: LaunchOptions): Promise<Brow
   const run = watchedLaunches;
   if (run) {
     run.browsers.push(browser);
+    run.args.push([...(options?.args ?? [])]);
     const realNewPage = browser.newPage.bind(browser);
     browser.newPage = async () => {
       const page = await realNewPage();
@@ -111,7 +119,7 @@ const puppeteer = { launch: launchInstrumentedChromium };
 async function watchOwnBrowsers<T>(
   body: () => Promise<T>
 ): Promise<{ result: T; run: WatchedRun }> {
-  const run: WatchedRun = { browsers: [], counts: [] };
+  const run: WatchedRun = { browsers: [], counts: [], args: [] };
   watchedLaunches = run;
   try {
     return { result: await body(), run };
@@ -253,6 +261,9 @@ const realPuppeteerLaunch = {
   // module is mocked, because this file imports the guard.
   isNavigationHttpError: realPuppeteerLaunchModule.isNavigationHttpError,
   NavigationHttpError: realPuppeteerLaunchModule.NavigationHttpError,
+  isNavigationNetworkError: realPuppeteerLaunchModule.isNavigationNetworkError,
+  NavigationNetworkError: realPuppeteerLaunchModule.NavigationNetworkError,
+  buildLaunchArgs: realPuppeteerLaunchModule.buildLaunchArgs,
 };
 
 // Stub puppeteer-launch so audit() doesn't try to launch a real browser
@@ -277,6 +288,9 @@ const puppeteerLaunchStubModule = {
   // module is mocked, because this file imports the guard.
   isNavigationHttpError: realPuppeteerLaunchModule.isNavigationHttpError,
   NavigationHttpError: realPuppeteerLaunchModule.NavigationHttpError,
+  isNavigationNetworkError: realPuppeteerLaunchModule.isNavigationNetworkError,
+  NavigationNetworkError: realPuppeteerLaunchModule.NavigationNetworkError,
+  buildLaunchArgs: realPuppeteerLaunchModule.buildLaunchArgs,
 };
 
 mock.module("./puppeteer-launch.js", () => puppeteerLaunchStubModule);
@@ -5566,5 +5580,490 @@ describe("navigation status (real local server, real browser)", () => {
     // default path would satisfy the assertions above on its own (it warns
     // about the 403 and exits 1 because the page has issues).
     expect(output).not.toContain("Score:");
+  }, 120_000);
+});
+
+// ----- egress proxy (real local proxy, real browser) -----
+
+/**
+ * The proxy option against a real filtering proxy and a real Chromium: that
+ * every launch path routes through it, that loopback is not exempt, and that
+ * a refusal arrives as a `NavigationNetworkError` rather than as an audit of
+ * the proxy's error page.
+ *
+ * The proxy imitates Smokescreen: it tunnels `CONNECT` and forwards plain
+ * HTTP for the hosts it allows, and answers everything else itself with a
+ * status and an `X-Smokescreen-Error` header. Pa11y and the AI provider are
+ * stubbed, because what is under test happens before either of them runs.
+ */
+describe("egress proxy (real local proxy, real browser)", () => {
+  /** Chromium's own default launch arguments for every path core launches. */
+  const DEFAULT_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+  ];
+
+  const PROXY_ARGS = (proxy: string) => [
+    `--proxy-server=${proxy}`,
+    "--proxy-bypass-list=<-loopback>",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+  ];
+
+  const PROXY_ERROR_HEADER = "X-Smokescreen-Error";
+
+  /** Hosts the proxy answers itself, with the status each is mapped to. */
+  const refusals = new Map<string, number>([
+    ["refused-407.example", 407],
+    ["refused-502.example", 502],
+    ["refused-403.example", 403],
+    ["httprefused-407.example", 407],
+    ["httprefused-502.example", 502],
+    ["refused-image.example", 407],
+  ]);
+
+  /** Hosts the proxy connects to for the browser. */
+  const ALLOWED_HOSTS = new Set(["127.0.0.1", "localhost"]);
+
+  let proxyRequests: string[];
+  /** Requests that reached the target server without passing the proxy. */
+  let directHits: string[];
+
+  let targetServer: import("node:http").Server;
+  let proxyServer: import("node:http").Server;
+  let target: string;
+  let proxy: string;
+
+  let providerCalls: number;
+  let pa11yCalls: string[];
+  let realPa11yModule: Record<string, unknown> | undefined;
+
+  const stubProvider = {
+    name: "stub",
+    model: "stub-model",
+    async analyze() {
+      return { contextualAnalysis: "n/a", suggestedFix: "n/a", confidence: 1 };
+    },
+    async analyzeSemantic() {
+      providerCalls += 1;
+      return {
+        content: JSON.stringify({ issues: [], detectedLanguage: "en" }),
+        model: "stub-model",
+      };
+    },
+  };
+
+  const semanticOptions = {
+    provider: { name: "nebius" as const, apiKey: "stub" },
+    checks: ["aria-mismatch"],
+  };
+
+  async function expectNetworkError(promise: Promise<unknown>): Promise<NavigationNetworkError> {
+    let caught: unknown;
+    try {
+      await promise;
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(isNavigationNetworkError(caught)).toBe(true);
+    return caught as NavigationNetworkError;
+  }
+
+  beforeAll(async () => {
+    mock.module("./engines/axe.js", () => realAxe);
+    mock.module("./puppeteer-launch.js", () => realPuppeteerLaunch);
+    mock.module("./ai/index.js", () => ({ ...realAi, createProvider: () => stubProvider }));
+    mock.module("./semantic/runner.js", () => realSemanticRunner);
+    realPa11yModule = { ...(await import("pa11y")) } as Record<string, unknown>;
+    mock.module("pa11y", () => ({
+      default: async (url: string) => {
+        pa11yCalls.push(url);
+        return { issues: [], documentTitle: "Proxied", pageUrl: url };
+      },
+    }));
+
+    const { createServer, request: forwardRequest } = await import("node:http");
+    const { connect: netConnect } = await import("node:net");
+
+    targetServer = createServer((request, response) => {
+      const path = (request.url ?? "/").split("?")[0];
+      // The proxy marks everything it forwards, so anything unmarked reached
+      // this server without going through it.
+      if (request.headers["x-test-proxied"] !== "1") {
+        directHits.push(path);
+      }
+
+      if (path === "/pixel.png") {
+        response.writeHead(200, { "content-type": "image/png" });
+        response.end();
+        return;
+      }
+      if (path === "/frame") {
+        response.writeHead(200, { "content-type": "text/html" });
+        response.end(
+          '<!doctype html><html lang="en"><head><title>Frame</title></head>' +
+            "<body><p>Framed.</p></body></html>"
+        );
+        return;
+      }
+      if (path === "/loopback") {
+        response.writeHead(200, { "content-type": "text/html" });
+        response.end(
+          '<!doctype html><html lang="en"><head><title>Loopback</title></head>' +
+            "<body><main><h1>Loopback</h1>" +
+            `<img src="${target}/pixel.png" alt="A pixel">` +
+            `<iframe src="http://localhost:${new URL(target).port}/frame" title="Framed"></iframe>` +
+            "</main></body></html>"
+        );
+        return;
+      }
+      if (path === "/refused-subresource") {
+        response.writeHead(200, { "content-type": "text/html" });
+        response.end(
+          '<!doctype html><html lang="en"><head><title>Refused image</title></head>' +
+            "<body><main><h1>Refused image</h1>" +
+            '<img src="http://refused-image.example/pixel.png" alt="A pixel">' +
+            "</main></body></html>"
+        );
+        return;
+      }
+
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end(
+        '<!doctype html><html lang="en"><head><title>Proxied</title></head>' +
+          "<body><main><h1>Proxied</h1><p>All good.</p></main></body></html>"
+      );
+    });
+
+    proxyServer = createServer((request, response) => {
+      // A browser that drops a connection must never crash the test process.
+      request.on("error", () => undefined);
+      response.on("error", () => undefined);
+
+      let requested: URL;
+      try {
+        requested = new URL(request.url ?? "");
+      } catch {
+        response.writeHead(400);
+        response.end();
+        return;
+      }
+
+      proxyRequests.push(`http ${requested.host}${requested.pathname}`);
+
+      const refusal = refusals.get(requested.hostname);
+      if (refusal !== undefined || !ALLOWED_HOSTS.has(requested.hostname)) {
+        response.writeHead(refusal ?? 502, {
+          "content-type": "text/html",
+          [PROXY_ERROR_HEADER]: "Request rejected by proxy",
+          ...(refusal === 429 ? { "retry-after": "1" } : {}),
+        });
+        response.end("<!doctype html><title>Denied</title><p>Denied.</p>");
+        return;
+      }
+
+      const headers = { ...request.headers, "x-test-proxied": "1" };
+      delete headers["proxy-connection"];
+      const forwarded = forwardRequest(
+        {
+          host: requested.hostname,
+          port: requested.port || 80,
+          path: `${requested.pathname}${requested.search}`,
+          method: request.method,
+          headers,
+        },
+        (answer) => {
+          response.writeHead(answer.statusCode ?? 502, answer.headers);
+          answer.pipe(response);
+        }
+      );
+      forwarded.on("error", () => {
+        response.writeHead(502, { [PROXY_ERROR_HEADER]: "Connection failed" });
+        response.end();
+      });
+      request.pipe(forwarded);
+    });
+
+    proxyServer.on("connect", (request, socket) => {
+      socket.on("error", () => undefined);
+
+      const [host, port] = (request.url ?? "").split(":");
+      proxyRequests.push(`connect ${request.url}`);
+
+      const refusal = refusals.get(host);
+      if (refusal !== undefined || !ALLOWED_HOSTS.has(host)) {
+        socket.write(
+          `HTTP/1.1 ${refusal ?? 502} Proxy Error\r\n` +
+            `${PROXY_ERROR_HEADER}: Request rejected by proxy\r\n` +
+            "Content-Length: 0\r\n\r\n"
+        );
+        socket.end();
+        return;
+      }
+
+      const upstream = netConnect(Number(port || 443), host, () => {
+        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        upstream.pipe(socket);
+        socket.pipe(upstream);
+      });
+      upstream.on("error", () => {
+        socket.write("HTTP/1.1 502 Proxy Error\r\n\r\n");
+        socket.end();
+      });
+      socket.on("close", () => upstream.destroy());
+    });
+
+    await new Promise<void>((resolve) => {
+      targetServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    await new Promise<void>((resolve) => {
+      proxyServer.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const targetAddress = targetServer.address();
+    const proxyAddress = proxyServer.address();
+    if (!targetAddress || typeof targetAddress === "string") {
+      throw new Error("Target server did not report a port");
+    }
+    if (!proxyAddress || typeof proxyAddress === "string") {
+      throw new Error("Proxy server did not report a port");
+    }
+    target = `http://127.0.0.1:${targetAddress.port}`;
+    proxy = `http://127.0.0.1:${proxyAddress.port}`;
+  }, 120_000);
+
+  afterAll(async () => {
+    try {
+      targetServer?.closeAllConnections?.();
+      proxyServer?.closeAllConnections?.();
+      await new Promise<void>((resolve) => {
+        if (!targetServer) return resolve();
+        targetServer.close(() => resolve());
+      });
+      await new Promise<void>((resolve) => {
+        if (!proxyServer) return resolve();
+        proxyServer.close(() => resolve());
+      });
+    } finally {
+      mock.module("./engines/axe.js", () => axeStubModule);
+      mock.module("./puppeteer-launch.js", () => puppeteerLaunchStubModule);
+      mock.module("./ai/index.js", () => realAi);
+      mock.module("./semantic/runner.js", () => semanticRunnerStubModule);
+      if (realPa11yModule) {
+        mock.module("pa11y", () => realPa11yModule);
+      }
+    }
+  });
+
+  beforeEach(() => {
+    proxyRequests = [];
+    directHits = [];
+    providerCalls = 0;
+    pa11yCalls = [];
+  });
+
+  it("sends loopback subresources through the proxy and nothing to the target directly", async () => {
+    const result = await audit(`${target}/loopback`, { browser: { proxyServer: proxy } });
+
+    expect(result.documentTitle).toBe("Loopback");
+    // The document, the 127.0.0.1 image and the localhost iframe all passed
+    // the proxy: the implicit loopback bypass is gone (invariant 1).
+    expect(proxyRequests).toContain(`http 127.0.0.1:${new URL(target).port}/loopback`);
+    expect(proxyRequests).toContain(`http 127.0.0.1:${new URL(target).port}/pixel.png`);
+    expect(proxyRequests).toContain(`http localhost:${new URL(target).port}/frame`);
+    // And the target saw no request that had not passed the proxy.
+    expect(directHits).toEqual([]);
+  }, 120_000);
+
+  it("audits the page as rendered when a subresource is refused", async () => {
+    const result = await audit(`${target}/refused-subresource`, {
+      browser: { proxyServer: proxy, proxyErrorHeader: PROXY_ERROR_HEADER },
+    });
+
+    // Invariant 6: the image never arrived, the page is still audited.
+    expect(proxyRequests).toContain("http refused-image.example/pixel.png");
+    expect(result.documentTitle).toBe("Refused image");
+    expect(result.score).toBeGreaterThan(0);
+  }, 120_000);
+
+  it("tells a 407 refusal from a tunnel failure, which says nothing either way", async () => {
+    const refused = await expectNetworkError(
+      audit("https://refused-407.example/", { browser: { proxyServer: proxy } })
+    );
+    expect(refused.netError).toBe("ERR_PROXY_AUTH_UNSUPPORTED");
+    expect(refused.refusedByProxy).toBe(true);
+    expect(refused.retryable).toBe(false);
+    expect(refused.url).toBe("https://refused-407.example/");
+    expect(proxyRequests).toContain("connect refused-407.example:443");
+
+    // 502 (the proxy could not reach the destination) and 403 (how a proxy
+    // other than Smokescreen may refuse a CONNECT) are the same net error to
+    // the browser, with no status, body or header behind it: `refusedByProxy`
+    // stays absent for both (A2).
+    for (const host of ["refused-502.example", "refused-403.example"]) {
+      const failed = await expectNetworkError(
+        audit(`https://${host}/`, { browser: { proxyServer: proxy } })
+      );
+      expect(failed.netError).toBe("ERR_TUNNEL_CONNECTION_FAILED");
+      expect(failed.refusedByProxy).toBeUndefined();
+      expect(failed.retryable).toBe(false);
+      expect(proxyRequests).toContain(`connect ${host}:443`);
+    }
+  }, 120_000);
+
+  it("throws on the proxy's own http answer instead of auditing it, without failOnHttpError", async () => {
+    const browser = { proxyServer: proxy, proxyErrorHeader: PROXY_ERROR_HEADER };
+
+    const { result: refused, run } = await watchOwnBrowsers(() =>
+      expectNetworkError(audit("http://httprefused-407.example/", { browser }))
+    );
+    expect(refused.netError).toBeNull();
+    expect(refused.proxyStatus).toBe(407);
+    expect(refused.refusedByProxy).toBe(true);
+    expect(refused.retryable).toBe(false);
+    expect(refused.message).toContain("Request rejected by proxy");
+    // Nothing was done on the proxy's error page, and the session was closed.
+    expectNoWorkAndClosed(run);
+
+    const failed = await expectNetworkError(audit("http://httprefused-502.example/", { browser }));
+    expect(failed.netError).toBeNull();
+    expect(failed.proxyStatus).toBe(502);
+    expect(failed.refusedByProxy).toBe(false);
+    expect(failed.retryable).toBe(false);
+  }, 120_000);
+
+  it("does no work on the fatal path with rendering on, on pa11y, and on semanticAudit(url)", async () => {
+    const browser = { proxyServer: proxy, proxyErrorHeader: PROXY_ERROR_HEADER };
+    const refusedUrl = "http://httprefused-407.example/";
+
+    // The rendering pass is the most work audit() can do after the
+    // navigation, so this is the strongest form of "nothing ran".
+    const { run: renderingRun } = await watchOwnBrowsers(() =>
+      expectNetworkError(audit(refusedUrl, { browser, rendering: true }))
+    );
+    expectNoWorkAndClosed(renderingRun);
+
+    const { run: pa11yRun } = await watchOwnBrowsers(() =>
+      expectNetworkError(audit(refusedUrl, { engine: "pa11y", browser }))
+    );
+    // The engine threw before pa11y itself ran, and closed what it launched.
+    expect(pa11yCalls).toEqual([]);
+    expectNoWorkAndClosed(pa11yRun);
+
+    const { run: semanticRun } = await watchOwnBrowsers(() =>
+      expectNetworkError(
+        realSemanticRunner.runSemanticAuditOnUrl(refusedUrl, { ...semanticOptions, browser })
+      )
+    );
+    // No AI request was paid for the proxy's error answer.
+    expect(providerCalls).toBe(0);
+    expectNoWorkAndClosed(semanticRun);
+  }, 300_000);
+
+  it("reports an unresolvable hostname without a proxy, and an unreachable proxy with one", async () => {
+    const unresolvable = await expectNetworkError(audit("http://does-not-exist.invalid/"));
+    expect(unresolvable.netError).toBe("ERR_NAME_NOT_RESOLVED");
+    expect(unresolvable.retryable).toBe(false);
+    // No proxy was configured, so nothing is claimed about one.
+    expect(unresolvable.refusedByProxy).toBeUndefined();
+
+    const unreachable = await expectNetworkError(
+      audit(`${target}/`, { browser: { proxyServer: "http://127.0.0.1:1" } })
+    );
+    expect(unreachable.netError).toBe("ERR_PROXY_CONNECTION_FAILED");
+    expect(unreachable.retryable).toBe(true);
+    expect(unreachable.refusedByProxy).toBe(false);
+  }, 120_000);
+
+  it("launches every path through the proxy, and keeps today's arguments without the option", async () => {
+    const browser = { proxyServer: proxy };
+    const expected = [...DEFAULT_ARGS, ...PROXY_ARGS(proxy)];
+
+    // 1. The shared session helper.
+    const { run: sessionRun } = await watchOwnBrowsers(async () => {
+      const session = await realPuppeteerLaunch.launchPuppeteerSession({ browser });
+      await realPuppeteerLaunch.closeSession(session);
+    });
+    expect(sessionRun.args).toEqual([expected]);
+
+    // 2. The axe engine's own launch.
+    const { run: axeRun } = await watchOwnBrowsers(() =>
+      realAxe.runAxeCore(`${target}/`, { browser })
+    );
+    expect(axeRun.args).toEqual([expected]);
+
+    // 3. audit()'s own session (annotation keeps the page, so it owns one).
+    const { run: auditRun } = await watchOwnBrowsers(() => audit(`${target}/`, { browser }));
+    expect(auditRun.args).toEqual([expected]);
+
+    // 4. The pa11y engine, whose own base list the proxy arguments extend.
+    const { run: pa11yRun } = await watchOwnBrowsers(() =>
+      audit(`${target}/`, { engine: "pa11y", browser })
+    );
+    expect(pa11yRun.args).toEqual([expected]);
+    expect(pa11yCalls).toEqual([`${target}/`]);
+
+    // 5. The standalone semantic audit.
+    const { run: semanticRun } = await watchOwnBrowsers(() =>
+      realSemanticRunner.runSemanticAuditOnUrl(`${target}/`, { ...semanticOptions, browser })
+    );
+    expect(semanticRun.args).toEqual([expected]);
+    expect(providerCalls).toBe(1);
+
+    // Without the option every one of them launches with exactly the list it
+    // launched with before the option existed (invariant 2).
+    const { run: plainAxeRun } = await watchOwnBrowsers(() => realAxe.runAxeCore(`${target}/`, {}));
+    expect(plainAxeRun.args).toEqual([DEFAULT_ARGS]);
+
+    const { run: plainPa11yRun } = await watchOwnBrowsers(() =>
+      audit(`${target}/`, { engine: "pa11y" })
+    );
+    expect(plainPa11yRun.args).toEqual([DEFAULT_ARGS]);
+  }, 300_000);
+
+  it("rejects a proxy URL and an extra argument that would undo the proxy", async () => {
+    const { run: badUrl } = await watchOwnBrowsers(async () => {
+      await expect(
+        audit(`${target}/`, { browser: { proxyServer: "127.0.0.1:4750" } })
+      ).rejects.toThrow("must be a URL with an explicit scheme");
+    });
+    // No browser was started for either of them.
+    expect(badUrl.browsers).toEqual([]);
+
+    const { run: badArg } = await watchOwnBrowsers(async () => {
+      await expect(
+        audit(`${target}/`, {
+          browser: { proxyServer: proxy, extraArgs: ["--proxy-bypass-list=<local>"] },
+        })
+      ).rejects.toThrow("--proxy-bypass-list=<local>");
+    });
+    expect(badArg.browsers).toEqual([]);
+
+    const { run: emptyProxy } = await watchOwnBrowsers(async () => {
+      await expect(audit(`${target}/`, { browser: { proxyServer: "  " } })).rejects.toThrow(
+        "supplied but empty"
+      );
+    });
+    expect(emptyProxy.browsers).toEqual([]);
+  }, 120_000);
+
+  it("rejects a pa11y chromeArgs list that contradicts the proxy, before any launch", async () => {
+    const { runPa11y } = await import("./engines/pa11y.js");
+
+    const { run } = await watchOwnBrowsers(async () => {
+      await expect(
+        runPa11y(`${target}/`, {
+          chromeArgs: [...DEFAULT_ARGS, "--no-proxy-server"],
+          browser: { proxyServer: proxy },
+        })
+      ).rejects.toThrow("--no-proxy-server");
+    });
+
+    // The engine's own base list is checked too, so no browser started and
+    // pa11y never ran.
+    expect(run.browsers).toEqual([]);
+    expect(pa11yCalls).toEqual([]);
   }, 120_000);
 });

@@ -652,10 +652,14 @@ export async function runSemanticAuditOnUrl(
   const session = await launchPuppeteerSession({
     headless: options.headless,
     viewport: options.viewport,
+    browser: options.browser,
   });
 
   try {
-    const outcome = await navigateAndInspect(session.page, url, { timeout: options.timeout });
+    const outcome = await navigateAndInspect(session.page, url, {
+      timeout: options.timeout,
+      browser: options.browser,
+    });
     // Before the banner, the scroll, the context extraction and the
     // screenshot: with `failOnHttpError` an error page must cost no further
     // work and no AI request.
